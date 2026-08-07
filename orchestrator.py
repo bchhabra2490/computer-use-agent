@@ -21,6 +21,11 @@ Usage:
 
 from __future__ import annotations
 
+# Load .env before any module reads WAKE_* / OPENAI_* defaults.
+from envfile import load_dotenv
+
+load_dotenv()
+
 import argparse
 import json
 import os
@@ -396,7 +401,8 @@ def _supervise_agent(
         if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
             barged = _speak(
                 client,
-                "The computer task is still running. Say Hey Jarvis stop if you want it to adapt.",
+                "The computer task is still running. Say the wake word, then stop, "
+                "if you want it to adapt.",
             )
             if barged:
                 print(f'\n[user] "{barged}" (barge-in)')
@@ -621,7 +627,12 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     ask_bridge = AskUserBridge()
 
     set_and_log("ready", "Orchestrator starting")
-    pending = _speak(client, f"Ready. Say {WAKE_PHRASE}, then tell me what you need.")
+    print(f"[orchestrator] Wake phrase: {WAKE_PHRASE!r} (mode from env / defaults)")
+    # Do not speak the literal wake phrase — speaker echo false-triggers openWakeWord.
+    pending = _speak(
+        client,
+        "Ready. Say the wake word, then tell me what you need.",
+    )
     if pending is None:
         time.sleep(POST_TTS_COOLDOWN)
 

@@ -11,8 +11,8 @@ cd computer-use-agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # then set OPENAI_API_KEY
-set -a && source .env && set +a
+cp .env.example .env          # then set OPENAI_API_KEY (and optional WAKE_*)
+# .env is loaded automatically by orchestrator.py / agent.py
 ```
 
 ### macOS permissions

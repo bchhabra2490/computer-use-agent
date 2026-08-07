@@ -23,6 +23,10 @@ SAFETY NOTES (read before running):
     "Microphone" permissions in macOS System Settings > Privacy & Security.
 """
 
+from envfile import load_dotenv
+
+load_dotenv()
+
 import argparse
 import base64
 import json

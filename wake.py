@@ -196,6 +196,21 @@ def _resolve_model_path(spec: str) -> Path:
     )
 
 
+def text_mentions_wake_phrase(text: str, phrase: str | None = None) -> bool:
+    """True if `text` contains the wake phrase (used to avoid TTS echo false wakes)."""
+    body = (text or "").strip().lower()
+    target = (phrase or WAKE_PHRASE).strip().lower()
+    if not body or not target:
+        return False
+    norm_body = re.sub(r"[^\w\s]", " ", body)
+    norm_body = re.sub(r"\s+", " ", norm_body).strip()
+    norm_phrase = re.sub(r"[^\w\s]", " ", target)
+    norm_phrase = re.sub(r"\s+", " ", norm_phrase).strip()
+    if not norm_phrase:
+        return False
+    return norm_phrase in norm_body
+
+
 def matches_wake_phrase(transcript: str, phrase: str | None = None) -> bool:
     """True if transcript starts with (or equals) the wake phrase."""
     text = (transcript or "").strip().lower()

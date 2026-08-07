@@ -131,10 +131,25 @@ def speak(
     """
     Synthesize and play `text` aloud.
 
-    Returns True if the user interrupted with the Jarvis wake word (barge-in).
+    Returns True if the user interrupted with the wake word (barge-in).
+    Barge-in is auto-disabled when the spoken text contains the wake phrase,
+    so speaker echo cannot false-trigger (e.g. "Say Hey Jarvis…").
     """
     print(f"[tts] {text}")
     enable = BARGE_IN_DEFAULT if barge_in is None else bool(barge_in)
+    if enable:
+        try:
+            from wake import text_mentions_wake_phrase
+
+            if text_mentions_wake_phrase(text):
+                print(
+                    "[tts] barge-in off for this line (contains wake phrase — avoids echo)",
+                    flush=True,
+                )
+                enable = False
+        except Exception:
+            pass
+
     if not enable:
         play_wav(synthesize(client, text, voice=voice))
         return False
@@ -152,6 +167,6 @@ def speak(
         monitor.stop()
 
     if interrupted or monitor.woken.is_set():
-        print("[tts] interrupted by Hey Jarvis", flush=True)
+        print("[tts] interrupted by wake word", flush=True)
         return True
     return False

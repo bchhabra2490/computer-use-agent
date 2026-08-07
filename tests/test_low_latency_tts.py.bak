@@ -1,0 +1,158 @@
+"""Unit tests for low-latency streaming TTS helpers and worker lifecycle."""
+
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+os.environ["TTS_CHUNK_MIN_CHARS"] = "28"
+os.environ["TTS_CHUNK_MAX_CHARS"] = "120"
+os.environ["TTS_WARMUP"] = "0"
+
+from low_latency_tts import (  # noqa: E402
+    LowLatencyTTS,
+    decoded_message_prefix,
+    extract_message_field,
+)
+
+
+def _engine(client: MagicMock | None = None) -> LowLatencyTTS:
+    return LowLatencyTTS(client or MagicMock(), ROOT)
+
+
+class DecodedMessagePrefixTests(unittest.TestCase):
+    def test_empty(self) -> None:
+        self.assertEqual(decoded_message_prefix(""), "")
+        self.assertEqual(decoded_message_prefix("{}"), "")
+
+    def test_partial_message(self) -> None:
+        raw = '{"message":"Hello, how are'
+        self.assertEqual(decoded_message_prefix(raw), "Hello, how are")
+
+    def test_escapes(self) -> None:
+        raw = r'{"message":"Say \"hi\"\nnext'
+        self.assertEqual(decoded_message_prefix(raw), 'Say "hi"\nnext')
+
+    def test_complete_stops_at_closing_quote(self) -> None:
+        raw = '{"message":"Done.","end_session":false}'
+        self.assertEqual(decoded_message_prefix(raw), "Done.")
+
+    def test_extract_complete_json(self) -> None:
+        raw = '{"message":"All set.","end_session":false}'
+        self.assertEqual(extract_message_field(raw), "All set.")
+
+    def test_extract_partial_falls_back(self) -> None:
+        raw = '{"message":"Almost ther'
+        self.assertEqual(extract_message_field(raw), "Almost ther")
+
+
+class ChunkingTests(unittest.TestCase):
+    @patch("low_latency_tts.play_wav")
+    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    def test_streams_monotonic_growth(self, _synth, play) -> None:
+        eng = _engine()
+        try:
+            eng.begin("r1")
+            eng.bind_call("r1", "c1")
+            # Grow like the Responses API (same prefix, more chars).
+            parts = [
+                '{"message":"This is a longer first',
+                '{"message":"This is a longer first sentence. And more text follows here."}',
+            ]
+            for part in parts:
+                eng.feed_arguments("r1", part, call_id="c1")
+            eng.mark_response_ready(
+                "r1",
+                "This is a longer first sentence. And more text follows here.",
+            )
+            self.assertTrue(eng.took_call("c1"))
+            eng.wait_call("c1", timeout=3.0)
+            eng.acknowledge_call("c1")
+            self.assertTrue(play.called)
+        finally:
+            eng.close()
+
+    @patch("low_latency_tts.play_wav")
+    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    def test_abandon_clears_streamed_flag(self, _synth, _play) -> None:
+        eng = _engine()
+        try:
+            eng.begin("r2")
+            eng.bind_call("r2", "c2")
+            eng.feed_arguments(
+                "r2",
+                '{"message":"This is a longer first sentence. And more."}',
+                call_id="c2",
+            )
+            eng.abandon("r2")
+            self.assertFalse(eng.took_call("c2"))
+        finally:
+            eng.close()
+
+    @patch("low_latency_tts.play_wav")
+    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    def test_close_joins_workers(self, _synth, _play) -> None:
+        eng = _engine()
+        eng.close()
+        self.assertFalse(eng._synth_thread.is_alive())
+        self.assertFalse(eng._play_thread.is_alive())
+        eng.close()
+
+    def test_take_chunks_respects_min_chars(self) -> None:
+        eng = _engine()
+        try:
+            from low_latency_tts import _Session
+
+            session = _Session(response_id="x")
+            session.pending = "Too short."
+            self.assertEqual(eng._take_chunks(session, final=False), [])
+            self.assertEqual(session.pending, "Too short.")
+            chunks = eng._take_chunks(session, final=True)
+            self.assertEqual(chunks, ["Too short."])
+            self.assertEqual(session.pending, "")
+        finally:
+            eng.close()
+
+
+class LatencyLogTests(unittest.TestCase):
+    @patch("low_latency_tts.play_wav")
+    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    def test_logs_response_ready_and_first_audio(self, _synth, play) -> None:
+        log_dir = ROOT / ".runtime" / "tts-test"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        eng = LowLatencyTTS(MagicMock(), log_dir)
+        try:
+            if eng.log_path.exists():
+                eng.log_path.unlink()
+            eng.begin("r3")
+            eng.bind_call("r3", "c3")
+            msg = "Hello there, this is enough text for one chunk already!"
+            # Feed growing prefixes
+            for i in range(20, len(msg) + 1, 8):
+                eng.feed_arguments(
+                    "r3",
+                    f'{{"message":"{msg[:i]}',
+                    call_id="c3",
+                )
+            eng.feed_arguments("r3", f'{{"message":"{msg}"}}', call_id="c3")
+            eng.mark_response_ready("r3", msg)
+            interrupted = eng.wait_call("c3", timeout=3.0)
+            self.assertFalse(interrupted)
+            eng.acknowledge_call("c3")
+            self.assertTrue(play.called)
+            text = eng.log_path.read_text(encoding="utf-8")
+            self.assertIn("event=response_ready", text)
+            self.assertIn("event=first_audio_play", text)
+            self.assertIn("delta_seconds=", text)
+        finally:
+            eng.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

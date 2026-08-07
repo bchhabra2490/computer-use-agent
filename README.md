@@ -6,14 +6,13 @@ tool in the Responses API (`gpt-5.6`). Built for macOS; the executor uses
 
 ## Demo
 
-<div align="center">
-  <video width="800" controls playsinline preload="metadata">
-    <source src="Demo1.mov" type="video/quicktime" />
-    <source src="Demo1.mov" type="video/mp4" />
-    Your browser does not support the video tag.
-    <a href="Demo1.mov">Download Demo1.mov</a>
-  </video>
-</div>
+<p align="center">
+  <a href="Demo1.mp4">
+    <img src="Demo1-poster.jpg" alt="Play demo video" width="800" />
+  </a>
+  <br />
+  <a href="Demo1.mp4"><strong>▶ Play demo</strong></a>
+</p>
 
 ## Setup
 

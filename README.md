@@ -7,7 +7,7 @@ tool in the Responses API (`gpt-5.6`). Built for macOS; the executor uses
 ## Setup
 
 ```bash
-cd computer-agent
+cd computer-use-agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -61,10 +61,40 @@ Agent `ask_user` prompts skip the wake word (answer directly).
 ### Direct computer agent (typed task)
 
 ```bash
+# Confirm each mouse/keyboard batch and each shell command
 python agent.py "Open Notes and write today's date at the top"
-python agent.py "..." --auto
+
+# Skip confirms (use carefully)
+python agent.py "Open Safari and go to https://news.ycombinator.com" --auto
 python agent.py "..." --max-steps 25
 ```
+
+**Example tasks**
+
+```bash
+# Desktop / UI
+python agent.py --auto "Open Notes and write today's date at the top"
+python agent.py --auto "Open System Settings and find the Displays pane"
+python agent.py --auto "Open Safari, go to youtube.com, search for AC/DC Thunderstruck, and play the official video"
+
+# Shell via run_terminal (prefer this over driving Terminal.app)
+python agent.py --auto "Using the terminal, show disk free space and the top 5 largest folders in my home directory"
+python agent.py --auto "Check git status in ~/Desktop/projects/computer-use-agent and summarize uncommitted changes"
+python agent.py --auto "Create ~/Desktop/jarvis-demo.txt with the current date and list that folder"
+
+# Mix UI + terminal
+python agent.py --auto "Clone https://github.com/openai/openai-python into ~/Desktop if missing, then open that folder in Finder"
+```
+
+**Voice examples** (after `python orchestrator.py --auto`)
+
+Say **Hey Jarvis**, then something like:
+- “Open Notes and jot today’s date”
+- “What’s my free disk space?” (agent can use `run_terminal`)
+- “Open YouTube and play something by AC/DC”
+- Mid-task: “Hey Jarvis, stop — open Chrome instead”
+- While it’s speaking: “Hey Jarvis” again to barge in, then your new instruction
+- “Goodbye” / “quit” to end the session
 
 ### Skills
 

@@ -7,11 +7,11 @@ tool in the Responses API (`gpt-5.6`). Built for macOS; the executor uses
 ## Demo
 
 <p align="center">
-  <a href="Demo1.mp4">
-    <img src="Demo1-poster.jpg" alt="Play demo video" width="800" />
+  <a href="https://youtu.be/j0y-5g9Z_FU">
+    <img src="https://img.youtube.com/vi/j0y-5g9Z_FU/maxresdefault.jpg" alt="Watch demo on YouTube" width="800" />
   </a>
   <br />
-  <a href="Demo1.mp4"><strong>▶ Play demo</strong></a>
+  <a href="https://youtu.be/j0y-5g9Z_FU"><strong>▶ Watch demo on YouTube</strong></a>
 </p>
 
 ## Setup

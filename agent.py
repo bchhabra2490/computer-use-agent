@@ -44,6 +44,7 @@ from skills import (
 )
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
+from terminal import run_command
 from tts import speak
 from evaluator import (
     EVAL_EVERY,
@@ -159,12 +160,50 @@ READ_UI_TEXT_TOOL = {
     "strict": True,
 }
 
+RUN_TERMINAL_TOOL = {
+    "type": "function",
+    "name": "run_terminal",
+    "description": (
+        "Run a shell command on this Mac and return stdout, stderr, and exit code. "
+        "Prefer this for file/git/CLI work, checking paths, installing packages, or "
+        "anything faster than driving the Terminal GUI. Do not use for interactive "
+        "programs that need a TTY (vim, ssh password prompts, etc.). Avoid "
+        "destructive commands (rm -rf, diskutil erase, etc.) unless the user "
+        "explicitly asked."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "Shell command to execute.",
+            },
+            "cwd": {
+                "type": ["string", "null"],
+                "description": (
+                    "Working directory for the command. Pass null to use the " "agent process current directory."
+                ),
+            },
+            "timeout_seconds": {
+                "type": ["number", "null"],
+                "description": (
+                    "Seconds before the process is killed. Pass null for the " "default (60, or TERMINAL_TIMEOUT)."
+                ),
+            },
+        },
+        "required": ["command", "cwd", "timeout_seconds"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 TOOLS = [
     {"type": "computer"},
     ASK_USER_TOOL,
     LIST_SKILLS_TOOL,
     READ_SKILL_TOOL,
     READ_UI_TEXT_TOOL,
+    RUN_TERMINAL_TOOL,
 ]
 
 
@@ -336,7 +375,110 @@ def _handle_read_ui_text(call, log: TaskLog) -> dict:
     }
 
 
-def _handle_function_call(client: OpenAI, call, log: TaskLog, ask_user_bridge=None) -> dict:
+def _confirm_terminal(
+    command: str,
+    *,
+    client: OpenAI | None = None,
+    voice: bool = False,
+) -> bool:
+    print(f"\nProposed terminal command:\n  $ {command}")
+    if voice and client is not None:
+        speak(
+            client,
+            f"I want to run this terminal command: {command[:180]}. "
+            "Say yes to run it, no to skip, or quit to stop.",
+        )
+        decision = voice_confirm(
+            client,
+            "Should I run this command?",
+            allow_quit=True,
+        )
+        if decision == "quit":
+            print("Stopped by user.")
+            speak(client, "Stopping.")
+            sys.exit(0)
+        return decision == "yes"
+
+    reply = input("Run this command? [y/N/q]: ").strip().lower()
+    if reply == "q":
+        print("Stopped by user.")
+        sys.exit(0)
+    return reply == "y"
+
+
+def _handle_run_terminal(
+    call,
+    log: TaskLog,
+    *,
+    auto: bool,
+    client: OpenAI | None = None,
+    voice: bool = False,
+) -> dict:
+    args = json.loads(call.arguments or "{}")
+    command = (args.get("command") or "").strip()
+    cwd = args.get("cwd")
+    if isinstance(cwd, str):
+        cwd = cwd.strip() or None
+    else:
+        cwd = None
+    timeout_raw = args.get("timeout_seconds")
+    timeout_seconds: float | None
+    if timeout_raw is None:
+        timeout_seconds = None
+    else:
+        try:
+            timeout_seconds = float(timeout_raw)
+        except (TypeError, ValueError):
+            timeout_seconds = None
+
+    if not command:
+        output = "Error: run_terminal requires a command."
+    elif not auto and not _confirm_terminal(command, client=client, voice=voice):
+        output = "User declined to run this command."
+        print("[terminal] skipped by user")
+        log.record(
+            "run_terminal_skipped",
+            command[:120],
+            {"command": command, "cwd": cwd},
+        )
+    else:
+        print(f"[terminal] $ {command}" + (f"  (cwd={cwd})" if cwd else ""))
+        output = run_command(
+            command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+        # Keep console readable; full text goes to the model + log.
+        preview = output if len(output) <= 1200 else output[:1200] + "\n…"
+        print(preview)
+        log.record(
+            "run_terminal",
+            command[:120],
+            {
+                "command": command,
+                "cwd": cwd,
+                "timeout_seconds": timeout_seconds,
+                "output_chars": len(output),
+                "preview": output[:1000],
+            },
+        )
+
+    return {
+        "type": "function_call_output",
+        "call_id": call.call_id,
+        "output": output,
+    }
+
+
+def _handle_function_call(
+    client: OpenAI,
+    call,
+    log: TaskLog,
+    ask_user_bridge=None,
+    *,
+    auto: bool = False,
+    voice: bool = False,
+) -> dict:
     if call.name == "ask_user":
         return _handle_ask_user(client, call, log, ask_user_bridge=ask_user_bridge)
     if call.name == "list_skills":
@@ -345,6 +487,10 @@ def _handle_function_call(client: OpenAI, call, log: TaskLog, ask_user_bridge=No
         return _handle_read_skill(call, log)
     if call.name == "read_ui_text":
         return _handle_read_ui_text(call, log)
+    if call.name == "run_terminal":
+        return _handle_run_terminal(
+            call, log, auto=auto, client=client, voice=voice
+        )
     log.record("unsupported_tool", call.name, {"name": call.name})
     return {
         "type": "function_call_output",
@@ -598,14 +744,16 @@ def run(
                 "1. If a skill matches this task, call read_skill for it (and any "
                 "companion files you need) before using the computer tool.\n"
                 "2. Follow the skill’s steps; adapt to what you see on screen.\n"
-                "3. Use the computer tool for UI actions on this real desktop.\n"
-                "4. Prefer read_ui_text (Accessibility) to read labels/values/menus "
+                "3. Use run_terminal for shell/CLI work (files, git, scripts, "
+                "path checks) when that is faster than the GUI.\n"
+                "4. Use the computer tool for UI actions on this real desktop.\n"
+                "5. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
-                "5. When you need clarification or information only the human knows, "
+                "6. When you need clarification or information only the human knows, "
                 "call ask_user instead of guessing.\n"
-                "6. Before each turn, you may receive new user messages that arrived "
+                "7. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
-                "7. You may periodically receive evaluator coaching — treat it as "
+                "8. You may periodically receive evaluator coaching — treat it as "
                 "advisory guidance and adapt."
             ),
         )
@@ -650,14 +798,17 @@ def run(
             for call in function_calls:
                 tool_outputs.append(
                     _handle_function_call(
-                        client, call, log, ask_user_bridge=ask_user_bridge
+                        client,
+                        call,
+                        log,
+                        ask_user_bridge=ask_user_bridge,
+                        auto=auto,
+                        voice=voice,
                     )
                 )
 
             for call in computer_calls:
-                output = _handle_computer_call(
-                    desktop, call, auto, log, client=client, voice=voice
-                )
+                output = _handle_computer_call(desktop, call, auto, log, client=client, voice=voice)
                 if output is None:
                     log.finish("aborted", "User skipped a computer action batch.")
                     return "aborted"
@@ -675,8 +826,7 @@ def run(
             if mid_turn:
                 next_input.append(_user_input_item(mid_turn))
                 print(
-                    f"[agent] next API input includes ZeroMQ context "
-                    f"(+{len(tool_outputs)} tool output(s))",
+                    f"[agent] next API input includes ZeroMQ context " f"(+{len(tool_outputs)} tool output(s))",
                     flush=True,
                 )
 

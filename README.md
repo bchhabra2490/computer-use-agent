@@ -83,14 +83,17 @@ When a task **completes**, it may propose a new skill (`Y/n` to save).
 - **Ctrl+C** between turns also stops it.
 - Don't run `--auto` unattended on anything touching payments, deleting files,
   sending messages, or credentials — keep the confirmation gate on for those.
-- The model only sees screenshots you send it — it has no other access to your
-  machine.
+- Without `--auto`, computer actions and `run_terminal` commands ask for
+  confirmation before executing.
+- The model can run shell commands via `run_terminal` (stdout/stderr returned).
+  Treat that like giving it a terminal on your machine.
 
 ## Extending it
 
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `wake.py` — local “Hey Jarvis” wake-word detection (openWakeWord).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
+- `terminal.py` — `run_terminal` shell executor (timeout + truncated output).
 - `evaluator.py` — difficulty router + periodic coaching for the computer agent.
 - `accessibility.py` — macOS AX tree → text for `read_ui_text`.
 - `actions.py` — mouse/keyboard executor.

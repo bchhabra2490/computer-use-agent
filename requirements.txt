@@ -1,0 +1,11 @@
+openai[realtime]>=1.50.0
+pyautogui>=0.9.54
+pillow>=10.0.0
+sounddevice>=0.5.0
+numpy>=1.26.0
+pyzmq>=26.0.0
+openwakeword>=0.6.0
+onnxruntime>=1.17.0
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10.0; sys_platform == "darwin"

@@ -4,6 +4,17 @@ Drives your real desktop (mouse, keyboard, screenshots) using OpenAI's `computer
 tool in the Responses API (`gpt-5.6`). Built for macOS; the executor uses
 `pyautogui`, which also works on Windows/Linux with minor tweaks (see below).
 
+## Demo
+
+<div align="center">
+  <video width="800" controls playsinline preload="metadata">
+    <source src="Demo1.mov" type="video/quicktime" />
+    <source src="Demo1.mov" type="video/mp4" />
+    Your browser does not support the video tag.
+    <a href="Demo1.mov">Download Demo1.mov</a>
+  </video>
+</div>
+
 ## Setup
 
 ```bash

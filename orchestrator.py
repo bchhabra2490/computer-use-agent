@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 from typing import Any
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -62,7 +63,20 @@ from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
 from tts import speak
 from wake import WAKE_PHRASE, get_wake_remainder, wait_for_wake
 
+try:
+    from low_latency_tts import LowLatencyTTS, decoded_message_prefix, extract_message_field
+except Exception:  # pragma: no cover - optional at import time
+    LowLatencyTTS = None  # type: ignore[misc, assignment]
+    decoded_message_prefix = None  # type: ignore[misc, assignment]
+    extract_message_field = None  # type: ignore[misc, assignment]
+
 MODEL = os.environ.get("ORCHESTRATOR_MODEL", "gpt-5-mini")
+TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 START_TASK_TOOL = {
     "type": "function",
@@ -204,6 +218,161 @@ def _print_messages(response) -> None:
             for part in item.content:
                 if getattr(part, "type", None) == "output_text":
                     print(f"\n[orchestrator] {part.text}")
+
+
+def _create_response(
+    client: OpenAI,
+    *,
+    llm_tts: Any | None = None,
+    **kwargs: Any,
+):
+    """
+    Create a Responses API turn.
+
+    When streaming TTS is enabled, partial ``give_response_to_user`` message
+    arguments are fed into LowLatencyTTS as they arrive. Falls back to a
+    non-streaming create on error.
+    """
+    use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
+    if not use_stream:
+        return client.responses.create(**kwargs)
+
+    try:
+        stream = client.responses.create(**kwargs, stream=True)
+    except Exception as e:
+        print(f"[orchestrator] stream create failed ({e}); falling back", flush=True)
+        return client.responses.create(**kwargs)
+
+    response_id: str | None = None
+    # item_id -> {name, call_id, arguments}
+    items: dict[str, dict[str, Any]] = {}
+    final_response = None
+    give_response_text = ""
+    streamed_msg_len = 0
+
+    def _is_give_response(meta: dict[str, Any]) -> bool:
+        name = (meta.get("name") or "").strip()
+        if name == "give_response_to_user":
+            return True
+        if name:
+            return False
+        # Name sometimes arrives after the first argument deltas — detect via JSON.
+        if decoded_message_prefix is None:
+            return False
+        return bool(decoded_message_prefix(meta.get("arguments") or ""))
+
+    def _feed_message_growth(meta: dict[str, Any]) -> None:
+        nonlocal streamed_msg_len
+        if response_id is None or decoded_message_prefix is None:
+            return
+        if not _is_give_response(meta):
+            return
+        if meta.get("call_id"):
+            llm_tts.bind_call(response_id, str(meta["call_id"]))
+        decoded = decoded_message_prefix(meta.get("arguments") or "")
+        if len(decoded) > streamed_msg_len:
+            llm_tts.add_text_chunk(decoded[streamed_msg_len:])
+            streamed_msg_len = len(decoded)
+
+    try:
+        for event in stream:
+            etype = getattr(event, "type", None)
+            if etype == "response.created":
+                response_id = event.response.id
+                llm_tts.start_stream(response_id)
+                print(f"[orchestrator] streaming response {response_id}", flush=True)
+            elif etype == "response.output_item.added":
+                item = event.item
+                if getattr(item, "type", None) == "function_call":
+                    items[item.id] = {
+                        "name": getattr(item, "name", "") or "",
+                        "call_id": getattr(item, "call_id", "") or "",
+                        "arguments": getattr(item, "arguments", None) or "",
+                    }
+                    if (
+                        response_id
+                        and items[item.id]["name"] == "give_response_to_user"
+                        and items[item.id]["call_id"]
+                    ):
+                        llm_tts.bind_call(response_id, items[item.id]["call_id"])
+            elif etype == "response.function_call_arguments.delta":
+                meta = items.get(event.item_id)
+                if meta is None:
+                    # Some SDK builds emit deltas before output_item.added — seed a stub.
+                    meta = {"name": "", "call_id": "", "arguments": ""}
+                    items[event.item_id] = meta
+                meta["arguments"] = (meta.get("arguments") or "") + (event.delta or "")
+                # Name / call_id may appear on the delta event itself.
+                for attr in ("name", "call_id"):
+                    val = getattr(event, attr, None)
+                    if val and not meta.get(attr):
+                        meta[attr] = val
+                _feed_message_growth(meta)
+            elif etype == "response.function_call_arguments.done":
+                meta = items.get(event.item_id) or {"name": "", "call_id": "", "arguments": ""}
+                meta["arguments"] = event.arguments or meta.get("arguments") or ""
+                if getattr(event, "name", None):
+                    meta["name"] = event.name
+                if getattr(event, "call_id", None) and not meta.get("call_id"):
+                    meta["call_id"] = event.call_id
+                items[event.item_id] = meta
+                if _is_give_response(meta):
+                    if extract_message_field is not None:
+                        give_response_text = extract_message_field(meta["arguments"])
+                    _feed_message_growth(meta)
+            elif etype == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if item is not None and getattr(item, "type", None) == "function_call":
+                    meta = items.get(item.id) or {"name": "", "call_id": "", "arguments": ""}
+                    if getattr(item, "name", None):
+                        meta["name"] = item.name
+                    if getattr(item, "call_id", None):
+                        meta["call_id"] = item.call_id
+                    if getattr(item, "arguments", None):
+                        meta["arguments"] = item.arguments
+                    items[item.id] = meta
+                    if _is_give_response(meta):
+                        if extract_message_field is not None:
+                            give_response_text = extract_message_field(meta.get("arguments") or "")
+                        _feed_message_growth(meta)
+            elif etype == "response.completed":
+                final_response = event.response
+            elif etype == "response.failed":
+                print(f"[orchestrator] stream failed: {event}", flush=True)
+    except Exception as e:
+        print(f"[orchestrator] stream error ({e}); falling back", flush=True)
+        if response_id and llm_tts is not None:
+            try:
+                # Do not flush partial speech — sync path will speak once.
+                llm_tts.abandon(response_id)
+            except Exception:
+                pass
+        return client.responses.create(**kwargs)
+
+    if final_response is None:
+        print("[orchestrator] stream ended without response.completed; falling back", flush=True)
+        if response_id and llm_tts is not None:
+            try:
+                llm_tts.abandon(response_id)
+            except Exception:
+                pass
+        return client.responses.create(**kwargs)
+
+    if response_id and llm_tts is not None:
+        # Prefer message extracted during stream; else scan final output.
+        if not give_response_text and extract_message_field is not None:
+            for item in final_response.output or []:
+                if getattr(item, "type", None) == "function_call" and item.name == "give_response_to_user":
+                    give_response_text = extract_message_field(item.arguments or "")
+                    if getattr(item, "call_id", None):
+                        llm_tts.bind_call(response_id, item.call_id)
+                    break
+        if give_response_text and len(give_response_text) > streamed_msg_len:
+            llm_tts.add_text_chunk(give_response_text[streamed_msg_len:])
+            streamed_msg_len = len(give_response_text)
+        llm_tts.stop_stream()
+
+    return final_response
 
 
 def _start_agent_thread(
@@ -444,6 +613,7 @@ def _handle_tool(
     task_history: list[dict[str, str]],
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
+    llm_tts: Any | None = None,
 ) -> tuple[dict | None, bool, AgentJob | None]:
     """
     Execute one tool call.
@@ -465,7 +635,19 @@ def _handle_tool(
         if end_session and not farewell:
             print("[orchestrator] ignoring end_session=true (not a farewell) — will listen again")
             end_session = False
-        if message:
+
+        already_streamed = bool(
+            llm_tts is not None and getattr(call, "call_id", None) and llm_tts.took_call(call.call_id)
+        )
+        if message and already_streamed:
+            # Playback may still be draining — wait, do not speak again.
+            print("[orchestrator] give_response already streaming via low-latency TTS", flush=True)
+            set_state("speaking", message[:100])
+            llm_tts.wait_call(call.call_id)
+            llm_tts.acknowledge_call(call.call_id)
+            time.sleep(0.15)
+            output = f"Spoke to user. end_session={end_session}"
+        elif message:
             barge = _speak(client, message)
             if barge:
                 end_session = False
@@ -533,6 +715,7 @@ def _process_response(
     task_history: list[dict[str, str]],
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
+    llm_tts: Any | None = None,
 ) -> tuple[Any, bool]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -558,6 +741,7 @@ def _process_response(
                 task_history=task_history,
                 publisher=publisher,
                 ask_bridge=ask_bridge,
+                llm_tts=llm_tts,
             )
             end_session = end_session or stop
             if job is not None:
@@ -595,7 +779,9 @@ def _process_response(
         if not outputs:
             return response, end_session
 
-        response = client.responses.create(
+        response = _create_response(
+            client,
+            llm_tts=llm_tts,
             model=MODEL,
             tools=TOOLS,
             previous_response_id=response.id,
@@ -621,6 +807,15 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pass
 
     client = OpenAI()
+    llm_tts = None
+    if TTS_STREAM and LowLatencyTTS is not None:
+        try:
+            llm_tts = LowLatencyTTS(client, Path(__file__).resolve().parent)
+            print("[orchestrator] low-latency TTS workers started", flush=True)
+        except Exception as e:
+            print(f"[orchestrator] low-latency TTS init failed ({e}); sync TTS only", flush=True)
+            llm_tts = None
+
     skills = format_skill_catalog()
     system = SYSTEM_PROMPT.format(skills=skills)
     publisher = AgentMessagePublisher()
@@ -682,14 +877,18 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             )
 
             if previous_id is None:
-                response = client.responses.create(
+                response = _create_response(
+                    client,
+                    llm_tts=llm_tts,
                     model=MODEL,
                     tools=TOOLS,
                     instructions=system,
                     input=history_note,
                 )
             else:
-                response = client.responses.create(
+                response = _create_response(
+                    client,
+                    llm_tts=llm_tts,
                     model=MODEL,
                     tools=TOOLS,
                     instructions=system,
@@ -705,6 +904,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 task_history=task_history,
                 publisher=publisher,
                 ask_bridge=ask_bridge,
+                llm_tts=llm_tts,
             )
             previous_id = response.id
 
@@ -722,6 +922,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             set_state("ready", "Waiting for next request")
             time.sleep(POST_TTS_COOLDOWN)
     finally:
+        if llm_tts is not None:
+            try:
+                llm_tts.close()
+            except Exception as e:
+                print(f"[orchestrator] TTS shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()
         set_state("idle", "Orchestrator stopped")

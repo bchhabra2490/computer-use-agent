@@ -46,9 +46,19 @@ then transcribes your request and lets an LLM choose tools:
 
 Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: wake word,
 then the instruction. While Jarvis is speaking, say the wake word again to
-interrupt TTS and give a new command (`TTS_BARGE_IN=0` to disable;
+interrupt TTS and give a new command (`TTS_BARGE_IN=1` to enable; off by default
+because an open mic during speech causes speaker hiss on many Macs;
 `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers).
 Agent `ask_user` prompts skip the wake word (answer directly).
+
+**Low-latency TTS** (default on): the orchestrator streams Responses API
+partial `give_response_to_user` arguments into `low_latency_tts.py`, which
+chunks text and overlaps synthesis with playback (afplay on macOS — not
+PortAudio). Markers go to `tts_latency.log` (`response_ready`,
+`first_audio_play`, and their delta). Tune with `TTS_STREAM`,
+`TTS_CHUNK_MIN_CHARS`, `TTS_CHUNK_MAX_CHARS`, `TTS_WARMUP`. Set `TTS_STREAM=0`
+for the older synchronous `speak()` path (still used as fallback and for
+barge-in-capable lines).
 
 ### Wake word (any phrase)
 

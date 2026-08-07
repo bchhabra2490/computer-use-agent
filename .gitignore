@@ -7,3 +7,4 @@ __pycache__/
 .env
 models/wake/
 .DS_Store
+tts_latency.log

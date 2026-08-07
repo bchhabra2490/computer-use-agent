@@ -11,7 +11,8 @@ cd computer-use-agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-export OPENAI_API_KEY=sk-...
+cp .env.example .env          # then set OPENAI_API_KEY
+set -a && source .env && set +a
 ```
 
 ### macOS permissions
@@ -34,7 +35,7 @@ python orchestrator.py --auto          # computer agent skips per-step confirms
 python agent.py --voice --auto         # same entry via agent.py
 ```
 
-The orchestrator waits for the wake phrase **Hey Jarvis** (local openWakeWord),
+The orchestrator waits for a wake phrase (local openWakeWord by default),
 then transcribes your request and lets an LLM choose tools:
 
 | Tool | Role |
@@ -43,11 +44,87 @@ then transcribes your request and lets an LLM choose tools:
 | `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
 | `give_response_to_user` | Speak a reply (set `end_session` to stop) |
 
-Say “Hey Jarvis” then “goodbye” / “quit” to stop. Mid-task updates: wake word,
-then the instruction. While Jarvis is speaking, say “Hey Jarvis” again to
+Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: wake word,
+then the instruction. While Jarvis is speaking, say the wake word again to
 interrupt TTS and give a new command (`TTS_BARGE_IN=0` to disable;
 `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers).
 Agent `ask_user` prompts skip the wake word (answer directly).
+
+### Wake word (any phrase)
+
+**Default (offline model):** `Hey Jarvis` via openWakeWord.
+
+```bash
+# Other pretrained models
+WAKE_MODEL=alexa WAKE_PHRASE=Alexa python orchestrator.py
+WAKE_MODEL=hey_mycroft WAKE_PHRASE="Hey Mycroft" python orchestrator.py
+
+# Your own trained ONNX (see “Custom wake ONNX” below)
+WAKE_MODEL=~/models/hey_bob.onnx WAKE_PHRASE="Hey Bob" python orchestrator.py
+
+# Any phrase without training — matches via STT (uses API; no barge-in)
+WAKE_MODE=phrase WAKE_PHRASE="Okay Computer" python orchestrator.py
+```
+
+Pretrained aliases: `hey_jarvis`, `alexa`, `hey_mycroft`, `hey_rhasspy`, `timer`,
+`weather`. Tune sensitivity with `WAKE_THRESHOLD` / `WAKE_BARGE_THRESHOLD`.
+
+#### Custom wake ONNX
+
+A custom wake word needs a **trained** openWakeWord `.onnx` — setting `WAKE_PHRASE`
+alone does not create one.
+
+**Easiest: Google Colab (official)**
+
+1. Open the [openWakeWord custom training Colab](https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb?usp=sharing).
+2. Enter your wake phrase (e.g. `hey bob`).
+3. Run the notebook — it synthesizes samples and trains a model (often under an hour).
+4. Download the resulting `.onnx` file.
+
+**Use it here**
+
+```bash
+WAKE_MODE=model \
+WAKE_MODEL=/path/to/hey_bob.onnx \
+WAKE_PHRASE="Hey Bob" \
+python orchestrator.py
+```
+
+Or put the file under `models/wake/` and refer to it by name:
+
+```bash
+WAKE_MODEL=hey_bob.onnx WAKE_PHRASE="Hey Bob" python orchestrator.py
+```
+
+**Other training options**
+
+- [livekit-wakeword](https://github.com/livekit/livekit-wakeword) — local CLI
+  (`generate` → `augment` → `train` → `export`) from a YAML config; can export
+  openWakeWord-compatible ONNX/TFLite.
+- [openwakeword.com](https://openwakeword.com/) — hosted training; download the
+  ONNX when finished.
+- Community Docker trainers if you want GPU training without Colab.
+
+**Tips**
+
+- Short, distinctive 2–3 word phrases work best (`hey nova`, `okay atlas`).
+- Shared feature models (`melspectrogram.onnx`, `embedding_model.onnx`) live in
+  `models/wake/` and download automatically.
+- For “any phrase” with **no** training, use `WAKE_MODE=phrase` (API-based; no ONNX).
+- Upstream docs: [openWakeWord — Training New Models](https://github.com/dscripka/openWakeWord#training-new-models).
+
+### Menu-bar status (macOS)
+
+A small **menu-bar icon** starts with the orchestrator or agent:
+
+- **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
+- **Click** — in-progress computer agents, recent logs, **Quit Orchestrator**,
+  open latest `logs/` run folder, quit the icon
+
+```bash
+python status_tray.py          # run the icon alone (optional)
+STATUS_TRAY=0 python orchestrator.py   # disable auto-start
+```
 
 **Models (cost-aware defaults)**
 - Orchestrator: `gpt-5-mini` (`ORCHESTRATOR_MODEL`)
@@ -56,7 +133,8 @@ Agent `ask_user` prompts skip the wake word (answer directly).
 - N-step coach: every `EVAL_EVERY` turns (default 5) via `EVAL_MODEL=gpt-5-mini`
 - STT: OpenAI Realtime `gpt-live-transcribe` (`STT_MODEL`); sends after
   `STT_IDLE_SECONDS` (default 3s) with no new transcribed words
-- Wake models download once into `models/wake/` (`WAKE_THRESHOLD` tweaks sensitivity)
+- Wake models download once into `models/wake/` (`WAKE_MODEL`, `WAKE_PHRASE`,
+  `WAKE_MODE=model|phrase`, `WAKE_THRESHOLD`)
 
 ### Direct computer agent (typed task)
 
@@ -104,7 +182,8 @@ catalog and loads full instructions with `read_skill`. Starter skills:
 `open-app`, `web-search`, `hn-comments`.
 
 Every computer-agent run writes a step log under `logs/<timestamp>_<task>/`.
-When a task **completes**, it may propose a new skill (`Y/n` to save).
+When a task **completes**, reusable workflows are saved automatically as skills
+(`SKILL_AUTO_SAVE=0` to require confirmation again).
 
 ## Safety
 
@@ -121,7 +200,8 @@ When a task **completes**, it may propose a new skill (`Y/n` to save).
 ## Extending it
 
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
-- `wake.py` — local “Hey Jarvis” wake-word detection (openWakeWord).
+- `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
+- `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).
 - `evaluator.py` — difficulty router + periodic coaching for the computer agent.

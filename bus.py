@@ -183,34 +183,44 @@ class AskUserBridge:
 def strip_wake_prefix(utterance: str) -> str:
     """
     Remove a leading wake phrase from a transcript if STT captured it.
-    Examples: 'Hey Jarvis open chrome' → 'open chrome'; 'Jarvis, stop' → 'stop'
+    Uses the configured WAKE_PHRASE (any phrase), not hard-coded Jarvis.
     """
-    text = (utterance or "").strip()
-    if not text:
-        return ""
-    match = re.match(
-        r"^(?:hey\s+)?jarvis\b[\s,:\-]*(.*)$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return text
-    return match.group(1).strip()
+    try:
+        from wake import WAKE_PHRASE, strip_wake_phrase
+
+        return strip_wake_phrase(utterance, WAKE_PHRASE)
+    except Exception:
+        # Fallback if wake module unavailable.
+        text = (utterance or "").strip()
+        if not text:
+            return ""
+        match = re.match(
+            r"^(?:hey\s+)?jarvis\b[\s,:\-]*(.*)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return text
+        return match.group(1).strip()
 
 
 def extract_jarvis_command(utterance: str) -> str | None:
     """
-    Return the command after a leading 'Jarvis' wake word, or None if absent.
-    Examples: 'Jarvis stop' → 'stop'; 'jarvis, open chrome' → 'open chrome'
+    Return the command after a leading wake phrase, or None if absent.
+    Kept for compatibility; prefers configured WAKE_PHRASE.
     """
     text = (utterance or "").strip()
     if not text:
         return None
-    match = re.match(
-        r"^(?:hey\s+)?jarvis\b[\s,:\-]*(.*)$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
+    stripped = strip_wake_prefix(text)
+    if stripped == text:
+        # No wake prefix detected.
+        try:
+            from wake import matches_wake_phrase
+
+            if matches_wake_phrase(text):
+                return ""
+        except Exception:
+            pass
         return None
-    return match.group(1).strip()
+    return stripped

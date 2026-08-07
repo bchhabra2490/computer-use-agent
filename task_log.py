@@ -87,6 +87,15 @@ class TaskLog:
 
         self._write_meta()
         print(f"[log] #{self._step_n} {kind}: {summary}")
+        try:
+            from app_status import log as status_log
+            from app_status import set_state
+
+            status_log(f"[{kind}] {summary[:160]}")
+            if kind in {"start", "computer_actions", "run_terminal", "ask_user", "message"}:
+                set_state("agent", summary[:100], task=self.task, log_dir=str(self.dir))
+        except Exception:
+            pass
 
     def finish(self, status: str, note: str = "") -> None:
         self.status = status
@@ -97,6 +106,17 @@ class TaskLog:
             if note:
                 f.write(f"\n{note}\n")
         print(f"[log] finished ({status}) → {self.dir}")
+        try:
+            from app_status import set_and_log
+
+            set_and_log(
+                "done" if status == "completed" else status,
+                f"Agent finished ({status})",
+                task=self.task,
+                log_dir=str(self.dir),
+            )
+        except Exception:
+            pass
 
     def steps_for_prompt(self, max_chars: int = 12_000) -> str:
         """Compact transcript for skill-proposal prompts."""

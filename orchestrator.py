@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -33,6 +34,17 @@ from typing import Any
 from openai import OpenAI
 
 import agent as computer_agent
+from app_status import log as status_log
+from app_status import (
+    quit_requested,
+    register_orchestrator,
+    remove_agent,
+    request_quit,
+    set_and_log,
+    set_state,
+    unregister_orchestrator,
+    upsert_agent,
+)
 from bus import (
     AgentMessageInbox,
     AgentMessagePublisher,
@@ -40,9 +52,10 @@ from bus import (
     strip_wake_prefix,
 )
 from skills import format_skill_catalog
+from status_tray import ensure_tray_running
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
 from tts import speak
-from wake import WAKE_PHRASE, wait_for_wake
+from wake import WAKE_PHRASE, get_wake_remainder, wait_for_wake
 
 MODEL = os.environ.get("ORCHESTRATOR_MODEL", "gpt-5-mini")
 
@@ -195,6 +208,13 @@ def _start_agent_thread(
     max_steps: int,
     ask_bridge: AskUserBridge,
 ) -> None:
+    upsert_agent(
+        job.call_id,
+        task=job.task,
+        kind="computer-agent",
+        status="running",
+    )
+
     def _target() -> None:
         inbox = AgentMessageInbox()
         try:
@@ -205,11 +225,13 @@ def _start_agent_thread(
                 voice=False,
                 message_inbox=inbox,
                 ask_user_bridge=ask_bridge,
+                status_agent_id=job.call_id,
             )
         except BaseException as e:  # noqa: BLE001 — capture for main thread
             job.error = e
             job.result = f"failed\nError: {e}"
         finally:
+            remove_agent(job.call_id)
             job.done.set()
 
     job.thread = threading.Thread(
@@ -255,7 +277,10 @@ def _speak(client: OpenAI, text: str) -> str | None:
     """
     if not text:
         return None
+    set_state("speaking", text[:100])
+    status_log(f"[tts] {text[:160]}")
     if speak(client, text):
+        set_state("listening", "barge-in")
         return _listen_after_barge(client)
     return None
 
@@ -268,11 +293,13 @@ def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     qid = req["id"]
     question = req["question"]
     print(f"\n[orchestrator] agent ask_user: {question}")
+    set_and_log("ask", f"Agent asks: {question[:160]}")
     try:
         answer = ask_user(client, question)
     except Exception as e:
         answer = f"Error capturing answer: {e}"
         print(f"[orchestrator] ask_user failed: {e}")
+    status_log(f"[ask_user] answer: {answer[:160]}")
     ask_bridge.reply(qid, answer)
     return True
 
@@ -285,8 +312,26 @@ def _listen_command(
     listen_prompt: str | None = None,
 ) -> str | None:
     """Wake word → one cloud STT utterance. Returns None if stopped or empty."""
-    if not wait_for_wake(should_stop=should_stop, prompt=wake_prompt):
+    set_state("waiting", wake_prompt or f"Waiting for '{WAKE_PHRASE}'")
+
+    def _stop() -> bool:
+        if quit_requested():
+            return True
+        if should_stop is not None:
+            try:
+                return bool(should_stop())
+            except Exception:
+                return True
+        return False
+
+    if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
         return None
+    if quit_requested():
+        return None
+    set_and_log("listening", "Wake word heard — listening")
+    remainder = get_wake_remainder()
+    if remainder:
+        return strip_wake_prefix(remainder).strip() or remainder
     time.sleep(0.15)
     try:
         utterance = listen_for_utterance(
@@ -326,20 +371,27 @@ def _supervise_agent(
         f"[orchestrator] agent running — say '{WAKE_PHRASE}' then an update; "
         "agent questions are spoken here automatically."
     )
+    set_and_log("agent", f"Computer agent running: {job.task[:120]}", task=job.task)
     while not job.done.is_set():
+        if quit_requested():
+            print("[orchestrator] quit requested — leaving agent supervision")
+            break
         if _service_agent_ask(client, ask_bridge):
             continue
 
         command = _listen_command(
             client,
-            should_stop=lambda: job.done.is_set() or ask_bridge.has_pending(),
+            should_stop=lambda: job.done.is_set() or ask_bridge.has_pending() or quit_requested(),
             wake_prompt=f"Waiting for '{WAKE_PHRASE}'… (agent busy)",
             listen_prompt="Listening for mid-task update…",
         )
+        if quit_requested():
+            break
         if command is None:
             continue
 
         print(f'\n[user] "{command}"')
+        status_log(f'[user] "{command}"')
         low = command.lower().strip()
         if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
             barged = _speak(
@@ -348,6 +400,7 @@ def _supervise_agent(
             )
             if barged:
                 print(f'\n[user] "{barged}" (barge-in)')
+                status_log(f'[user] "{barged}" (barge-in)')
                 try:
                     publisher.send(barged)
                     print(f"[orchestrator] forwarded to agent: {barged!r}")
@@ -362,6 +415,7 @@ def _supervise_agent(
         try:
             publisher.send(command)
             print(f"[orchestrator] forwarded to agent: {command!r}")
+            status_log(f"[bus] → agent: {command[:120]}")
         except Exception as e:
             print(f"[orchestrator] bus send failed: {e}")
 
@@ -371,6 +425,7 @@ def _supervise_agent(
 
     if job.thread is not None:
         job.thread.join(timeout=5.0)
+    set_and_log("ready", "Computer agent finished")
     return job.result or "failed\nError: no result from agent"
 
 
@@ -443,6 +498,7 @@ def _handle_tool(
             else:
                 time.sleep(POST_TTS_COOLDOWN)
                 print(f"\n[orchestrator] start_task: {task}")
+                set_and_log("agent", f"Starting task: {task[:120]}", task=task)
                 job = AgentJob(task=task, call_id=call.call_id)
                 _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
                 # Defer function_call_output until the agent thread finishes.
@@ -545,12 +601,26 @@ def _process_response(
 
 
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
+    ensure_tray_running()
+    register_orchestrator()
+
+    def _on_term(_signum=None, _frame=None) -> None:
+        request_quit()
+        print("\n[orchestrator] stop signal — shutting down…", flush=True)
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except Exception:
+        pass
+
     client = OpenAI()
     skills = format_skill_catalog()
     system = SYSTEM_PROMPT.format(skills=skills)
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
 
+    set_and_log("ready", "Orchestrator starting")
     pending = _speak(client, f"Ready. Say {WAKE_PHRASE}, then tell me what you need.")
     if pending is None:
         time.sleep(POST_TTS_COOLDOWN)
@@ -560,19 +630,31 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
 
     try:
         while True:
+            if quit_requested():
+                print("[orchestrator] quit requested from menu bar.")
+                set_and_log("done", "Quit from menu bar")
+                return
+
             if pending is not None:
                 utterance = pending
                 pending = None
                 print(f'\n[user] "{utterance}" (from barge-in)')
+                status_log(f'[user] "{utterance}" (barge-in)')
             else:
                 utterance = _listen_command(
                     client,
+                    should_stop=quit_requested,
                     wake_prompt=f"Waiting for '{WAKE_PHRASE}'…",
                     listen_prompt="Listening…",
                 )
+                if quit_requested():
+                    print("[orchestrator] quit requested from menu bar.")
+                    set_and_log("done", "Quit from menu bar")
+                    return
                 if utterance is None:
                     continue
                 print(f'\n[user] "{utterance}"')
+                status_log(f'[user] "{utterance}"')
 
             low = utterance.lower().strip()
             if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
@@ -580,8 +662,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if barged:
                     pending = barged
                     continue
+                set_and_log("done", "Session ended")
                 return
 
+            set_state("thinking", utterance[:100])
             history_note = (
                 f"User said: {utterance}\n\n" f"Computer task history so far:\n{_format_task_history(task_history)}"
             )
@@ -613,14 +697,23 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             )
             previous_id = response.id
 
+            if quit_requested():
+                print("[orchestrator] quit requested from menu bar.")
+                set_and_log("done", "Quit from menu bar")
+                return
+
             if end_session:
                 print("[orchestrator] session ended.")
+                set_and_log("done", "Session ended")
                 return
 
             print("[orchestrator] ready for next task.")
+            set_state("ready", "Waiting for next request")
             time.sleep(POST_TTS_COOLDOWN)
     finally:
         publisher.close()
+        unregister_orchestrator()
+        set_state("idle", "Orchestrator stopped")
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -29,11 +29,26 @@ import json
 import os
 import re
 import sys
+import uuid
 
 from openai import OpenAI
 
 from actions import DesktopController, format_display_context, list_monitors
 from accessibility import read_ui_text
+from app_status import (
+    register_agent_process,
+    remove_agent,
+    set_and_log,
+    unregister_agent_process,
+    upsert_agent,
+)
+from evaluator import (
+    EVAL_EVERY,
+    EVAL_MODEL,
+    coach_agent,
+    resolve_agent_model,
+    screenshot_b64_from_computer_output,
+)
 from skills import (
     discover_skills,
     format_skill_catalog,
@@ -42,17 +57,11 @@ from skills import (
     read_skill_file,
     write_skill,
 )
+from status_tray import ensure_tray_running
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
 from tts import speak
-from evaluator import (
-    EVAL_EVERY,
-    EVAL_MODEL,
-    coach_agent,
-    resolve_agent_model,
-    screenshot_b64_from_computer_output,
-)
 
 # Manual override only — leave unset to let the difficulty router choose.
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
@@ -550,7 +559,7 @@ def _extract_json_object(text: str) -> dict | None:
 
 
 def maybe_create_skill(client: OpenAI, log: TaskLog, *, voice: bool = False) -> None:
-    """After a successful run, propose a reusable skill from the task log."""
+    """After a successful run, propose a reusable skill and save it automatically."""
     existing = format_skill_catalog()
     prompt = f"""You review a completed desktop computer-use task and decide whether to
 save a new reusable skill for future runs.
@@ -617,23 +626,31 @@ Respond with JSON only (no markdown fences):
         print(f"[skills] {name!r} already exists; skipping create.")
         return
 
+    auto_save = os.environ.get("SKILL_AUTO_SAVE", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     print(f"\nProposed new skill: {name}")
     print(f"  {description}")
-    if voice:
-        speak(
-            client,
-            f"I can save a new skill called {name}. {description} " "Say yes to save it, or no to skip.",
-        )
-        decision = voice_confirm(client, "Save this skill?")
-        approved = decision == "yes"
-    else:
-        reply = input("Save this skill? [Y/n]: ").strip().lower()
-        approved = reply in ("", "y", "yes")
 
-    if not approved:
-        print("[skills] not saved.")
-        log.record("skill_create", "declined_by_user", {"name": name})
-        return
+    if not auto_save:
+        if voice:
+            speak(
+                client,
+                f"I can save a new skill called {name}. {description} "
+                "Say yes to save it, or no to skip.",
+            )
+            decision = voice_confirm(client, "Save this skill?")
+            approved = decision == "yes"
+        else:
+            reply = input("Save this skill? [Y/n]: ").strip().lower()
+            approved = reply in ("", "y", "yes")
+        if not approved:
+            print("[skills] not saved.")
+            log.record("skill_create", "declined_by_user", {"name": name})
+            return
 
     try:
         path = write_skill(name, description, body)
@@ -656,6 +673,7 @@ def run(
     voice: bool = False,
     message_inbox=None,
     ask_user_bridge=None,
+    status_agent_id: str | None = None,
 ) -> str:
     """Run the computer-use loop. Returns a status string for the orchestrator.
 
@@ -663,10 +681,25 @@ def run(
     directives are drained at the start of each turn and injected into context.
     If `ask_user_bridge` is provided, ask_user is routed through the orchestrator
     (main-thread TTS/STT) instead of capturing the mic from this worker thread.
+    `status_agent_id` ties this run to the menu-bar "In Progress" list.
     """
     client = OpenAI()
+    ensure_tray_running()
+    standalone = ask_user_bridge is None and message_inbox is None
+    if standalone:
+        register_agent_process()
+
     desktop = DesktopController()
     log = TaskLog(task)
+    agent_id = (status_agent_id or "").strip() or f"agent-{uuid.uuid4().hex[:8]}"
+    upsert_agent(
+        agent_id,
+        task=task,
+        kind="computer-agent",
+        status="running",
+        log_dir=str(log.dir),
+    )
+    set_and_log("agent", f"Starting: {task[:120]}", task=task, log_dir=str(log.dir))
 
     monitors = list_monitors()
     primary = next((m for m in monitors if m["main"]), monitors[0])
@@ -862,6 +895,9 @@ def run(
         log.finish("error", str(e))
         raise
     finally:
+        remove_agent(agent_id)
+        if standalone:
+            unregister_agent_process()
         if message_inbox is not None:
             try:
                 message_inbox.close()

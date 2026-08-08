@@ -14,6 +14,9 @@ Playback goes through :func:`tts.play_wav` (afplay on macOS by default) so we do
 not open a PortAudio output stream during speech — that path caused speaker hiss
 in this project. Set ``TTS_PLAYER=sounddevice`` only if you accept that trade-off.
 
+When ``TTS_BARGE_IN`` is on (default), playback shares the process-wide
+persistent wake monitor so ``Hey Jarvis`` can interrupt at any time.
+
 Latency markers (``chunk_available``, ``first_audio_play``) are appended to
 ``tts_latency.log`` in the project root.
 """
@@ -32,7 +35,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from tts import TTS_VOICE, play_wav, synthesize
+from tts import BARGE_IN_DEFAULT, TTS_VOICE, play_wav, synthesize
 
 # Lower defaults = sooner first audio; still large enough for natural clauses.
 _MIN_CHARS = int(os.environ.get("TTS_CHUNK_MIN_CHARS", "20"))
@@ -153,12 +156,44 @@ class LowLatencyTTS:
         )
         self._synth_thread.start()
         self._play_thread.start()
+        self._barge_in = BARGE_IN_DEFAULT
         self._log(
             "engine_initialized",
-            detail=f"warmup={int(_WARMUP)} min_chars={_MIN_CHARS} max_chars={_MAX_CHARS}",
+            detail=(
+                f"warmup={int(_WARMUP)} min_chars={_MIN_CHARS} max_chars={_MAX_CHARS} "
+                f"barge_in={int(self._barge_in)}"
+            ),
         )
         if _WARMUP:
             threading.Thread(target=self._warm, name="tts-warmup", daemon=True).start()
+
+    def _wake_interrupt_event(self):
+        """Reuse the process-wide persistent wake monitor (never stop it here)."""
+        if not self._barge_in:
+            return None
+        try:
+            from wake import ensure_persistent_wake
+
+            monitor = ensure_persistent_wake()
+            return None if monitor is None else monitor.woken
+        except Exception as exc:
+            self._log("barge_in_unavailable", detail=repr(exc))
+            return None
+
+    def _interrupt_session(self, response_id: str) -> None:
+        """Stop remaining synthesis/playback after a wake-word barge-in."""
+        with self._lock:
+            session = self._sessions.get(response_id)
+            if session is None:
+                return
+            session.interrupted = True
+            session.final_seen = True
+            session.pending = ""
+            if session.outstanding == 0:
+                session.done.set()
+            if self._active_response_id == response_id:
+                self._active_response_id = None
+        self._log("response_interrupted", response_id=response_id)
 
     def _log(self, event: str, *, response_id: str = "-", detail: str = "") -> None:
         line = (
@@ -419,8 +454,15 @@ class LowLatencyTTS:
                             detail=detail,
                         )
                     print(f"[tts] {text}", flush=True)
+                    interrupt_event = self._wake_interrupt_event()
                     # afplay / configured player — avoid PortAudio TTS by default.
-                    play_wav(audio)
+                    interrupted = bool(
+                        play_wav(audio, interrupt_event=interrupt_event)
+                        or (interrupt_event is not None and interrupt_event.is_set())
+                    )
+                    if interrupted:
+                        print("[tts] streaming interrupted by wake word", flush=True)
+                        self._interrupt_session(response_id)
                 except Exception as exc:
                     self._log(
                         "playback_error",
@@ -440,7 +482,6 @@ class LowLatencyTTS:
             session.outstanding = max(0, session.outstanding - 1)
             if session.final_seen and session.outstanding == 0:
                 session.done.set()
-
     def wait(self, response_id: str, timeout: float | None = None) -> bool:
         with self._lock:
             session = self._sessions.get(response_id)

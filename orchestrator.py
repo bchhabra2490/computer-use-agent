@@ -61,7 +61,14 @@ from skills import format_skill_catalog
 from status_tray import ensure_tray_running
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
 from tts import speak
-from wake import WAKE_PHRASE, get_wake_remainder, wait_for_wake
+from wake import (
+    WAKE_PHRASE,
+    ensure_persistent_wake,
+    format_wake_phrases,
+    get_wake_remainder,
+    stop_persistent_wake,
+    wait_for_wake,
+)
 
 try:
     from low_latency_tts import LowLatencyTTS, decoded_message_prefix, extract_message_field
@@ -85,7 +92,7 @@ START_TASK_TOOL = {
         "Start the computer-use agent to control the real desktop (mouse, "
         "keyboard, screenshots) for a concrete UI task. Use when the user wants "
         "something done on screen that you cannot answer with speech alone. "
-        "The agent runs in the background; say 'Hey Jarvis' then an instruction "
+        "The agent runs in the background; say the wake word then an instruction "
         "to send mid-task updates."
     ),
     "parameters": {
@@ -486,7 +493,7 @@ def _listen_command(
     listen_prompt: str | None = None,
 ) -> str | None:
     """Wake word → one cloud STT utterance. Returns None if stopped or empty."""
-    set_state("waiting", wake_prompt or f"Waiting for '{WAKE_PHRASE}'")
+    set_state("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
 
     def _stop() -> bool:
         if quit_requested():
@@ -542,7 +549,7 @@ def _supervise_agent(
     Services agent ask_user; mid-task directives require the Jarvis wake word.
     """
     print(
-        f"[orchestrator] agent running — say '{WAKE_PHRASE}' then an update; "
+        f"[orchestrator] agent running — say {format_wake_phrases()} then an update; "
         "agent questions are spoken here automatically."
     )
     set_and_log("agent", f"Computer agent running: {job.task[:120]}", task=job.task)
@@ -556,7 +563,7 @@ def _supervise_agent(
         command = _listen_command(
             client,
             should_stop=lambda: job.done.is_set() or ask_bridge.has_pending() or quit_requested(),
-            wake_prompt=f"Waiting for '{WAKE_PHRASE}'… (agent busy)",
+            wake_prompt=f"Waiting for {format_wake_phrases()}… (agent busy)",
             listen_prompt="Listening for mid-task update…",
         )
         if quit_requested():
@@ -643,10 +650,25 @@ def _handle_tool(
             # Playback may still be draining — wait, do not speak again.
             print("[orchestrator] give_response already streaming via low-latency TTS", flush=True)
             set_state("speaking", message[:100])
-            llm_tts.wait_call(call.call_id)
+            interrupted = bool(llm_tts.wait_call(call.call_id))
             llm_tts.acknowledge_call(call.call_id)
-            time.sleep(0.15)
-            output = f"Spoke to user. end_session={end_session}"
+            if interrupted:
+                end_session = False
+                set_state("listening", "barge-in")
+                barge = _listen_after_barge(client)
+                if barge:
+                    output = (
+                        f"Speech interrupted by wake word. User then said: {barge}. "
+                        "Act on that instruction next (do not assume the spoken reply finished)."
+                    )
+                else:
+                    output = (
+                        "Speech interrupted by wake word but no follow-up command was heard. "
+                        "Ask briefly what they need, or wait for the next wake."
+                    )
+            else:
+                time.sleep(0.15)
+                output = f"Spoke to user. end_session={end_session}"
         elif message:
             barge = _speak(client, message)
             if barge:
@@ -822,7 +844,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     ask_bridge = AskUserBridge()
 
     set_and_log("ready", "Orchestrator starting")
-    print(f"[orchestrator] Wake phrase: {WAKE_PHRASE!r} (mode from env / defaults)")
+    print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
+    # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
+    if ensure_persistent_wake() is not None:
+        print("[orchestrator] persistent wake barge-in armed", flush=True)
     # Do not speak the literal wake phrase — speaker echo false-triggers openWakeWord.
     pending = _speak(
         client,
@@ -850,7 +875,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 utterance = _listen_command(
                     client,
                     should_stop=quit_requested,
-                    wake_prompt=f"Waiting for '{WAKE_PHRASE}'…",
+                    wake_prompt=f"Waiting for {format_wake_phrases()}…",
                     listen_prompt="Listening…",
                 )
                 if quit_requested():
@@ -927,6 +952,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 llm_tts.close()
             except Exception as e:
                 print(f"[orchestrator] TTS shutdown error: {e}", flush=True)
+        try:
+            stop_persistent_wake()
+        except Exception:
+            pass
         publisher.close()
         unregister_orchestrator()
         set_state("idle", "Orchestrator stopped")

@@ -183,12 +183,12 @@ class AskUserBridge:
 def strip_wake_prefix(utterance: str) -> str:
     """
     Remove a leading wake phrase from a transcript if STT captured it.
-    Uses the configured WAKE_PHRASE (any phrase), not hard-coded Jarvis.
+    Uses configured WAKE_PHRASES (comma-separated), not a hard-coded Jarvis.
     """
     try:
-        from wake import WAKE_PHRASE, strip_wake_phrase
+        from wake import strip_wake_phrase
 
-        return strip_wake_phrase(utterance, WAKE_PHRASE)
+        return strip_wake_phrase(utterance)
     except Exception:
         # Fallback if wake module unavailable.
         text = (utterance or "").strip()

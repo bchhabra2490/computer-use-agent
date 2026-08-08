@@ -1,10 +1,10 @@
 """
 Speech-to-text for dictating tasks and answering spoken questions.
 
-Captures from the mic at the device native rate, applies a local fan/noise
-filter, then streams PCM to OpenAI Realtime transcription
-(`gpt-live-transcribe` by default). Commits when no new transcribed words
-arrive for STT_IDLE_SECONDS (default 3s).
+Providers (STT_PROVIDER):
+  - openai — stream mic PCM to OpenAI Realtime (`gpt-live-transcribe` by default);
+    ends after STT_IDLE_SECONDS with no new transcribed words.
+  - sarvam — record locally until silence, then Sarvam Saaras (`saaras:v3`) file STT.
 """
 
 from __future__ import annotations
@@ -34,7 +34,9 @@ CHANNELS = 1
 # Saved clips use the same rate we send to the API.
 SAMPLE_RATE = REALTIME_RATE
 
-# Live Realtime transcription model.
+# openai | sarvam
+STT_PROVIDER = os.environ.get("STT_PROVIDER", "openai").strip().lower()
+# Live Realtime transcription model (OpenAI path).
 TRANSCRIBE_MODEL = os.environ.get("STT_MODEL", "gpt-live-transcribe")
 # Optional file re-transcribe / judge (not used by default listen_once).
 REFINE_MODEL = os.environ.get("STT_REFINE_MODEL", "gpt-4o-transcribe")
@@ -46,6 +48,7 @@ MIC_DEVICE = os.environ.get("MIC_DEVICE") or None
 
 SILENCE_SECONDS = 3.0
 # End utterance when transcription produces no new text for this long (not mic energy).
+# Sarvam path uses the same value as post-speech silence before uploading the clip.
 TRANSCRIPT_IDLE_SECONDS = float(os.environ.get("STT_IDLE_SECONDS", str(SILENCE_SECONDS)))
 CONFIRM_RECORD_SECONDS = 2.5
 POST_TTS_COOLDOWN = 1.0
@@ -447,6 +450,10 @@ def _print_live(text: str) -> None:
     sys.stdout.flush()
 
 
+def _use_sarvam() -> bool:
+    return STT_PROVIDER in {"sarvam", "saaras", "sarvamai"}
+
+
 def listen_realtime(
     client: OpenAI,
     *,
@@ -455,11 +462,81 @@ def listen_realtime(
     max_wait_for_speech: float | None = None,
 ) -> tuple[str, bytes]:
     """
-    Stream mic audio to OpenAI Realtime transcription.
-    Ends when no new transcribed words arrive for TRANSCRIPT_IDLE_SECONDS
-    (default 3s) — not based on mic energy / VAD (background fan is noisy).
-    Returns (transcript, wav_bytes of the filtered audio we sent).
+    Capture one utterance and return (transcript, wav_bytes).
+
+    OpenAI: stream to Realtime transcription; end after idle with no new words.
+    Sarvam: record until silence, then Saaras file STT.
     """
+    # Persistent wake owns the mic for barge-in — release it for STT.
+    try:
+        from wake import pause_persistent_wake, resume_persistent_wake
+    except Exception:
+        pause_persistent_wake = None  # type: ignore[assignment]
+        resume_persistent_wake = None  # type: ignore[assignment]
+
+    if pause_persistent_wake is not None:
+        pause_persistent_wake()
+    try:
+        if _use_sarvam():
+            return _listen_sarvam(
+                prompt=prompt,
+                mode=mode,
+                max_wait_for_speech=max_wait_for_speech,
+            )
+        return _listen_realtime_body(
+            client,
+            prompt=prompt,
+            mode=mode,
+            max_wait_for_speech=max_wait_for_speech,
+        )
+    finally:
+        if resume_persistent_wake is not None:
+            resume_persistent_wake()
+
+
+def _listen_sarvam(
+    *,
+    prompt: str | None = None,
+    mode: str = "freeform",
+    max_wait_for_speech: float | None = None,
+) -> tuple[str, bytes]:
+    """Record until pause, then transcribe with Sarvam Saaras (REST ≤ ~30s)."""
+    from sarvam_stt import SARVAM_MAX_SECONDS, SARVAM_STT_MODEL, transcribe_wav
+
+    idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
+    wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
+    max_secs = min(MAX_RECORD_SECONDS, SARVAM_MAX_SECONDS)
+    default_prompt = (
+        f"Listening for yes/no… (sends after {idle:g}s silence → Sarvam)"
+        if mode == "confirm"
+        else f"Listening… (sends after {idle:g}s silence → Sarvam {SARVAM_STT_MODEL})"
+    )
+
+    wav = record_until_silence(
+        silence_seconds=idle,
+        speech_peak=SPEECH_PEAK,
+        max_wait_for_speech=wait_limit,
+        max_record_seconds=max_secs,
+        prompt=prompt or default_prompt,
+        require_speech=True,
+    )
+    try:
+        text = transcribe_wav(wav)
+    except Exception as e:
+        raise NoSpeechError(f"Sarvam STT failed: {e}") from e
+    text = (text or "").strip()
+    if not text:
+        raise NoSpeechError("Transcription came back empty — try speaking again.")
+    return text, wav
+
+
+def _listen_realtime_body(
+    client: OpenAI,
+    *,
+    prompt: str | None = None,
+    mode: str = "freeform",
+    max_wait_for_speech: float | None = None,
+) -> tuple[str, bytes]:
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     _prepare_mic()
     capture_rate = _capture_sample_rate()
@@ -730,9 +807,19 @@ record_until_enter = record_until_silence
 
 
 def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str | None = None) -> str:
-    """One-shot file transcription via OpenAI audio API (fallback / tools)."""
+    """One-shot file transcription (OpenAI audio API or Sarvam Saaras)."""
     if not wav_bytes:
         raise NoSpeechError("No audio to transcribe.")
+
+    model_name = (model or "").strip()
+    if _use_sarvam() or model_name.startswith("saaras:"):
+        from sarvam_stt import transcribe_wav
+
+        text = transcribe_wav(wav_bytes, model=model_name or None)
+        if not text:
+            raise NoSpeechError("Transcription came back empty — try speaking again.")
+        return text
+
     client = client or OpenAI()
     model = model or REFINE_MODEL
     bio = io.BytesIO(wav_bytes)
@@ -880,13 +967,20 @@ def listen_once(
     announce_retries: bool = True,
     max_wait_for_speech: float | None = None,
 ) -> str:
-    """Live Realtime STT; sends after TRANSCRIPT_IDLE_SECONDS with no new words."""
+    """Capture one utterance via the configured STT provider (OpenAI or Sarvam)."""
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
-    default_prompt = (
-        f"Say yes or no now… (sends after {idle:g}s without new words)"
-        if mode == "confirm"
-        else f"Listening… (sends after {idle:g}s without new words)"
-    )
+    if _use_sarvam():
+        default_prompt = (
+            f"Say yes or no now… (sends after {idle:g}s silence)"
+            if mode == "confirm"
+            else f"Listening… (sends after {idle:g}s silence)"
+        )
+    else:
+        default_prompt = (
+            f"Say yes or no now… (sends after {idle:g}s without new words)"
+            if mode == "confirm"
+            else f"Listening… (sends after {idle:g}s without new words)"
+        )
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         wav: bytes | None = None

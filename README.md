@@ -56,9 +56,10 @@ then transcribes your request and lets an LLM choose tools:
 
 Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: wake word,
 then the instruction. While Jarvis is speaking, say the wake word again to
-interrupt TTS and give a new command (`TTS_BARGE_IN=1` to enable; off by default
-because an open mic during speech causes speaker hiss on many Macs;
-`WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers).
+interrupt TTS and give a new command (`TTS_BARGE_IN=1` by default). Wake barge-in
+is armed **before** the ready TTS and stays on for the whole session (paused only
+while STT owns the mic). Set `TTS_BARGE_IN=0` if an open mic during speech causes
+hiss; `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers.
 Agent `ask_user` prompts skip the wake word (answer directly).
 
 **Low-latency TTS** (default on): the orchestrator streams Responses API
@@ -70,9 +71,14 @@ PortAudio). Markers go to `tts_latency.log` (`response_ready`,
 for the older synchronous `speak()` path (still used as fallback and for
 barge-in-capable lines).
 
+`TTS_PROVIDER=openai` (default) uses `gpt-4o-mini-tts`. `TTS_PROVIDER=sarvam`
+streams Bulbul audio (`SARVAM_TTS_MODEL=bulbul:v3`, voice `shubh`; needs
+`SARVAM_API_KEY`) through the same clause pipeline.
+
 ### Wake word (any phrase)
 
-**Default (offline model):** `Hey Jarvis` via openWakeWord.
+**Default (offline model):** `Hey Jarvis` or `Jarvis` via openWakeWord
+(`WAKE_PHRASE=Hey Jarvis,Jarvis`). Comma-separate multiple spoken forms.
 
 ```bash
 # Other pretrained models
@@ -82,12 +88,15 @@ WAKE_MODEL=hey_mycroft WAKE_PHRASE="Hey Mycroft" python orchestrator.py
 # Your own trained ONNX (see “Custom wake ONNX” below)
 WAKE_MODEL=~/models/hey_bob.onnx WAKE_PHRASE="Hey Bob" python orchestrator.py
 
-# Any phrase without training — matches via STT (uses API; no barge-in)
-WAKE_MODE=phrase WAKE_PHRASE="Okay Computer" python orchestrator.py
+# Any phrases without training — matches via STT (uses API; no barge-in)
+WAKE_MODE=phrase WAKE_PHRASE="Okay Computer,Computer" python orchestrator.py
 ```
 
 Pretrained aliases: `hey_jarvis`, `alexa`, `hey_mycroft`, `hey_rhasspy`, `timer`,
 `weather`. Tune sensitivity with `WAKE_THRESHOLD` / `WAKE_BARGE_THRESHOLD`.
+Note: the stock `hey_jarvis` ONNX is trained on the full “Hey Jarvis”; short
+“Jarvis” is accepted for STT stripping and phrase-mode. For offline acoustic
+detection of short forms, add a custom `.onnx` to `WAKE_MODEL`.
 
 #### Custom wake ONNX
 
@@ -151,8 +160,10 @@ STATUS_TRAY=0 python orchestrator.py   # disable auto-start
 - Computer agent: difficulty router picks `gpt-5.6-luna` / `gpt-5.6-terra` /
   `gpt-5.6` (`AGENT_ROUTE=1`; set `AGENT_MODEL` to force one model)
 - N-step coach: every `EVAL_EVERY` turns (default 5) via `EVAL_MODEL=gpt-5-mini`
-- STT: OpenAI Realtime `gpt-live-transcribe` (`STT_MODEL`); sends after
-  `STT_IDLE_SECONDS` (default 3s) with no new transcribed words
+- STT: `STT_PROVIDER=openai` (default) uses Realtime `gpt-live-transcribe`
+  (`STT_MODEL`); ends after `STT_IDLE_SECONDS` with no new words.
+  `STT_PROVIDER=sarvam` records until silence then Sarvam Saaras
+  (`SARVAM_STT_MODEL=saaras:v3`, needs `SARVAM_API_KEY`)
 - Wake models download once into `models/wake/` (`WAKE_MODEL`, `WAKE_PHRASE`,
   `WAKE_MODE=model|phrase`, `WAKE_THRESHOLD`)
 
@@ -229,6 +240,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks.
 - `task_log.py` — per-run logs under `logs/`.
-- `stt.py` / `tts.py` — speech in/out.
+- `stt.py` / `sarvam_stt.py` / `tts.py` / `sarvam_tts.py` — speech in/out
+  (OpenAI or Sarvam).
 - **Windows/Linux**: `pyautogui` is cross-platform; check display scaling vs the
   Retina handling in `DesktopController`.

@@ -1,12 +1,13 @@
 """
-Text-to-speech for agent prompts via OpenAI audio.speech + local playback.
+Text-to-speech for agent prompts via OpenAI or Sarvam + local playback.
 
-Uses gpt-4o-mini-tts with a deep male voice and steerable delivery aimed at a
-calm, Jarvis-like desktop assistant (natural speech, not robotic).
+Providers (TTS_PROVIDER):
+  - openai — gpt-4o-mini-tts (default voice onyx) with steerable delivery
+  - sarvam — Bulbul streaming TTS (default bulbul:v3 / shubh)
 
 Playback on macOS uses `afplay` (system audio path) to avoid PortAudio duplex
-crackle. Optional wake-word barge-in opens the mic during speech — that can
-cause speaker hiss on some Macs, so it defaults OFF (TTS_BARGE_IN=1 to enable).
+crackle. Wake-word barge-in ("Hey Jarvis") is on by default for sync and
+streaming TTS; set TTS_BARGE_IN=0 if an open mic during speech causes hiss.
 """
 
 from __future__ import annotations
@@ -25,9 +26,11 @@ from openai import OpenAI
 # numpy / sounddevice are loaded lazily so afplay-only paths (and streaming TTS
 # workers) do not import PortAudio at module import time.
 
+# openai | sarvam
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
+
 TTS_MODEL = "gpt-4o-mini-tts"
 TTS_FALLBACK_MODEL = "tts-1-hd"
-TTS_VOICE = "onyx"
 TTS_FALLBACK_VOICE = "onyx"
 TTS_INSTRUCTIONS = (
     "Voice: adult male, warm and human, slightly British, like a composed "
@@ -36,9 +39,18 @@ TTS_INSTRUCTIONS = (
     "moderate pace. Keep confirmations brief and polite."
 )
 
-# Default OFF — opening the wake mic while speakers play causes hiss/crackle on
-# many Macs. Set TTS_BARGE_IN=1 to interrupt speech with the wake word.
-BARGE_IN_DEFAULT = os.environ.get("TTS_BARGE_IN", "0").strip().lower() in {
+if TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}:
+    TTS_VOICE = (
+        os.environ.get("TTS_VOICE")
+        or os.environ.get("SARVAM_TTS_VOICE")
+        or "shubh"
+    ).strip().lower() or "shubh"
+else:
+    TTS_VOICE = (os.environ.get("TTS_VOICE") or "onyx").strip() or "onyx"
+
+# Default ON — interrupt sync/streaming TTS with the wake word.
+# Set TTS_BARGE_IN=0 if an open mic during speech causes speaker hiss.
+BARGE_IN_DEFAULT = os.environ.get("TTS_BARGE_IN", "1").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -50,6 +62,10 @@ _TTS_PLAYER = (
     (os.environ.get("TTS_PLAYER") or ("afplay" if sys.platform == "darwin" else "sounddevice")).strip().lower()
 )
 _FADE_MS = float(os.environ.get("TTS_FADE_MS", "8"))
+
+
+def _use_sarvam() -> bool:
+    return TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}
 
 
 def _numpy():
@@ -76,6 +92,11 @@ def synthesize(client: OpenAI, text: str, voice: str = TTS_VOICE) -> bytes:
     text = text.strip()
     if not text:
         raise ValueError("Nothing to speak.")
+
+    if _use_sarvam():
+        from sarvam_tts import synthesize_wav
+
+        return synthesize_wav(text, speaker=voice)
 
     try:
         speech = client.audio.speech.create(
@@ -148,6 +169,8 @@ def _write_temp_wav(wav_bytes: bytes) -> Path:
 
 def _play_afplay(wav_bytes: bytes, *, interrupt_event=None) -> bool:
     """Play via macOS afplay; kill the process if interrupt_event is set."""
+    if interrupt_event is not None and interrupt_event.is_set():
+        return True
     path = _write_temp_wav(wav_bytes)
     proc: subprocess.Popen | None = None
     interrupted = False
@@ -249,7 +272,8 @@ def speak(
     Synthesize and play `text` aloud.
 
     Returns True if the user interrupted with the wake word (barge-in).
-    Barge-in defaults off to avoid speaker noise from an open mic during TTS.
+    Uses the persistent wake monitor when barge-in is enabled (armed before
+    synthesis so listening covers the full speak path).
     """
     print(f"[tts] {text}")
     enable = BARGE_IN_DEFAULT if barge_in is None else bool(barge_in)
@@ -266,26 +290,26 @@ def speak(
         except Exception:
             pass
 
+    monitor = None
+    if enable:
+        try:
+            from wake import ensure_persistent_wake
+
+            # Arm before synthesize so wake covers API latency + playback.
+            monitor = ensure_persistent_wake()
+            if monitor is not None:
+                monitor.clear()
+        except Exception as exc:
+            print(f"[tts] persistent wake unavailable ({exc})", flush=True)
+            monitor = None
+
     wav_bytes = synthesize(client, text, voice=voice)
 
-    if not enable:
+    if not enable or monitor is None:
         play_wav(wav_bytes)
         return False
 
-    from wake import WakeMonitor
-
-    print(
-        "[tts] barge-in on — mic open during speech (may cause speaker hiss on some Macs)",
-        flush=True,
-    )
-    monitor = WakeMonitor()
-    monitor.start()
-    try:
-        time.sleep(0.05)
-        interrupted = play_wav(wav_bytes, interrupt_event=monitor.woken)
-    finally:
-        monitor.stop()
-
+    interrupted = play_wav(wav_bytes, interrupt_event=monitor.woken)
     if interrupted or monitor.woken.is_set():
         print("[tts] interrupted by wake word", flush=True)
         return True

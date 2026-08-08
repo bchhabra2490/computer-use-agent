@@ -6,10 +6,10 @@ Two modes (WAKE_MODE):
   - phrase — any phrase via STT matching (no model training; uses the STT API)
 
 Examples:
-  WAKE_MODEL=hey_jarvis WAKE_PHRASE="Hey Jarvis"          # default
+  WAKE_MODEL=hey_jarvis WAKE_PHRASE="Hey Jarvis,Jarvis"   # default (either phrase)
   WAKE_MODEL=alexa WAKE_PHRASE=Alexa
   WAKE_MODEL=/path/to/hey_bob.onnx WAKE_PHRASE="Hey Bob" # custom ONNX
-  WAKE_MODE=phrase WAKE_PHRASE="Okay Computer"           # any phrase
+  WAKE_MODE=phrase WAKE_PHRASE="Okay Computer,Computer"  # any phrases via STT
 """
 
 from __future__ import annotations
@@ -87,14 +87,55 @@ def _parse_model_specs() -> list[str]:
     return parts or ["hey_jarvis"]
 
 
-_MODEL_SPECS = _parse_model_specs()
-WAKE_PHRASE = (os.environ.get("WAKE_PHRASE") or "").strip() or (
-    _default_phrase_for_models(_MODEL_SPECS) if WAKE_MODE != "phrase" else "Hey Jarvis"
-)
-if WAKE_MODE == "phrase" and not (os.environ.get("WAKE_PHRASE") or "").strip():
-    # Phrase mode with no phrase set — keep a sensible default the user can override.
-    WAKE_PHRASE = os.environ.get("WAKE_PHRASE", "Hey Jarvis").strip() or "Hey Jarvis"
+def _parse_wake_phrases(raw: str) -> list[str]:
+    """Comma-separated wake phrases; longest-first friendly, case-preserving."""
+    parts = [p.strip() for p in (raw or "").split(",") if p.strip()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts:
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(part)
+    return out
 
+
+_MODEL_SPECS = _parse_model_specs()
+_DEFAULT_PHRASES = "Hey Jarvis,Jarvis"
+_wake_phrase_env = (os.environ.get("WAKE_PHRASE") or "").strip()
+if _wake_phrase_env:
+    WAKE_PHRASES = _parse_wake_phrases(_wake_phrase_env)
+else:
+    # Default: accept both full and short forms for Jarvis.
+    primary = _default_phrase_for_models(_MODEL_SPECS) if WAKE_MODE != "phrase" else "Hey Jarvis"
+    if primary.lower() in {"hey jarvis", "jarvis"}:
+        WAKE_PHRASES = _parse_wake_phrases(_DEFAULT_PHRASES)
+    else:
+        WAKE_PHRASES = [primary]
+if not WAKE_PHRASES:
+    WAKE_PHRASES = _parse_wake_phrases(_DEFAULT_PHRASES)
+
+# Primary phrase (first) kept for backward-compatible imports / single-string APIs.
+WAKE_PHRASE = WAKE_PHRASES[0]
+
+
+def format_wake_phrases() -> str:
+    """Human-readable wake list, e.g. \"'Hey Jarvis' or 'Jarvis'\"."""
+    if len(WAKE_PHRASES) == 1:
+        return f"'{WAKE_PHRASES[0]}'"
+    if len(WAKE_PHRASES) == 2:
+        return f"'{WAKE_PHRASES[0]}' or '{WAKE_PHRASES[1]}'"
+    head = ", ".join(f"'{p}'" for p in WAKE_PHRASES[:-1])
+    return f"{head}, or '{WAKE_PHRASES[-1]}'"
+
+
+def _phrases_to_check(phrase: str | None) -> list[str]:
+    if phrase is not None and str(phrase).strip():
+        # Allow callers to pass a single phrase or a comma-list.
+        parsed = _parse_wake_phrases(str(phrase))
+        return parsed or [str(phrase).strip()]
+    return list(WAKE_PHRASES)
 
 def get_wake_remainder() -> str | None:
     """Command text captured with the wake utterance (phrase mode), if any."""
@@ -197,51 +238,52 @@ def _resolve_model_path(spec: str) -> Path:
 
 
 def text_mentions_wake_phrase(text: str, phrase: str | None = None) -> bool:
-    """True if `text` contains the wake phrase (used to avoid TTS echo false wakes)."""
+    """True if `text` contains any configured wake phrase (TTS echo guard)."""
     body = (text or "").strip().lower()
-    target = (phrase or WAKE_PHRASE).strip().lower()
-    if not body or not target:
+    if not body:
         return False
     norm_body = re.sub(r"[^\w\s]", " ", body)
     norm_body = re.sub(r"\s+", " ", norm_body).strip()
-    norm_phrase = re.sub(r"[^\w\s]", " ", target)
-    norm_phrase = re.sub(r"\s+", " ", norm_phrase).strip()
-    if not norm_phrase:
-        return False
-    return norm_phrase in norm_body
+    for target in _phrases_to_check(phrase):
+        norm_phrase = re.sub(r"[^\w\s]", " ", target.lower())
+        norm_phrase = re.sub(r"\s+", " ", norm_phrase).strip()
+        if norm_phrase and norm_phrase in norm_body:
+            return True
+    return False
 
 
 def matches_wake_phrase(transcript: str, phrase: str | None = None) -> bool:
-    """True if transcript starts with (or equals) the wake phrase."""
+    """True if transcript starts with (or equals) any configured wake phrase."""
     text = (transcript or "").strip().lower()
-    target = (phrase or WAKE_PHRASE).strip().lower()
-    if not text or not target:
+    if not text:
         return False
-    # Allow light punctuation between words.
     norm_text = re.sub(r"[^\w\s]", " ", text)
     norm_text = re.sub(r"\s+", " ", norm_text).strip()
-    norm_phrase = re.sub(r"[^\w\s]", " ", target)
-    norm_phrase = re.sub(r"\s+", " ", norm_phrase).strip()
-    if not norm_phrase:
-        return False
-    return norm_text == norm_phrase or norm_text.startswith(norm_phrase + " ")
+    for target in _phrases_to_check(phrase):
+        norm_phrase = re.sub(r"[^\w\s]", " ", target.lower())
+        norm_phrase = re.sub(r"\s+", " ", norm_phrase).strip()
+        if not norm_phrase:
+            continue
+        if norm_text == norm_phrase or norm_text.startswith(norm_phrase + " "):
+            return True
+    return False
 
 
 def strip_wake_phrase(utterance: str, phrase: str | None = None) -> str:
-    """Remove a leading wake phrase from a transcript."""
+    """Remove a leading wake phrase from a transcript (tries longest match first)."""
     text = (utterance or "").strip()
-    target = (phrase or WAKE_PHRASE).strip()
-    if not text or not target:
+    if not text:
         return text
-    # Build a flexible regex from the phrase words.
-    words = [re.escape(w) for w in re.findall(r"\w+", target)]
-    if not words:
-        return text
-    pattern = r"^\s*" + r"[\s,:\-]+".join(words) + r"\b[\s,:\-]*(.*)$"
-    match = re.match(pattern, text, flags=re.IGNORECASE)
-    if not match:
-        return text
-    return match.group(1).strip()
+    phrases = sorted(_phrases_to_check(phrase), key=lambda p: len(p), reverse=True)
+    for target in phrases:
+        words = [re.escape(w) for w in re.findall(r"\w+", target)]
+        if not words:
+            continue
+        pattern = r"^\s*" + r"[\s,:\-]+".join(words) + r"\b[\s,:\-]*(.*)$"
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return text
 
 
 def _ensure_model():
@@ -269,7 +311,8 @@ def _ensure_model():
     )
     _model_keys = list(_model.models.keys())
     print(
-        f"[wake] model mode — say '{WAKE_PHRASE}' " f"(models={_model_keys}, threshold={DEFAULT_THRESHOLD:g})",
+        f"[wake] model mode — say {format_wake_phrases()} "
+        f"(models={_model_keys}, threshold={DEFAULT_THRESHOLD:g})",
         flush=True,
     )
     return _model
@@ -350,7 +393,7 @@ def _wait_for_wake_model(
 
     if detected:
         print(
-            f"[wake] detected '{WAKE_PHRASE}' via {hit_key} (score={hit_score:.2f})",
+            f"[wake] detected wake via {hit_key} (score={hit_score:.2f})",
             flush=True,
         )
         if play_chime:
@@ -366,8 +409,8 @@ def _wait_for_wake_phrase(
     play_chime: bool,
 ) -> bool:
     """
-    Any wake phrase via STT: listen for an utterance, wake if it starts with WAKE_PHRASE.
-    Remainder (if any) is stored for get_wake_remainder().
+    Any configured wake phrase via STT: listen for an utterance, wake if it
+    starts with one of WAKE_PHRASES. Remainder is stored for get_wake_remainder().
     """
     from openai import OpenAI
 
@@ -376,7 +419,7 @@ def _wait_for_wake_phrase(
     client = OpenAI()
     print(f"[wake] {prompt} [phrase/STT mode]", flush=True)
     print(
-        f"[wake] matching phrase {WAKE_PHRASE!r} — speak it to activate "
+        f"[wake] matching {format_wake_phrases()} — speak one to activate "
         "(uses STT; set WAKE_MODE=model + a custom .onnx for offline spotting)",
         flush=True,
     )
@@ -392,7 +435,7 @@ def _wait_for_wake_phrase(
         try:
             utterance = listen_for_utterance(
                 client,
-                prompt=f"Listening for '{WAKE_PHRASE}'…",
+                prompt=f"Listening for {format_wake_phrases()}…",
             )
         except NoSpeechError:
             continue
@@ -405,17 +448,18 @@ def _wait_for_wake_phrase(
         if not text:
             continue
         print(f'[wake] heard: "{text}"', flush=True)
-        if matches_wake_phrase(text, WAKE_PHRASE):
-            remainder = strip_wake_phrase(text, WAKE_PHRASE)
+        if matches_wake_phrase(text):
+            remainder = strip_wake_phrase(text)
             _set_wake_remainder(remainder)
             print(
-                f"[wake] detected phrase '{WAKE_PHRASE}'" + (f" — remainder: {remainder!r}" if remainder else ""),
+                "[wake] detected wake phrase"
+                + (f" — remainder: {remainder!r}" if remainder else ""),
                 flush=True,
             )
             if play_chime:
                 play_wake_chime()
             return True
-        print(f"[wake] ignored (does not start with '{WAKE_PHRASE}')", flush=True)
+        print(f"[wake] ignored (does not start with {format_wake_phrases()})", flush=True)
 
 
 def wait_for_wake(
@@ -430,11 +474,22 @@ def wait_for_wake(
     Block until the configured wake word/phrase is detected.
 
     Returns True on wake, False if should_stop() became true first.
+    When a persistent barge-in monitor is already running, waits on that
+    instead of opening a second mic (except from the monitor thread itself).
     """
     _set_wake_remainder(None)
     thresh = DEFAULT_THRESHOLD if threshold is None else float(threshold)
     if prompt is None:
-        prompt = f"Waiting for '{WAKE_PHRASE}'…"
+        prompt = f"Waiting for {format_wake_phrases()}…"
+
+    mon = get_persistent_wake()
+    if (
+        mon is not None
+        and not mon._paused.is_set()
+        and mon._thread is not None
+        and threading.current_thread() is not mon._thread
+    ):
+        return mon.wait(should_stop=should_stop, prompt=prompt)
 
     mode = WAKE_MODE
     if mode in {"phrase", "stt", "text", "any"}:
@@ -454,20 +509,27 @@ def wait_for_wake(
 
 class WakeMonitor:
     """
-    Background wake-word listener for TTS barge-in.
+    Background wake-word listener for barge-in / idle wait.
 
-    Start while speaking; if the wake word is heard, `woken` is set and the chime plays.
-    Call stop() when playback ends (whether interrupted or not).
+    By default runs until stop(): after each wake it stays woken until clear(),
+    then listens again. Use pause()/resume() when STT needs exclusive mic access.
     """
 
-    def __init__(self, *, threshold: float | None = None):
+    def __init__(self, *, threshold: float | None = None, persistent: bool = True):
         self.threshold = BARGE_IN_THRESHOLD if threshold is None else float(threshold)
+        self.persistent = persistent
         self.woken = threading.Event()
         self._stop = threading.Event()
+        self._paused = threading.Event()
+        self._listening = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        if self.is_alive:
             return
         # Phrase/STT barge-in would fight TTS echo and burn API — use model mode only.
         if WAKE_MODE in {"phrase", "stt", "text", "any"}:
@@ -478,35 +540,165 @@ class WakeMonitor:
             return
         self.woken.clear()
         self._stop.clear()
+        self._paused.clear()
         self._thread = threading.Thread(
             target=self._run,
-            name="wake-barge-in",
+            name="wake-persistent" if self.persistent else "wake-barge-in",
             daemon=True,
         )
         self._thread.start()
-        print(f"[wake] barge-in armed (threshold={self.threshold:g})", flush=True)
+        kind = "persistent" if self.persistent else "one-shot"
+        print(
+            f"[wake] {kind} barge-in armed (threshold={self.threshold:g})",
+            flush=True,
+        )
 
     def _run(self) -> None:
         try:
-            hit = wait_for_wake(
-                threshold=self.threshold,
-                should_stop=lambda: self._stop.is_set() or self.woken.is_set(),
-                prompt=f"Barge-in: say '{WAKE_PHRASE}' to interrupt…",
-                play_chime=False,
-            )
-            if hit:
-                self.woken.set()
-                print("[wake] barge-in triggered — stopping TTS", flush=True)
-                time.sleep(0.08)
-                play_wake_chime()
+            while not self._stop.is_set():
+                while self._paused.is_set() and not self._stop.is_set():
+                    self._listening.clear()
+                    time.sleep(0.05)
+                if self._stop.is_set():
+                    break
+                # Hold here while a wake is already pending acknowledgment.
+                while self.woken.is_set() and not self._stop.is_set():
+                    self._listening.clear()
+                    time.sleep(0.05)
+                if self._stop.is_set() or self._paused.is_set():
+                    continue
+
+                self._listening.set()
+                # Call the model waiter directly (not wait_for_wake) to avoid
+                # recursing into this persistent monitor.
+                hit = _wait_for_wake_model(
+                    threshold=self.threshold,
+                    should_stop=lambda: (
+                        self._stop.is_set() or self._paused.is_set() or self.woken.is_set()
+                    ),
+                    poll_hz=20.0,
+                    prompt=f"Listening for {format_wake_phrases()}…",
+                    play_chime=False,
+                )
+                self._listening.clear()
+                if self._stop.is_set() or self._paused.is_set():
+                    continue
+                if hit:
+                    self.woken.set()
+                    print("[wake] barge-in triggered", flush=True)
+                    time.sleep(0.08)
+                    play_wake_chime()
+                    if not self.persistent:
+                        break
         except Exception as e:
             print(f"[wake] barge-in monitor error: {e}", file=sys.stderr)
+        finally:
+            self._listening.clear()
+
+    def pause(self) -> None:
+        """Release the mic so STT (or another capture) can use it."""
+        self._paused.set()
+        # Wait briefly for the wake loop to drop the input stream.
+        deadline = time.monotonic() + 2.0
+        while self._listening.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    def resume(self) -> None:
+        """Resume wake listening after STT (clears a stale woken flag)."""
+        self.woken.clear()
+        self._paused.clear()
+
+    def clear(self) -> None:
+        """Acknowledge a wake so listening can continue (persistent mode)."""
+        self.woken.clear()
+
+    def wait(
+        self,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+        prompt: str | None = None,
+        timeout: float | None = None,
+    ) -> bool:
+        """
+        Block until woken (or should_stop / timeout).
+
+        Assumes this monitor is already started and not paused.
+        """
+        if prompt:
+            print(f"[wake] {prompt}", flush=True)
+        started = time.monotonic()
+        while True:
+            if self.woken.is_set():
+                return True
+            if should_stop is not None:
+                try:
+                    if should_stop():
+                        return False
+                except Exception:
+                    return False
+            if timeout is not None and (time.monotonic() - started) >= timeout:
+                return False
+            time.sleep(0.05)
 
     def stop(self) -> None:
         self._stop.set()
+        self._paused.clear()
+        self.woken.set()  # unblock waiters / inner wait_for_wake
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        self.woken.clear()
+
+
+_persistent_wake: WakeMonitor | None = None
+_persistent_lock = threading.Lock()
+
+
+def ensure_persistent_wake(*, threshold: float | None = None) -> WakeMonitor | None:
+    """
+    Start (or return) the process-wide wake monitor.
+
+    Call before the first TTS so barge-in is armed during synthesis + playback.
+    Returns None in phrase/STT wake mode.
+    """
+    global _persistent_wake
+    with _persistent_lock:
+        if _persistent_wake is not None and _persistent_wake.is_alive:
+            return _persistent_wake
+        monitor = WakeMonitor(threshold=threshold, persistent=True)
+        monitor.start()
+        if not monitor.is_alive:
+            return None
+        _persistent_wake = monitor
+        return _persistent_wake
+
+
+def get_persistent_wake() -> WakeMonitor | None:
+    with _persistent_lock:
+        if _persistent_wake is not None and _persistent_wake.is_alive:
+            return _persistent_wake
+        return None
+
+
+def pause_persistent_wake() -> None:
+    mon = get_persistent_wake()
+    if mon is not None:
+        mon.pause()
+
+
+def resume_persistent_wake() -> None:
+    mon = get_persistent_wake()
+    if mon is not None:
+        mon.resume()
+
+
+def stop_persistent_wake() -> None:
+    global _persistent_wake
+    with _persistent_lock:
+        mon = _persistent_wake
+        _persistent_wake = None
+    if mon is not None:
+        mon.stop()
 
 
 def listen_after_wake(
@@ -523,7 +715,12 @@ def listen_after_wake(
 
     Returns the transcript, or None if stopped before wake / listen failed empty.
     """
-    if not wait_for_wake(
+    mon = get_persistent_wake()
+    if mon is not None and not mon._paused.is_set():
+        if not mon.wait(should_stop=should_stop, prompt=wake_prompt):
+            return None
+        mon.clear()
+    elif not wait_for_wake(
         threshold=threshold,
         should_stop=should_stop,
         prompt=wake_prompt,

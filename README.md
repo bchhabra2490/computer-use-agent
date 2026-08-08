@@ -58,7 +58,9 @@ Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: w
 then the instruction. While Jarvis is speaking, say the wake word again to
 interrupt TTS and give a new command (`TTS_BARGE_IN=1` by default). Wake barge-in
 is armed **before** the ready TTS and stays on for the whole session (paused only
-while STT owns the mic). Set `TTS_BARGE_IN=0` if an open mic during speech causes
+while STT owns the mic). You can also press **Space**, **Esc**, or **Enter** in
+the orchestrator terminal (`TTS_KEYBOARD_BARGE=1`) to stop TTS and start listening.
+Set `TTS_BARGE_IN=0` if an open mic during speech causes
 hiss; `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers.
 Agent `ask_user` prompts skip the wake word (answer directly).
 

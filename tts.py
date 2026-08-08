@@ -6,8 +6,10 @@ Providers (TTS_PROVIDER):
   - sarvam — Bulbul streaming TTS (default bulbul:v3 / shubh)
 
 Playback on macOS uses `afplay` (system audio path) to avoid PortAudio duplex
-crackle. Wake-word barge-in ("Hey Jarvis") is on by default for sync and
-streaming TTS; set TTS_BARGE_IN=0 if an open mic during speech causes hiss.
+crackle. Wake-word barge-in ("Hey Jarvis") and keyboard barge-in (Space / Esc /
+Enter in the terminal) are on by default for sync and streaming TTS. Set
+``TTS_BARGE_IN=0`` if an open mic during speech causes hiss; set
+``TTS_KEYBOARD_BARGE=0`` to disable key interrupts.
 """
 
 from __future__ import annotations
@@ -271,9 +273,10 @@ def speak(
     """
     Synthesize and play `text` aloud.
 
-    Returns True if the user interrupted with the wake word (barge-in).
-    Uses the persistent wake monitor when barge-in is enabled (armed before
-    synthesis so listening covers the full speak path).
+    Returns True if the user interrupted (wake word or keyboard barge-in).
+    Uses the persistent wake monitor when mic barge-in is enabled (armed before
+    synthesis so listening covers the full speak path). Keyboard barge-in works
+    even when mic barge-in is off, as long as the terminal is focused.
     """
     print(f"[tts] {text}")
     enable = BARGE_IN_DEFAULT if barge_in is None else bool(barge_in)
@@ -305,12 +308,28 @@ def speak(
 
     wav_bytes = synthesize(client, text, voice=voice)
 
-    if not enable or monitor is None:
+    wake_event = monitor.woken if (enable and monitor is not None) else None
+    try:
+        from keyboard_barge import acquire_tts_interrupt
+
+        interrupt_event, release = acquire_tts_interrupt(wake_event)
+    except Exception as exc:
+        print(f"[tts] keyboard barge unavailable ({exc})", flush=True)
+        interrupt_event, release = wake_event, (lambda: None)
+
+    if interrupt_event is None:
         play_wav(wav_bytes)
         return False
 
-    interrupted = play_wav(wav_bytes, interrupt_event=monitor.woken)
-    if interrupted or monitor.woken.is_set():
-        print("[tts] interrupted by wake word", flush=True)
-        return True
-    return False
+    try:
+        interrupted = play_wav(wav_bytes, interrupt_event=interrupt_event)
+        if interrupted or interrupt_event.is_set():
+            if wake_event is not None and wake_event.is_set():
+                print("[tts] interrupted by wake word", flush=True)
+            # keyboard path already logged in keyboard_barge
+            elif not interrupted:
+                print("[tts] interrupted", flush=True)
+            return True
+        return False
+    finally:
+        release()

@@ -16,6 +16,8 @@ in this project. Set ``TTS_PLAYER=sounddevice`` only if you accept that trade-of
 
 When ``TTS_BARGE_IN`` is on (default), playback shares the process-wide
 persistent wake monitor so ``Hey Jarvis`` can interrupt at any time.
+Keyboard barge-in (Space / Esc / Enter in the terminal) is also on by default
+(``TTS_KEYBOARD_BARGE``); both feed the same interrupt → listen path.
 
 Latency markers (``chunk_available``, ``first_audio_play``) are appended to
 ``tts_latency.log`` in the project root.
@@ -179,6 +181,19 @@ class LowLatencyTTS:
         except Exception as exc:
             self._log("barge_in_unavailable", detail=repr(exc))
             return None
+
+    def _acquire_interrupt(self):
+        """Wake and/or keyboard interrupt event + release callback."""
+        wake_event = self._wake_interrupt_event()
+        try:
+            from keyboard_barge import acquire_tts_interrupt
+
+            return acquire_tts_interrupt(wake_event)
+        except Exception as exc:
+            self._log("keyboard_barge_unavailable", detail=repr(exc))
+            if wake_event is None:
+                return None, (lambda: None)
+            return wake_event, (lambda: None)
 
     def _interrupt_session(self, response_id: str) -> None:
         """Stop remaining synthesis/playback after a wake-word barge-in."""
@@ -454,15 +469,18 @@ class LowLatencyTTS:
                             detail=detail,
                         )
                     print(f"[tts] {text}", flush=True)
-                    interrupt_event = self._wake_interrupt_event()
-                    # afplay / configured player — avoid PortAudio TTS by default.
-                    interrupted = bool(
-                        play_wav(audio, interrupt_event=interrupt_event)
-                        or (interrupt_event is not None and interrupt_event.is_set())
-                    )
-                    if interrupted:
-                        print("[tts] streaming interrupted by wake word", flush=True)
-                        self._interrupt_session(response_id)
+                    interrupt_event, release = self._acquire_interrupt()
+                    try:
+                        # afplay / configured player — avoid PortAudio TTS by default.
+                        interrupted = bool(
+                            play_wav(audio, interrupt_event=interrupt_event)
+                            or (interrupt_event is not None and interrupt_event.is_set())
+                        )
+                        if interrupted:
+                            print("[tts] streaming interrupted", flush=True)
+                            self._interrupt_session(response_id)
+                    finally:
+                        release()
                 except Exception as exc:
                     self._log(
                         "playback_error",

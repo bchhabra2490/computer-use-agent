@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 os.environ["TTS_CHUNK_MIN_CHARS"] = "20"
 os.environ["TTS_CHUNK_MAX_CHARS"] = "100"
 os.environ["TTS_WARMUP"] = "0"
+os.environ["TTS_KEYBOARD_BARGE"] = "0"
 
 from low_latency_tts import (  # noqa: E402
     LowLatencyTTS,

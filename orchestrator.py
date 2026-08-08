@@ -8,7 +8,8 @@ Tools:
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
 Cloud STT only runs after the wake word. While Jarvis is speaking, say
-"Hey Jarvis" again to interrupt TTS and give a new command (barge-in).
+"Hey Jarvis" again (or press Space / Esc / Enter in the terminal) to interrupt
+TTS and give a new command (barge-in).
 When the agent calls ask_user, the question is spoken and answered here on
 the main thread (no wake word required; barge-in still works).
 
@@ -428,7 +429,7 @@ def _listen_after_barge(
     *,
     prompt: str = "Listening…",
 ) -> str | None:
-    """Capture a command after TTS was interrupted by the wake word (no second wake)."""
+    """Capture a command after TTS barge-in (wake or keyboard; no second wake)."""
     time.sleep(0.15)
     try:
         utterance = listen_for_utterance(client, prompt=prompt)
@@ -452,7 +453,7 @@ def _listen_after_barge(
 
 def _speak(client: OpenAI, text: str) -> str | None:
     """
-    Speak `text`. If the user says Hey Jarvis mid-speech, stop and listen.
+    Speak `text`. If the user barges in (wake word or keyboard), stop and listen.
 
     Returns the spoken command on barge-in, or None if playback finished normally.
     """
@@ -658,12 +659,12 @@ def _handle_tool(
                 barge = _listen_after_barge(client)
                 if barge:
                     output = (
-                        f"Speech interrupted by wake word. User then said: {barge}. "
+                        f"Speech interrupted. User then said: {barge}. "
                         "Act on that instruction next (do not assume the spoken reply finished)."
                     )
                 else:
                     output = (
-                        "Speech interrupted by wake word but no follow-up command was heard. "
+                        "Speech interrupted but no follow-up command was heard. "
                         "Ask briefly what they need, or wait for the next wake."
                     )
             else:
@@ -674,7 +675,7 @@ def _handle_tool(
             if barge:
                 end_session = False
                 output = (
-                    f"Speech interrupted by wake word. User then said: {barge}. "
+                    f"Speech interrupted. User then said: {barge}. "
                     "Act on that instruction next (do not assume the spoken reply finished)."
                 )
             else:

@@ -62,6 +62,21 @@ class FlagTests(unittest.TestCase):
         st.request_mark_done(None)
         self.assertTrue(st.consume_mark_done("any-id"))
 
+    def test_send_request_and_consume(self) -> None:
+        self.assertFalse(st.send_pending())
+        st.request_send()
+        self.assertTrue(st.send_pending())
+        self.assertTrue(st.consume_send())
+        self.assertFalse(st.send_pending())
+        self.assertFalse(st.consume_send())
+
+    def test_stt_listening_clears_send_on_stop(self) -> None:
+        st.request_send()
+        st.set_stt_listening(True)
+        self.assertTrue(st.send_pending())
+        st.set_stt_listening(False)
+        self.assertFalse(st.send_pending())
+
 
 if __name__ == "__main__":
     unittest.main()

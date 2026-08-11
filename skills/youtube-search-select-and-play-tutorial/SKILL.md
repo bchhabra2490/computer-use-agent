@@ -13,11 +13,9 @@ description: >-
 5. Scroll the video results and inspect each thumbnail for channel name and duration (duration displayed bottom-right of thumbnail).
 6. Prefer reputable channels. Pick a clear beginner-friendly video within the requested duration range (typically 3–10 minutes). If none from preferred channels match, choose the clearest tutorial that covers the requested measurements and range/probe usage.
 7. Click the chosen thumbnail to open the video page.
-8. Start playback if it doesn't auto-play (press spacebar or click Play).
+8. Confirm playback is running (Pause icon visible or progress bar moving) and ensure audio is audible. Start playback if it doesn't auto-play (press spacebar or click Play).
 9. Unmute the player: click the speaker icon on the video player or press M to toggle mute/unmute. If no audio, raise system output volume from the menu bar or use the "set-system-and-youtube-volume" skill.
-10. Confirm playback is running (Pause icon visible or progress bar moving) and ensure audio is audible.
-11. Copy the page URL and title: focus address bar (Cmd+L) → copy URL (Cmd+C). Note the page title from the tab or video title element for reporting.
-12. Report the video title and URL and confirm playback and audio started.
+10. No need to report anything back. Leave the video playing.
 
 ## Tips
 

@@ -77,7 +77,9 @@ Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: w
 then the instruction. While Jarvis is speaking, say the wake word again to
 interrupt TTS and give a new command (`TTS_BARGE_IN=1` by default). Wake barge-in
 is armed **before** the ready TTS and stays on for the whole session (paused only
-while STT owns the mic). You can also press **Space**, **Esc**, or **Enter** in
+while STT owns the mic — the same capture is still scanned so saying the wake
+word again **ends listening** and starts processing, like menu **Send**). You can
+also press **Space**, **Esc**, or **Enter** in
 the orchestrator terminal (`TTS_KEYBOARD_BARGE=1`) to stop TTS and start listening.
 Set `TTS_BARGE_IN=0` if an open mic during speech causes
 hiss; `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers.
@@ -168,7 +170,9 @@ WAKE_MODEL=hey_bob.onnx WAKE_PHRASE="Hey Bob" python orchestrator.py
 A small **menu-bar icon** starts with the orchestrator or agent:
 
 - **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
-- **Click** — **Add Memory** (screenshot + description), in-progress agents,
+- **Click** — **Send** (while listening: stop recording and transcribe now;
+  saying the wake word does the same),
+  **Add Memory** (screenshot + description), in-progress agents,
   **Mark Task Done**, recent logs, **Quit Orchestrator**, open latest `logs/`
   run folder, quit the icon
 

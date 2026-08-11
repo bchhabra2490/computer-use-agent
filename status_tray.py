@@ -2,7 +2,7 @@
 macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
-Click for a menu with Add Memory, Mark Task Done, logs, and quit.
+Click for a menu with Send (while listening), Add Memory, Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -28,6 +28,7 @@ from app_status import (
     pid_alive,
     read_status,
     request_mark_done,
+    request_send,
     set_tray_pid,
     signal_quit_orchestrator,
     status_label,
@@ -229,7 +230,8 @@ def main() -> None:
             sig = (
                 f"{data.get('state')}|{data.get('detail')}|{data.get('updated_at')}|"
                 f"{len(data.get('logs') or [])}|{len(agents)}|"
-                f"{data.get('done_requested')}"
+                f"{data.get('done_requested')}|{data.get('stt_active')}|"
+                f"{data.get('send_requested')}"
             )
             if sig == self.lastSig:
                 return
@@ -351,6 +353,18 @@ def main() -> None:
 
             self.menu.addItem_(NSMenuItem.separatorItem())
 
+            listening = bool(data.get("stt_active")) or str(
+                data.get("state") or ""
+            ) in {"listening", "ask"}
+            send = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Send",
+                "sendAudio:",
+                "",
+            )
+            send.setTarget_(self)
+            send.setEnabled_(listening)
+            self.menu.addItem_(send)
+
             add_mem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Add Memory",
                 "addMemory:",
@@ -434,6 +448,15 @@ def main() -> None:
                 )
             except Exception:
                 NSWorkspace.sharedWorkspace().openFile_(str(STATUS_PATH.parent))
+
+        def sendAudio_(self, _sender) -> None:
+            data = read_status()
+            listening = bool(data.get("stt_active")) or str(
+                data.get("state") or ""
+            ) in {"listening", "ask"}
+            if not listening:
+                return
+            request_send()
 
         def addMemory_(self, _sender) -> None:
             _add_memory_from_tray()

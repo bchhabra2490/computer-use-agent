@@ -454,6 +454,35 @@ def _use_sarvam() -> bool:
     return STT_PROVIDER in {"sarvam", "saaras", "sarvamai"}
 
 
+def _send_requested() -> bool:
+    """True once when the menu-bar Send item is clicked during this listen."""
+    try:
+        from app_status import consume_send
+
+        return consume_send()
+    except Exception:
+        return False
+
+
+def _listen_end_spotter():
+    try:
+        from wake import listen_end_spotter
+
+        return listen_end_spotter()
+    except Exception:
+        return None
+
+
+def _strip_listen_wake(text: str, *, wake_ended: bool) -> str:
+    try:
+        from wake import strip_trailing_wake_phrase, strip_wake_phrase
+    except Exception:
+        return (text or "").strip()
+    out = strip_wake_phrase(text)
+    out = strip_trailing_wake_phrase(out, include_short=wake_ended)
+    return out.strip()
+
+
 def listen_realtime(
     client: OpenAI,
     *,
@@ -477,6 +506,12 @@ def listen_realtime(
     if pause_persistent_wake is not None:
         pause_persistent_wake()
     try:
+        from app_status import set_stt_listening
+
+        set_stt_listening(True)
+    except Exception:
+        set_stt_listening = None  # type: ignore[assignment]
+    try:
         if _use_sarvam():
             return _listen_sarvam(
                 prompt=prompt,
@@ -490,6 +525,11 @@ def listen_realtime(
             max_wait_for_speech=max_wait_for_speech,
         )
     finally:
+        if set_stt_listening is not None:
+            try:
+                set_stt_listening(False)
+            except Exception:
+                pass
         if resume_persistent_wake is not None:
             resume_persistent_wake()
 
@@ -507,11 +547,15 @@ def _listen_sarvam(
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     max_secs = min(MAX_RECORD_SECONDS, SARVAM_MAX_SECONDS)
     default_prompt = (
-        f"Listening for yes/no… (sends after {idle:g}s silence → Sarvam)"
+        f"Listening for yes/no… (sends after {idle:g}s silence, Send, or wake word → Sarvam)"
         if mode == "confirm"
-        else f"Listening… (sends after {idle:g}s silence → Sarvam {SARVAM_STT_MODEL})"
+        else (
+            f"Listening… (sends after {idle:g}s silence, Send, or wake word "
+            f"→ Sarvam {SARVAM_STT_MODEL})"
+        )
     )
 
+    spotter = _listen_end_spotter()
     wav = record_until_silence(
         silence_seconds=idle,
         speech_peak=SPEECH_PEAK,
@@ -519,12 +563,13 @@ def _listen_sarvam(
         max_record_seconds=max_secs,
         prompt=prompt or default_prompt,
         require_speech=True,
+        wake_spotter=spotter,
     )
     try:
         text = transcribe_wav(wav)
     except Exception as e:
         raise NoSpeechError(f"Sarvam STT failed: {e}") from e
-    text = (text or "").strip()
+    text = _strip_listen_wake(text or "", wake_ended=bool(spotter and spotter.hit))
     if not text:
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     return text, wav
@@ -545,9 +590,9 @@ def _listen_realtime_body(
     print(
         prompt
         or (
-            f"Listening for yes/no… (sends after {idle:g}s without new words)"
+            f"Listening for yes/no… (sends after {idle:g}s without new words, Send, or wake word)"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s without new words)"
+            else f"Listening… (sends after {idle:g}s without new words, Send, or wake word)"
         )
     )
 
@@ -571,6 +616,8 @@ def _listen_realtime_body(
     }
     started_at = time.monotonic()
     mic_deadline = started_at + MAX_RECORD_SECONDS
+    wake_spotter = _listen_end_spotter()
+    wake_send = threading.Event()
 
     def _commit_once(connection, reason: str) -> None:
         if committed.is_set():
@@ -600,6 +647,13 @@ def _listen_realtime_body(
                         print("[mic] warning: input overflow", file=sys.stderr)
                     raw = np.asarray(data, dtype=np.float32).reshape(-1)
                     cleaned = noise.process(raw)
+                    if wake_spotter is not None:
+                        try:
+                            if wake_spotter.feed(cleaned, capture_rate):
+                                print("[stt] wake word — processing audio.")
+                                wake_send.set()
+                        except Exception:
+                            pass
                     pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
                     if pcm_24k.size == 0:
                         continue
@@ -625,6 +679,9 @@ def _listen_realtime_body(
                     text = shared["partial"].strip()
                     last = shared["last_delta_at"]
                     first = shared["first_word_at"]
+                if wake_send.is_set() or _send_requested():
+                    _commit_once(connection, "Send — processing audio.")
+                    return
                 # No words yet: wait (do not run the 3s send timer).
                 if first is None or not text or last is None:
                     if (now - started_at) >= wait_limit:
@@ -717,7 +774,10 @@ def _listen_realtime_body(
     wav = _float_to_wav(_normalize_peak(pcm_all), REALTIME_RATE)
     with state_lock:
         fallback = shared["partial"].strip()
-    text = final_text.strip() or fallback
+    text = _strip_listen_wake(
+        final_text.strip() or fallback,
+        wake_ended=bool(wake_spotter and wake_spotter.hit),
+    )
     if not text:
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     print(f"[stt] model=realtime:{TRANSCRIBE_MODEL} noise={NOISE_REDUCTION}")
@@ -765,6 +825,7 @@ def record_until_silence(
     max_record_seconds: float = MAX_RECORD_SECONDS,
     prompt: str = "Listening… (pause when done)",
     require_speech: bool = False,
+    wake_spotter=None,
 ) -> bytes:
     _prepare_mic()
     capture_rate = int(sample_rate) if sample_rate else _capture_sample_rate()
@@ -775,6 +836,7 @@ def record_until_silence(
     noise = FanNoiseFilter(capture_rate)
     chunks: list[np.ndarray] = []
     heard = False
+    sent = False
     silent_run = waited = total = 0.0
     with _open_input_stream(capture_rate, chunk_frames) as stream:
         if warmup_frames:
@@ -785,6 +847,18 @@ def record_until_silence(
             cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
             chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
             total += CHUNK_SECONDS
+            if wake_spotter is not None:
+                try:
+                    if wake_spotter.feed(cleaned, capture_rate):
+                        print("[stt] wake word — processing audio.")
+                        sent = True
+                        break
+                except Exception:
+                    pass
+            if _send_requested():
+                print("[stt] menu Send — processing audio.")
+                sent = True
+                break
             peak = _peak(cleaned)
             if peak >= speech_peak:
                 heard = True
@@ -797,7 +871,7 @@ def record_until_silence(
                 waited += CHUNK_SECONDS
                 if waited >= max_wait_for_speech:
                     break
-    if require_speech and not heard:
+    if require_speech and not heard and not sent:
         raise NoSpeechError("No speech detected — try again.")
     pcm = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     return _float_to_wav(_normalize_peak(pcm), REALTIME_RATE)
@@ -971,15 +1045,15 @@ def listen_once(
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
     if _use_sarvam():
         default_prompt = (
-            f"Say yes or no now… (sends after {idle:g}s silence)"
+            f"Say yes or no now… (sends after {idle:g}s silence, Send, or wake word)"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s silence)"
+            else f"Listening… (sends after {idle:g}s silence, Send, or wake word)"
         )
     else:
         default_prompt = (
-            f"Say yes or no now… (sends after {idle:g}s without new words)"
+            f"Say yes or no now… (sends after {idle:g}s without new words, Send, or wake word)"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s without new words)"
+            else f"Listening… (sends after {idle:g}s without new words, Send, or wake word)"
         )
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):

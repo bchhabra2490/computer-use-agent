@@ -42,6 +42,8 @@ def _default_state() -> dict[str, Any]:
         "quit_requested": False,
         "done_requested": False,
         "done_agent_id": None,
+        "send_requested": False,
+        "stt_active": False,
         "agents": [],  # active subagents / computer-agent jobs
     }
 
@@ -144,6 +146,8 @@ def register_orchestrator(pid: int | None = None) -> None:
         data["quit_requested"] = False
         data["done_requested"] = False
         data["done_agent_id"] = None
+        data["send_requested"] = False
+        data["stt_active"] = False
         _write(data)
 
 
@@ -267,6 +271,48 @@ def clear_mark_done() -> None:
         data = _read()
         data["done_requested"] = False
         data["done_agent_id"] = None
+        _write(data)
+
+
+def set_stt_listening(active: bool) -> None:
+    """STT owns the mic — tray Send is enabled while this is True."""
+    with _lock:
+        data = _read()
+        data["stt_active"] = bool(active)
+        if not active:
+            data["send_requested"] = False
+        _write(data)
+
+
+def request_send() -> None:
+    """End the current listen immediately and transcribe what was captured."""
+    with _lock:
+        data = _read()
+        data["send_requested"] = True
+        _write(data)
+    log("Send requested — processing audio")
+
+
+def send_pending() -> bool:
+    with _lock:
+        return bool(_read().get("send_requested"))
+
+
+def consume_send() -> bool:
+    """True if Send was clicked; clears the flag so it fires once."""
+    with _lock:
+        data = _read()
+        if not data.get("send_requested"):
+            return False
+        data["send_requested"] = False
+        _write(data)
+        return True
+
+
+def clear_send() -> None:
+    with _lock:
+        data = _read()
+        data["send_requested"] = False
         _write(data)
 
 

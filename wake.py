@@ -5,6 +5,9 @@ Two modes (WAKE_MODE):
   - model  — openWakeWord ONNX classifier (pretrained or your custom .onnx)
   - phrase — any phrase via STT matching (no model training; uses the STT API)
 
+While STT is listening (model mode), the same mic stream is scored so a second
+wake phrase ends capture and starts processing (like menu Send).
+
 Examples:
   WAKE_MODEL=hey_jarvis WAKE_PHRASE="Hey Jarvis,Jarvis"   # default (either phrase)
   WAKE_MODEL=alexa WAKE_PHRASE=Alexa
@@ -31,6 +34,8 @@ CHUNK_SAMPLES = 1280
 DEFAULT_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
 # Slightly higher bar while TTS is playing (reduce echo false triggers).
 BARGE_IN_THRESHOLD = float(os.environ.get("WAKE_BARGE_THRESHOLD", "0.6"))
+# Ignore this many seconds after STT starts so the activation wake isn't reused.
+WAKE_END_LISTEN_IGNORE = float(os.environ.get("WAKE_END_LISTEN_IGNORE", "0.8"))
 WAKE_MODEL_DIR = Path(
     os.environ.get(
         "WAKE_MODEL_DIR",
@@ -284,6 +289,162 @@ def strip_wake_phrase(utterance: str, phrase: str | None = None) -> str:
         if match:
             return match.group(1).strip()
     return text
+
+
+def strip_trailing_wake_phrase(
+    utterance: str,
+    phrase: str | None = None,
+    *,
+    include_short: bool = False,
+) -> str:
+    """Remove a trailing wake phrase (used when wake ends a listen).
+
+    Single-word phrases like "Jarvis" are only stripped from the end when
+    ``include_short`` is True (wake-model hit), so "open Jarvis" stays intact
+    on a normal silence-end.
+    """
+    text = (utterance or "").strip()
+    if not text:
+        return text
+    if matches_wake_phrase(text, phrase):
+        return ""
+    phrases = sorted(_phrases_to_check(phrase), key=lambda p: len(p), reverse=True)
+    for target in phrases:
+        words = [re.escape(w) for w in re.findall(r"\w+", target)]
+        if not words:
+            continue
+        if len(words) < 2 and not include_short:
+            continue
+        pattern = (
+            r"^(.*?)(?:[\s,:\-]+)"
+            + r"[\s,:\-]+".join(words)
+            + r"(?:[.!?]*)\s*$"
+        )
+        match = re.match(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            kept = match.group(1).strip()
+            if kept:
+                return kept
+    return text
+
+
+def _resample_to_wake(pcm: np.ndarray, src_rate: int) -> np.ndarray:
+    pcm = np.asarray(pcm, dtype=np.float32).reshape(-1)
+    src_rate = int(src_rate)
+    if src_rate == WAKE_RATE or pcm.size == 0:
+        return pcm
+    if src_rate > 0 and src_rate % WAKE_RATE == 0:
+        factor = src_rate // WAKE_RATE
+        n = (pcm.size // factor) * factor
+        if n <= 0:
+            return np.zeros(0, dtype=np.float32)
+        return pcm[:n].reshape(-1, factor).mean(axis=1).astype(np.float32)
+    duration = pcm.size / float(src_rate)
+    target_len = max(1, int(round(duration * WAKE_RATE)))
+    x_old = np.linspace(0.0, 1.0, num=pcm.size, endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
+    return np.interp(x_new, x_old, pcm).astype(np.float32)
+
+
+def _score_from_predict(raw) -> float:
+    try:
+        return float(np.asarray(raw).reshape(-1)[0])
+    except Exception:
+        return 0.0
+
+
+class WakeSpotter:
+    """Run openWakeWord on PCM already captured for STT (no second mic)."""
+
+    def __init__(
+        self,
+        *,
+        threshold: float | None = None,
+        ignore_seconds: float | None = None,
+        model=None,
+        keys: list[str] | None = None,
+    ):
+        self.threshold = BARGE_IN_THRESHOLD if threshold is None else float(threshold)
+        ignore = WAKE_END_LISTEN_IGNORE if ignore_seconds is None else float(ignore_seconds)
+        self._ignore_until = time.monotonic() + max(0.0, ignore)
+        self.hit = False
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._keys = list(keys or [])
+        self._model = model
+        if self._model is None:
+            try:
+                self._model = _ensure_model()
+                self._keys = list(_model_keys or self._model.models.keys())
+            except Exception as exc:
+                print(f"[wake] listen-end spotter unavailable ({exc})", flush=True)
+                self._model = None
+                return
+        if not self._keys and self._model is not None:
+            try:
+                self._keys = list(self._model.models.keys())
+            except Exception:
+                self._keys = []
+        try:
+            if self._model is not None:
+                self._model.reset()
+        except Exception:
+            pass
+
+    def feed(self, pcm: np.ndarray, sample_rate: int) -> bool:
+        """Return True once when a wake phrase is detected on this stream."""
+        if self.hit or self._model is None:
+            return False
+        frame = _resample_to_wake(pcm, sample_rate)
+        if frame.size == 0:
+            return False
+        if time.monotonic() < self._ignore_until:
+            return False
+        self._buf = np.concatenate([self._buf, frame]) if self._buf.size else frame
+        while self._buf.size >= CHUNK_SAMPLES:
+            chunk = self._buf[:CHUNK_SAMPLES]
+            self._buf = self._buf[CHUNK_SAMPLES:]
+            audio = (np.clip(chunk, -1.0, 1.0) * 32767.0).astype(np.int16)
+            try:
+                scores = self._model.predict(audio)
+            except Exception:
+                return False
+            for key in self._keys:
+                score = _score_from_predict(
+                    scores.get(key, 0.0) if isinstance(scores, dict) else scores
+                )
+                if score >= self.threshold:
+                    self.hit = True
+                    print(
+                        f"[wake] listen-end via {key} (score={score:.2f})",
+                        flush=True,
+                    )
+                    try:
+                        self._model.reset()
+                    except Exception:
+                        pass
+                    return True
+        return False
+
+
+def listen_end_enabled() -> bool:
+    if WAKE_MODE in {"phrase", "stt", "text", "any"}:
+        return False
+    return os.environ.get("WAKE_END_LISTEN", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def listen_end_spotter() -> WakeSpotter | None:
+    """Spotter that ends STT when the wake word is heard (same as menu Send)."""
+    if not listen_end_enabled():
+        return None
+    spotter = WakeSpotter()
+    if spotter._model is None:
+        return None
+    return spotter
 
 
 def _ensure_model():

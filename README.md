@@ -37,12 +37,31 @@ You'll need to restart the terminal app after granting these.
 
 ## Run
 
-### Voice orchestrator (recommended)
+### Daemon (recommended)
+
+```bash
+cau start          # background orchestrator (--auto); installs `cau` on PATH
+cau stop           # SIGTERM, then SIGKILL if needed
+cau status
+cau restart
+```
+
+`cau start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
+and appends logs to `logs/cau.log`. The first start also installs a `cau` shim
+to `~/.local/bin` (and Homebrew `bin` if writable) so the command works from any
+directory. If `cau` is not found, run `./cau start` from this repo, then add
+`~/.local/bin` to your PATH.
+
+Keyboard barge-in (Space / Esc / Enter) needs a focused terminal — use the wake
+word to interrupt TTS when running as a daemon.
+
+### Voice orchestrator (foreground)
 
 ```bash
 python orchestrator.py
 python orchestrator.py --auto          # computer agent skips per-step confirms
 python agent.py --voice --auto         # same entry via agent.py
+./cau start --no-auto                  # daemon without --auto
 ```
 
 The orchestrator waits for a wake phrase (local openWakeWord by default),
@@ -232,6 +251,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 
 ## Extending it
 
+- `cau` / `cau.py` — daemon CLI (`cau start` / `cau stop`).
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).

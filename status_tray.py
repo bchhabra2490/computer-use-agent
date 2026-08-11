@@ -2,7 +2,7 @@
 macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
-Click for a menu with more logs, open latest run folder, and quit tray.
+Click for a menu with Add Memory, Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,8 +24,10 @@ from app_status import (
     STATUS_PATH,
     active_agents,
     format_tooltip,
+    log as status_log,
     pid_alive,
     read_status,
+    request_mark_done,
     set_tray_pid,
     signal_quit_orchestrator,
     status_label,
@@ -88,6 +91,43 @@ def ensure_tray_running() -> subprocess.Popen | None:
     except Exception as e:
         print(f"[tray] failed to start: {e}", file=sys.stderr)
         return None
+
+
+def _add_memory_from_tray() -> None:
+    """Capture the screen immediately, then describe + save in the background."""
+    try:
+        from memory import capture_screen_png, save_screen_from_png
+
+        png, app = capture_screen_png()
+    except Exception as e:
+        print(f"[tray] add memory screenshot failed: {e}", flush=True)
+        status_log(f"Add memory failed: {e}")
+        return
+
+    status_log(f"Add memory: captured screen ({app or 'unknown app'}), describing…")
+    print(f"[tray] add memory captured ({len(png)} bytes, app={app!r})", flush=True)
+
+    def _describe_and_save() -> None:
+        try:
+            from envfile import load_dotenv
+
+            load_dotenv()
+            from openai import OpenAI
+
+            client = OpenAI()
+            result = save_screen_from_png(
+                client,
+                png,
+                app=app,
+                hint="Saved from menu bar Add Memory",
+            )
+            print(f"[tray] {result}", flush=True)
+            status_log(result)
+        except Exception as e:
+            print(f"[tray] add memory save failed: {e}", flush=True)
+            status_log(f"Add memory failed: {e}")
+
+    threading.Thread(target=_describe_and_save, name="tray-add-memory", daemon=True).start()
 
 
 def _glyph_for(state: str) -> str:
@@ -185,9 +225,11 @@ def main() -> None:
 
         def tick_(self, _timer) -> None:
             data = read_status()
+            agents = active_agents(data)
             sig = (
                 f"{data.get('state')}|{data.get('detail')}|{data.get('updated_at')}|"
-                f"{len(data.get('logs') or [])}"
+                f"{len(data.get('logs') or [])}|{len(agents)}|"
+                f"{data.get('done_requested')}"
             )
             if sig == self.lastSig:
                 return
@@ -249,7 +291,7 @@ def main() -> None:
                             age = f" · {secs}s"
                         else:
                             age = f" · {secs // 60}m"
-                    title = f"  [{kind}] {task[:55]}{age}"
+                    title = f"  [{kind}] {task[:50]}{age}"
                     if len(title) > 90:
                         title = title[:87] + "…"
                     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -259,6 +301,14 @@ def main() -> None:
                     )
                     item.setEnabled_(False)
                     self.menu.addItem_(item)
+                    mark = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                        "    Mark Done",
+                        "markDone:",
+                        "",
+                    )
+                    mark.setTarget_(self)
+                    mark.setRepresentedObject_(str(a.get("id") or ""))
+                    self.menu.addItem_(mark)
             else:
                 idle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                     "  (no subagents running)",
@@ -298,6 +348,26 @@ def main() -> None:
                     )
                     item.setEnabled_(False)
                     self.menu.addItem_(item)
+
+            self.menu.addItem_(NSMenuItem.separatorItem())
+
+            add_mem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Add Memory",
+                "addMemory:",
+                "",
+            )
+            add_mem.setTarget_(self)
+            self.menu.addItem_(add_mem)
+
+            if agents:
+                mark_all = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    "Mark Task Done",
+                    "markDone:",
+                    "",
+                )
+                mark_all.setTarget_(self)
+                mark_all.setRepresentedObject_("")
+                self.menu.addItem_(mark_all)
 
             self.menu.addItem_(NSMenuItem.separatorItem())
 
@@ -364,6 +434,19 @@ def main() -> None:
                 )
             except Exception:
                 NSWorkspace.sharedWorkspace().openFile_(str(STATUS_PATH.parent))
+
+        def addMemory_(self, _sender) -> None:
+            _add_memory_from_tray()
+
+        def markDone_(self, sender) -> None:
+            agent_id = None
+            try:
+                obj = sender.representedObject()
+                if obj:
+                    agent_id = str(obj).strip() or None
+            except Exception:
+                agent_id = None
+            request_mark_done(agent_id)
 
         def quitOrchestrator_(self, _sender) -> None:
             signal_quit_orchestrator()

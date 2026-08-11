@@ -168,8 +168,13 @@ WAKE_MODEL=hey_bob.onnx WAKE_PHRASE="Hey Bob" python orchestrator.py
 A small **menu-bar icon** starts with the orchestrator or agent:
 
 - **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
-- **Click** — in-progress computer agents, recent logs, **Quit Orchestrator**,
-  open latest `logs/` run folder, quit the icon
+- **Click** — **Add Memory** (screenshot + description), in-progress agents,
+  **Mark Task Done**, recent logs, **Quit Orchestrator**, open latest `logs/`
+  run folder, quit the icon
+
+While a computer task is running, **Mark Task Done** (menu bar) or saying
+“mark it done” / “no other action is required” stops that job. The agent also
+calls `mark_done` itself when the request is finished.
 
 ```bash
 python status_tray.py          # run the icon alone (optional)
@@ -231,7 +236,16 @@ Say **Hey Jarvis**, then something like:
 Reusable playbooks live under `skills/<name>/SKILL.md` (YAML frontmatter with
 `name` + `description`, then markdown steps). The computer agent sees the
 catalog and loads full instructions with `read_skill`. Starter skills:
-`open-app`, `web-search`, `hn-comments`.
+`open-app`, `web-search`, `hn-comments`, `read-memory`.
+
+### Memories
+
+Durable notes live under `memory/personal/` (who the user is),
+`memory/apps/` (per-application usernames, quirks, usual workflows), and
+`memory/screens/` (screenshot + LLM description). The orchestrator and
+computer agent use `read_memory` / `save_memory` / `save_screen_memory`
+(skill `read-memory`). Say “remember that…” to store a fact, or “save the
+screen as memory” to snapshot the display. Those folders are gitignored.
 
 Every computer-agent run writes a step log under `logs/<timestamp>_<task>/`.
 When a task **completes**, reusable workflows are saved automatically as skills
@@ -261,6 +275,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `accessibility.py` — macOS AX tree → text for `read_ui_text`.
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks.
+- `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`).
 - `task_log.py` — per-run logs under `logs/`.
 - `stt.py` / `sarvam_stt.py` / `tts.py` / `sarvam_tts.py` — speech in/out
   (OpenAI or Sarvam).

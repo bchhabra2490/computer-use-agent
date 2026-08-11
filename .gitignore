@@ -8,3 +8,7 @@ __pycache__/
 models/wake/
 .DS_Store
 tts_latency.log
+memory/personal/*.md
+memory/apps/*.md
+memory/screens/*
+!memory/screens/.gitkeep

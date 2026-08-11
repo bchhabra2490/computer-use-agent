@@ -40,6 +40,8 @@ from openai import OpenAI
 from actions import DesktopController, format_display_context, list_monitors
 from accessibility import read_ui_text
 from app_status import (
+    consume_mark_done,
+    is_mark_done_utterance,
     register_agent_process,
     remove_agent,
     set_and_log,
@@ -53,6 +55,7 @@ from evaluator import (
     resolve_agent_model,
     screenshot_b64_from_computer_output,
 )
+from memory import MEMORY_TOOLS, format_memory_catalog, run_memory_tool
 from skills import (
     discover_skills,
     format_skill_catalog,
@@ -210,6 +213,29 @@ RUN_TERMINAL_TOOL = {
     "strict": True,
 }
 
+MARK_DONE_TOOL = {
+    "type": "function",
+    "name": "mark_done",
+    "description": (
+        "End this computer-use run. Call when the user's request is fully "
+        "satisfied and no other UI or tool action is required — do not keep "
+        "clicking or taking screenshots. Also call if the user says to mark "
+        "the task done."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "One or two sentences on what was completed.",
+            },
+        },
+        "required": ["summary"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 TOOLS = [
     {"type": "computer"},
     ASK_USER_TOOL,
@@ -217,7 +243,17 @@ TOOLS = [
     READ_SKILL_TOOL,
     READ_UI_TEXT_TOOL,
     RUN_TERMINAL_TOOL,
+    MARK_DONE_TOOL,
+    *MEMORY_TOOLS,
 ]
+
+
+class TaskMarkedDone(Exception):
+    """Raised when the model or user ends the computer-use run."""
+
+    def __init__(self, summary: str = "Task complete."):
+        self.summary = (summary or "Task complete.").strip()
+        super().__init__(self.summary)
 
 
 def confirm(actions: list, *, client: OpenAI | None = None, voice: bool = False) -> bool:
@@ -303,6 +339,19 @@ def _handle_ask_user(client: OpenAI, call, log: TaskLog, ask_user_bridge=None) -
         "type": "function_call_output",
         "call_id": call.call_id,
         "output": answer,
+    }
+
+
+def _handle_memory(call, log: TaskLog, client: OpenAI | None = None) -> dict:
+    args = json.loads(call.arguments or "{}")
+    output = run_memory_tool(call.name, args, client=client)
+    preview = output.replace("\n", " ")[:160]
+    print(f"[memory] {call.name} → {preview}")
+    log.record(call.name, preview, {"args": args, "output": output[:2000]})
+    return {
+        "type": "function_call_output",
+        "call_id": call.call_id,
+        "output": output,
     }
 
 
@@ -504,6 +553,19 @@ def _handle_function_call(
         return _handle_run_terminal(
             call, log, auto=auto, client=client, voice=voice
         )
+    if call.name in {
+        "list_memories",
+        "read_memory",
+        "save_memory",
+        "save_screen_memory",
+    }:
+        return _handle_memory(call, log, client=client)
+    if call.name == "mark_done":
+        args = json.loads(call.arguments or "{}")
+        summary = (args.get("summary") or "Task complete.").strip()
+        print(f"[agent] mark_done: {summary[:160]}")
+        log.record("mark_done", summary[:200], {"summary": summary})
+        raise TaskMarkedDone(summary)
     log.record("unsupported_tool", call.name, {"name": call.name})
     return {
         "type": "function_call_output",
@@ -716,10 +778,12 @@ def run(
     display_ctx = format_display_context(monitors, screenshot_size=(shot_w, shot_h))
     skills = discover_skills()
     skill_catalog = format_skill_catalog(skills)
+    memory_catalog = format_memory_catalog()
 
     print(f"\nTask: {task}")
     print(display_ctx)
     print(skill_catalog)
+    print(memory_catalog)
     log.record(
         "start",
         task,
@@ -737,6 +801,8 @@ def run(
             return None
         if not pending:
             return None
+        if any(is_mark_done_utterance(m) for m in pending):
+            raise TaskMarkedDone("User marked the task done.")
         for i, msg in enumerate(pending, 1):
             print(f"[agent] ZeroMQ → context [{i}/{len(pending)}]: {msg!r}", flush=True)
             log.record("zmq_message", msg[:200], {"text": msg, "index": i})
@@ -777,9 +843,12 @@ def run(
                 f"{task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
+                f"{memory_catalog}\n\n"
                 "Workflow:\n"
                 "1. If a skill matches this task, call read_skill for it (and any "
-                "companion files you need) before using the computer tool.\n"
+                "companion files you need) before using the computer tool. For "
+                "accounts, names, or app preferences, call read_memory first "
+                "(skill read-memory).\n"
                 "2. Follow the skill’s steps; adapt to what you see on screen.\n"
                 "3. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI.\n"
@@ -787,17 +856,24 @@ def run(
                 "5. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
                 "6. When you need clarification or information only the human knows, "
-                "call ask_user instead of guessing.\n"
+                "call ask_user instead of guessing — unless read_memory already has it. "
+                "save_memory when they state a durable fact. "
+                "If they want the current display remembered, call save_screen_memory "
+                "(screenshot + description) — do not use the computer tool for that.\n"
                 "7. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
                 "8. You may periodically receive evaluator coaching — treat it as "
-                "advisory guidance and adapt."
+                "advisory guidance and adapt.\n"
+                "9. When the request is complete and no other action is required, "
+                "call mark_done (do not keep using the computer tool)."
             ),
         )
 
         steps = 0
         last_messages: list[str] = []
         while steps < max_steps:
+            if consume_mark_done(agent_id):
+                raise TaskMarkedDone("User marked the task done.")
             last_messages = _print_and_log_messages(response, log) or last_messages
 
             computer_calls = [i for i in response.output if i.type == "computer_call"]
@@ -892,6 +968,13 @@ def run(
         if summary:
             return f"max_steps\nPartial result:\n{summary}"
         return "max_steps"
+    except TaskMarkedDone as e:
+        print(f"\nDone — {e.summary}")
+        if voice:
+            speak(client, "Done.")
+        log.finish("completed", e.summary)
+        maybe_create_skill(client, log, voice=voice)
+        return f"completed\nResult:\n{e.summary}"
     except KeyboardInterrupt:
         log.finish("interrupted", "KeyboardInterrupt")
         raise

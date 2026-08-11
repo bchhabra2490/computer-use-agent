@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -39,6 +40,8 @@ def _default_state() -> dict[str, Any]:
         "agent_pid": None,
         "tray_pid": None,
         "quit_requested": False,
+        "done_requested": False,
+        "done_agent_id": None,
         "agents": [],  # active subagents / computer-agent jobs
     }
 
@@ -139,6 +142,8 @@ def register_orchestrator(pid: int | None = None) -> None:
         data = _read()
         data["orchestrator_pid"] = int(pid if pid is not None else os.getpid())
         data["quit_requested"] = False
+        data["done_requested"] = False
+        data["done_agent_id"] = None
         _write(data)
 
 
@@ -186,6 +191,83 @@ def clear_quit_request() -> None:
 def quit_requested() -> bool:
     with _lock:
         return bool(_read().get("quit_requested"))
+
+
+_MARK_DONE_RE = re.compile(
+    r"\b("
+    r"mark (?:it |the task |this |the job )?(?:as )?done"
+    r"|mark done"
+    r"|that(?:'s| is) done"
+    r"|task is done"
+    r"|stop (?:the )?(?:task|agent)"
+    r"|no (?:other|further) actions?(?: (?:is|are))? required"
+    r"|no further action"
+    r"|nothing else (?:to do|needed|required)"
+    r"|that(?:'s| is) all(?: we need)?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_mark_done_utterance(text: str) -> bool:
+    """True when the user wants the running computer task marked complete."""
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+    if _MARK_DONE_RE.search(low):
+        return True
+    return low in {"done", "finished", "complete", "that's it", "thats it"}
+
+
+def request_mark_done(agent_id: str | None = None) -> None:
+    """Ask the running computer-agent job to finish (menu bar or voice)."""
+    agent_id = (agent_id or "").strip() or None
+    with _lock:
+        data = _read()
+        data["done_requested"] = True
+        data["done_agent_id"] = agent_id
+        _write(data)
+    if agent_id:
+        log(f"Mark done requested (agent {agent_id})")
+    else:
+        log("Mark done requested")
+
+
+def mark_done_pending(agent_id: str | None = None) -> bool:
+    """True if mark-done was requested for this agent (or for all agents)."""
+    agent_id = (agent_id or "").strip() or None
+    with _lock:
+        data = _read()
+        if not data.get("done_requested"):
+            return False
+        target = (data.get("done_agent_id") or "").strip() or None
+        if target and agent_id and target != agent_id:
+            return False
+        return True
+
+
+def consume_mark_done(agent_id: str | None = None) -> bool:
+    """Like mark_done_pending, but clears the flag when it matches."""
+    agent_id = (agent_id or "").strip() or None
+    with _lock:
+        data = _read()
+        if not data.get("done_requested"):
+            return False
+        target = (data.get("done_agent_id") or "").strip() or None
+        if target and agent_id and target != agent_id:
+            return False
+        data["done_requested"] = False
+        data["done_agent_id"] = None
+        _write(data)
+        return True
+
+
+def clear_mark_done() -> None:
+    with _lock:
+        data = _read()
+        data["done_requested"] = False
+        data["done_agent_id"] = None
+        _write(data)
 
 
 def pid_alive(pid: Any) -> bool:

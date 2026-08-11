@@ -12,7 +12,8 @@ description: >-
 
 1. Follow **open-app** / **web-search** as needed to open Chrome.
 2. Go to `https://news.ycombinator.com`.
-3. If the username is unknown, call `ask_user` for their HN username.
+3. `read_memory` kind `app`, name `hn` for a stored username. If missing,
+   `ask_user`, then `save_memory` so you do not ask again.
 4. Open their profile (`https://news.ycombinator.com/user?id=USERNAME`) or use
    the site search / threads link from the header when logged in.
 5. Open their submissions, then open each recent story’s comment thread and

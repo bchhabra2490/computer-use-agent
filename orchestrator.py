@@ -5,6 +5,7 @@ Tools:
   - start_task — hand off to the computer-use agent (background thread)
   - ask_user — speak a question and capture a spoken reply
   - give_response_to_user — speak a reply (optionally end the session)
+  - list_memories / read_memory / save_memory / save_screen_memory — notes + screen snapshots
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
 Cloud STT only runs after the wake word. While Jarvis is speaking, say
@@ -43,9 +44,13 @@ from openai import OpenAI
 import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
+    active_agents,
+    is_mark_done_utterance,
+    mark_done_pending,
     quit_requested,
     register_orchestrator,
     remove_agent,
+    request_mark_done,
     request_quit,
     set_and_log,
     set_state,
@@ -57,6 +62,13 @@ from bus import (
     AgentMessagePublisher,
     AskUserBridge,
     strip_wake_prefix,
+)
+from memory import (
+    MEMORY_TOOLS,
+    capture_and_save_screen,
+    format_memory_catalog,
+    is_save_screen_utterance,
+    run_memory_tool,
 )
 from skills import format_skill_catalog
 from status_tray import ensure_tray_running
@@ -164,7 +176,7 @@ GIVE_RESPONSE_TOOL = {
     "strict": True,
 }
 
-TOOLS = [START_TASK_TOOL, ASK_USER_TOOL, GIVE_RESPONSE_TOOL]
+TOOLS = [START_TASK_TOOL, ASK_USER_TOOL, GIVE_RESPONSE_TOOL, *MEMORY_TOOLS]
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
@@ -172,10 +184,18 @@ You receive transcribed speech from the user. Decide the next action with tools 
 - give_response_to_user — speak an answer or acknowledgment (no desktop control)
 - ask_user — ask one clarifying question when needed, then wait for their reply
 - start_task — run the computer-use agent for real mouse/keyboard/UI work
+- list_memories / read_memory / save_memory — personal facts and per-app notes
+  under memory/ (see skill read-memory). Read before asking for a known preference;
+  save when the user says remember/save this.
+- save_screen_memory — screenshot the desktop, describe it, store under
+  memory/screens/. Use when they say "save the screen as memory" (do not start_task).
 
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
 - Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
+- Call read_memory before ask_user when the missing detail may already be stored
+  (name, usernames, usual apps, what was on screen). save_memory for durable
+  facts they state. save_screen_memory when they want the current display stored.
 - Call ask_user when a required detail is missing (which app, which account, confirm destructive work).
 - Keep spoken messages short.
 - After each start_task, you receive that task's result plus the full history of tasks
@@ -189,9 +209,14 @@ Rules:
 - While a computer task is running, the user can interrupt/update by saying
   the wake word ("Hey Jarvis") then an instruction — those go straight to the
   agent; you do not need to call tools for them.
+- If they say "mark it done", "that's done", or "no other action is required"
+  while a computer task is running, the runtime stops that task — do not
+  start_task again for the same work.
 
 Available desktop skills the computer agent can load:
 {skills}
+
+{memories}
 """
 
 
@@ -451,6 +476,19 @@ def _listen_after_barge(
     return command or None
 
 
+def _save_screen_now(client: OpenAI, hint: str) -> str:
+    """Capture + describe the display immediately (don't wait for start_task)."""
+    set_and_log("thinking", "Saving screen as memory")
+    try:
+        result = capture_and_save_screen(client, hint=hint)
+        print(f"[orchestrator] {result}", flush=True)
+        return result
+    except Exception as e:
+        msg = f"Could not save screen memory: {e}"
+        print(f"[orchestrator] {msg}", flush=True)
+        return msg
+
+
 def _speak(client: OpenAI, text: str) -> str | None:
     """
     Speak `text`. If the user barges in (wake word or keyboard), stop and listen.
@@ -554,27 +592,91 @@ def _supervise_agent(
         "agent questions are spoken here automatically."
     )
     set_and_log("agent", f"Computer agent running: {job.task[:120]}", task=job.task)
+    notified_done = False
+
+    def _stop_for_done() -> bool:
+        return job.done.is_set() or ask_bridge.has_pending() or quit_requested() or mark_done_pending(
+            job.call_id
+        )
+
+    def _signal_agent_done(*, spoken: bool) -> None:
+        nonlocal notified_done
+        request_mark_done(job.call_id)
+        if not notified_done:
+            try:
+                publisher.send(
+                    "The user marked this task done. Stop all UI actions. "
+                    "Call mark_done and do not continue."
+                )
+            except Exception as e:
+                print(f"[orchestrator] bus send failed: {e}")
+            notified_done = True
+        if spoken:
+            barged = _speak(client, "Marking it done.")
+            if barged and not is_mark_done_utterance(barged):
+                try:
+                    publisher.send(barged)
+                except Exception as e:
+                    print(f"[orchestrator] bus send failed: {e}")
+
     while not job.done.is_set():
         if quit_requested():
             print("[orchestrator] quit requested — leaving agent supervision")
             break
+        if mark_done_pending(job.call_id):
+            print("[orchestrator] mark done requested — stopping computer agent")
+            _signal_agent_done(spoken=False)
+            # Agent consumes the flag on its next turn; keep supervising until it exits.
+            time.sleep(0.2)
+            continue
         if _service_agent_ask(client, ask_bridge):
             continue
 
         command = _listen_command(
             client,
-            should_stop=lambda: job.done.is_set() or ask_bridge.has_pending() or quit_requested(),
+            should_stop=_stop_for_done,
             wake_prompt=f"Waiting for {format_wake_phrases()}… (agent busy)",
             listen_prompt="Listening for mid-task update…",
         )
         if quit_requested():
             break
+        if mark_done_pending(job.call_id):
+            _signal_agent_done(spoken=False)
+            continue
         if command is None:
             continue
 
         print(f'\n[user] "{command}"')
         status_log(f'[user] "{command}"')
         low = command.lower().strip()
+        if is_mark_done_utterance(command):
+            print("[orchestrator] user marked the running task done")
+            _signal_agent_done(spoken=True)
+            continue
+        if is_save_screen_utterance(command):
+            barged = _speak(client, "Saving the screen.")
+            if barged:
+                pending_cmd = barged
+                if is_mark_done_utterance(pending_cmd):
+                    _signal_agent_done(spoken=True)
+                    continue
+                if is_save_screen_utterance(pending_cmd):
+                    command = pending_cmd
+                else:
+                    try:
+                        publisher.send(pending_cmd)
+                    except Exception as e:
+                        print(f"[orchestrator] bus send failed: {e}")
+                    continue
+            result = _save_screen_now(client, command)
+            ok = result.lower().startswith("saved")
+            barged = _speak(client, "Saved." if ok else "Could not save the screen.")
+            if barged:
+                try:
+                    publisher.send(barged)
+                except Exception as e:
+                    print(f"[orchestrator] bus send failed: {e}")
+            continue
         if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
             barged = _speak(
                 client,
@@ -715,6 +817,15 @@ def _handle_tool(
                 # Defer function_call_output until the agent thread finishes.
                 return None, False, job
 
+    elif call.name in {
+        "list_memories",
+        "read_memory",
+        "save_memory",
+        "save_screen_memory",
+    }:
+        output = run_memory_tool(call.name, args, client=client)
+        print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
+
     else:
         output = f"Unsupported tool: {call.name}"
 
@@ -840,7 +951,8 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             llm_tts = None
 
     skills = format_skill_catalog()
-    system = SYSTEM_PROMPT.format(skills=skills)
+    memories = format_memory_catalog()
+    system = SYSTEM_PROMPT.format(skills=skills, memories=memories)
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
 
@@ -889,6 +1001,26 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 status_log(f'[user] "{utterance}"')
 
             low = utterance.lower().strip()
+            if is_mark_done_utterance(utterance):
+                if active_agents():
+                    request_mark_done()
+                    barged = _speak(client, "Marking it done.")
+                else:
+                    barged = _speak(client, "Nothing is running.")
+                if barged:
+                    pending = barged
+                continue
+            if is_save_screen_utterance(utterance):
+                barged = _speak(client, "Saving the screen.")
+                if barged:
+                    pending = barged
+                    continue
+                result = _save_screen_now(client, utterance)
+                ok = result.lower().startswith("saved")
+                barged = _speak(client, "Saved." if ok else "Could not save the screen.")
+                if barged:
+                    pending = barged
+                continue
             if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
                 barged = _speak(client, "Goodbye.")
                 if barged:

@@ -473,14 +473,131 @@ def _listen_end_spotter():
         return None
 
 
+def _listen_end_hint() -> str:
+    try:
+        from wake import format_listen_end_hint
+
+        return format_listen_end_hint()
+    except Exception:
+        return "Send"
+
+
+def _end_phrase_live_enabled() -> bool:
+    if os.environ.get("WAKE_END_LIVE_STT", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return False
+    try:
+        from wake import END_LISTEN_PHRASES, listen_end_enabled
+
+        return listen_end_enabled() and bool(END_LISTEN_PHRASES)
+    except Exception:
+        return False
+
+
 def _strip_listen_wake(text: str, *, wake_ended: bool) -> str:
     try:
-        from wake import strip_trailing_wake_phrase, strip_wake_phrase
+        from wake import (
+            strip_trailing_end_phrase,
+            strip_trailing_wake_phrase,
+            strip_wake_phrase,
+        )
     except Exception:
         return (text or "").strip()
     out = strip_wake_phrase(text)
-    out = strip_trailing_wake_phrase(out, include_short=wake_ended)
+    out = strip_trailing_end_phrase(out)
+    if wake_ended:
+        out = strip_trailing_wake_phrase(out, include_short=True)
     return out.strip()
+
+
+class _EndPhraseWatcher:
+    """Live STT sidecar: stop recording when the transcript ends with the closer."""
+
+    def __init__(self, client: OpenAI):
+        self.hit = threading.Event()
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+        self._client = client
+        self._conn = None
+        self._thread: threading.Thread | None = None
+        self.partial = ""
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run,
+            name="end-phrase-watch",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            from wake import transcript_has_end_phrase
+
+            with self._client.realtime.connect(
+                extra_query={"intent": "transcription"}
+            ) as connection:
+                connection.session.update(session=_transcription_session(mode="freeform"))
+                with self._lock:
+                    self._conn = connection
+                self._ready.set()
+                for event in connection:
+                    if self._stop.is_set() or self.hit.is_set():
+                        break
+                    et = _event_type(event)
+                    if et == "conversation.item.input_audio_transcription.delta":
+                        piece = _event_delta(event)
+                        if not piece:
+                            continue
+                        self.partial += piece
+                        if transcript_has_end_phrase(self.partial):
+                            print("[stt] over and out — processing audio.")
+                            self.hit.set()
+                            break
+                    elif et == "conversation.item.input_audio_transcription.completed":
+                        text = _event_transcript(event) or self.partial
+                        if transcript_has_end_phrase(text):
+                            print("[stt] over and out — processing audio.")
+                            self.hit.set()
+                            break
+        except Exception as exc:
+            print(f"[stt] end-phrase watch unavailable ({exc})", file=sys.stderr)
+        finally:
+            self._ready.set()
+            with self._lock:
+                self._conn = None
+
+    def feed_pcm24k(self, pcm: np.ndarray) -> None:
+        if self.hit.is_set() or self._stop.is_set() or not self._ready.is_set():
+            return
+        arr = np.asarray(pcm, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return
+        with self._lock:
+            conn = self._conn
+        if conn is None:
+            return
+        try:
+            conn.input_audio_buffer.append(audio=_float_to_pcm16_b64(arr))
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        with self._lock:
+            conn = self._conn
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 def listen_realtime(
@@ -514,6 +631,7 @@ def listen_realtime(
     try:
         if _use_sarvam():
             return _listen_sarvam(
+                client,
                 prompt=prompt,
                 mode=mode,
                 max_wait_for_speech=max_wait_for_speech,
@@ -535,6 +653,7 @@ def listen_realtime(
 
 
 def _listen_sarvam(
+    client: OpenAI,
     *,
     prompt: str | None = None,
     mode: str = "freeform",
@@ -546,30 +665,43 @@ def _listen_sarvam(
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     max_secs = min(MAX_RECORD_SECONDS, SARVAM_MAX_SECONDS)
+    hint = _listen_end_hint()
     default_prompt = (
-        f"Listening for yes/no… (sends after {idle:g}s silence, Send, or wake word → Sarvam)"
+        f"Listening for yes/no… (sends after {idle:g}s silence, {hint} → Sarvam)"
         if mode == "confirm"
         else (
-            f"Listening… (sends after {idle:g}s silence, Send, or wake word "
+            f"Listening… (sends after {idle:g}s silence, {hint} "
             f"→ Sarvam {SARVAM_STT_MODEL})"
         )
     )
 
     spotter = _listen_end_spotter()
-    wav = record_until_silence(
-        silence_seconds=idle,
-        speech_peak=SPEECH_PEAK,
-        max_wait_for_speech=wait_limit,
-        max_record_seconds=max_secs,
-        prompt=prompt or default_prompt,
-        require_speech=True,
-        wake_spotter=spotter,
-    )
+    watch = None
+    if _end_phrase_live_enabled():
+        watch = _EndPhraseWatcher(client)
+        watch.start()
+    try:
+        wav = record_until_silence(
+            silence_seconds=idle,
+            speech_peak=SPEECH_PEAK,
+            max_wait_for_speech=wait_limit,
+            max_record_seconds=max_secs,
+            prompt=prompt or default_prompt,
+            require_speech=True,
+            wake_spotter=spotter,
+            end_watch=watch,
+        )
+    finally:
+        if watch is not None:
+            watch.stop()
     try:
         text = transcribe_wav(wav)
     except Exception as e:
         raise NoSpeechError(f"Sarvam STT failed: {e}") from e
-    text = _strip_listen_wake(text or "", wake_ended=bool(spotter and spotter.hit))
+    text = _strip_listen_wake(
+        text or "",
+        wake_ended=bool((spotter and spotter.hit) or (watch and watch.hit.is_set())),
+    )
     if not text:
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     return text, wav
@@ -587,12 +719,13 @@ def _listen_realtime_body(
     capture_rate = _capture_sample_rate()
     _log_mic_settings(capture_rate)
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
+    hint = _listen_end_hint()
     print(
         prompt
         or (
-            f"Listening for yes/no… (sends after {idle:g}s without new words, Send, or wake word)"
+            f"Listening for yes/no… (sends after {idle:g}s without new words, {hint})"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s without new words, Send, or wake word)"
+            else f"Listening… (sends after {idle:g}s without new words, {hint})"
         )
     )
 
@@ -740,6 +873,15 @@ def _listen_realtime_body(
                                     )
                             live = shared["partial"]
                         _print_live(live)
+                        try:
+                            from wake import transcript_has_end_phrase
+
+                            if transcript_has_end_phrase(live):
+                                print("\n[stt] over and out — processing audio.")
+                                wake_send.set()
+                                _commit_once(connection, "end phrase — processing audio.")
+                        except Exception:
+                            pass
                 elif et == "conversation.item.input_audio_transcription.completed":
                     with state_lock:
                         fallback = shared["partial"].strip()
@@ -826,6 +968,7 @@ def record_until_silence(
     prompt: str = "Listening… (pause when done)",
     require_speech: bool = False,
     wake_spotter=None,
+    end_watch=None,
 ) -> bytes:
     _prepare_mic()
     capture_rate = int(sample_rate) if sample_rate else _capture_sample_rate()
@@ -845,8 +988,17 @@ def record_until_silence(
         while total < max_record_seconds:
             data, _ = stream.read(chunk_frames)
             cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
-            chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
+            pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
+            chunks.append(pcm_24k)
             total += CHUNK_SECONDS
+            if end_watch is not None:
+                try:
+                    end_watch.feed_pcm24k(pcm_24k)
+                    if end_watch.hit.is_set():
+                        sent = True
+                        break
+                except Exception:
+                    pass
             if wake_spotter is not None:
                 try:
                     if wake_spotter.feed(cleaned, capture_rate):
@@ -1043,17 +1195,18 @@ def listen_once(
 ) -> str:
     """Capture one utterance via the configured STT provider (OpenAI or Sarvam)."""
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
+    hint = _listen_end_hint()
     if _use_sarvam():
         default_prompt = (
-            f"Say yes or no now… (sends after {idle:g}s silence, Send, or wake word)"
+            f"Say yes or no now… (sends after {idle:g}s silence, {hint})"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s silence, Send, or wake word)"
+            else f"Listening… (sends after {idle:g}s silence, {hint})"
         )
     else:
         default_prompt = (
-            f"Say yes or no now… (sends after {idle:g}s without new words, Send, or wake word)"
+            f"Say yes or no now… (sends after {idle:g}s without new words, {hint})"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s without new words, Send, or wake word)"
+            else f"Listening… (sends after {idle:g}s without new words, {hint})"
         )
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):

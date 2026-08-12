@@ -1,9 +1,9 @@
 #!/bin/sh
-# cau — computer-use-agent daemon CLI
+# cua — computer-use-agent daemon CLI
 ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 if [ -x "$ROOT/.venv/bin/python" ]; then
   PY="$ROOT/.venv/bin/python"
 else
   PY="${PYTHON:-python3}"
 fi
-exec "$PY" "$ROOT/cau.py" "$@"
+exec "$PY" "$ROOT/cua.py" "$@"

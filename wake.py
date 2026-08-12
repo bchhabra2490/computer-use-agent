@@ -5,12 +5,14 @@ Two modes (WAKE_MODE):
   - model  — openWakeWord ONNX classifier (pretrained or your custom .onnx)
   - phrase — any phrase via STT matching (no model training; uses the STT API)
 
-While STT is listening (model mode), the same mic stream is scored so a second
-wake phrase ends capture and starts processing (like menu Send).
+While STT is listening, say **over and out** (or `WAKE_END_PHRASE`) to end
+capture and start processing (like menu Send). Optional acoustic end models
+are still available via `WAKE_END_MODEL` (alexa, hey_mycroft, …).
 
 Examples:
   WAKE_MODEL=hey_jarvis WAKE_PHRASE="Hey Jarvis,Jarvis"   # default (either phrase)
-  WAKE_MODEL=alexa WAKE_PHRASE=Alexa
+  WAKE_END_PHRASE="over and out,over n out"               # send while listening
+  WAKE_END_MODEL=alexa WAKE_END_PHRASE=Alexa              # optional ONNX stop word
   WAKE_MODEL=/path/to/hey_bob.onnx WAKE_PHRASE="Hey Bob" # custom ONNX
   WAKE_MODE=phrase WAKE_PHRASE="Okay Computer,Computer"  # any phrases via STT
 """
@@ -34,8 +36,8 @@ CHUNK_SAMPLES = 1280
 DEFAULT_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
 # Slightly higher bar while TTS is playing (reduce echo false triggers).
 BARGE_IN_THRESHOLD = float(os.environ.get("WAKE_BARGE_THRESHOLD", "0.6"))
-# Ignore this many seconds after STT starts so the activation wake isn't reused.
-WAKE_END_LISTEN_IGNORE = float(os.environ.get("WAKE_END_LISTEN_IGNORE", "0.8"))
+# Ignore this many seconds after STT starts (shorter now that end ≠ start word).
+WAKE_END_LISTEN_IGNORE = float(os.environ.get("WAKE_END_LISTEN_IGNORE", "0.25"))
 WAKE_MODEL_DIR = Path(
     os.environ.get(
         "WAKE_MODEL_DIR",
@@ -53,6 +55,7 @@ _FEATURE_MODELS = (
 )
 
 # Alias → release asset + default spoken phrase.
+# End-listen should use a *wake word*, not timer/weather (those are long intents).
 PRETRAINED: dict[str, tuple[str, str]] = {
     "hey_jarvis": ("hey_jarvis_v0.1.onnx", "Hey Jarvis"),
     "jarvis": ("hey_jarvis_v0.1.onnx", "Hey Jarvis"),
@@ -61,14 +64,16 @@ PRETRAINED: dict[str, tuple[str, str]] = {
     "mycroft": ("hey_mycroft_v0.1.onnx", "Hey Mycroft"),
     "hey_rhasspy": ("hey_rhasspy_v0.1.onnx", "Hey Rhasspy"),
     "rhasspy": ("hey_rhasspy_v0.1.onnx", "Hey Rhasspy"),
-    "timer": ("timer_v0.1.onnx", "Timer"),
-    "weather": ("weather_v0.1.onnx", "Weather"),
+    "timer": ("timer_v0.1.onnx", "set a timer"),
+    "weather": ("weather_v0.1.onnx", "what's the weather"),
 }
 
 _RELEASE_BASE = "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
 
 _model = None
 _model_keys: list[str] = []
+_start_model_keys: list[str] = []
+_end_model_keys: list[str] = []
 _last_wake_remainder: str | None = None
 
 
@@ -108,6 +113,19 @@ def _parse_wake_phrases(raw: str) -> list[str]:
 
 _MODEL_SPECS = _parse_model_specs()
 _DEFAULT_PHRASES = "Hey Jarvis,Jarvis"
+
+
+def _parse_end_model_specs() -> list[str]:
+    """Optional ONNX for ending a listen. Empty = phrase-only (over and out)."""
+    raw = (os.environ.get("WAKE_END_MODEL") or "").strip()
+    if not raw or raw.lower() in {"0", "false", "no", "off", "none", "phrase"}:
+        return []
+    if raw.lower() in {"same", "start", "wake"}:
+        return list(_MODEL_SPECS)
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+_END_MODEL_SPECS = _parse_end_model_specs()
 _wake_phrase_env = (os.environ.get("WAKE_PHRASE") or "").strip()
 if _wake_phrase_env:
     WAKE_PHRASES = _parse_wake_phrases(_wake_phrase_env)
@@ -124,15 +142,42 @@ if not WAKE_PHRASES:
 # Primary phrase (first) kept for backward-compatible imports / single-string APIs.
 WAKE_PHRASE = WAKE_PHRASES[0]
 
+_END_PHRASE_DEFAULT = "over and out,over n out"
+_end_phrase_env = (os.environ.get("WAKE_END_PHRASE") or "").strip()
+if _end_phrase_env:
+    END_LISTEN_PHRASES = _parse_wake_phrases(_end_phrase_env)
+elif _END_MODEL_SPECS:
+    END_LISTEN_PHRASES = [_default_phrase_for_models(_END_MODEL_SPECS)]
+else:
+    END_LISTEN_PHRASES = _parse_wake_phrases(_END_PHRASE_DEFAULT)
+if not END_LISTEN_PHRASES:
+    END_LISTEN_PHRASES = ["over and out"]
+
+
+def _format_phrase_list(phrases: list[str]) -> str:
+    if len(phrases) == 1:
+        return f"'{phrases[0]}'"
+    if len(phrases) == 2:
+        return f"'{phrases[0]}' or '{phrases[1]}'"
+    head = ", ".join(f"'{p}'" for p in phrases[:-1])
+    return f"{head}, or '{phrases[-1]}'"
+
 
 def format_wake_phrases() -> str:
     """Human-readable wake list, e.g. \"'Hey Jarvis' or 'Jarvis'\"."""
-    if len(WAKE_PHRASES) == 1:
-        return f"'{WAKE_PHRASES[0]}'"
-    if len(WAKE_PHRASES) == 2:
-        return f"'{WAKE_PHRASES[0]}' or '{WAKE_PHRASES[1]}'"
-    head = ", ".join(f"'{p}'" for p in WAKE_PHRASES[:-1])
-    return f"{head}, or '{WAKE_PHRASES[-1]}'"
+    return _format_phrase_list(WAKE_PHRASES)
+
+
+def format_end_listen_phrases() -> str:
+    primary = END_LISTEN_PHRASES[0] if END_LISTEN_PHRASES else "over and out"
+    return _format_phrase_list([primary])
+
+
+def format_listen_end_hint() -> str:
+    """Menu Send + end-listen phrase, for STT prompts."""
+    if not listen_end_enabled():
+        return "Send"
+    return f"Send, or {format_end_listen_phrases()}"
 
 
 def _phrases_to_check(phrase: str | None) -> list[str]:
@@ -242,6 +287,51 @@ def _resolve_model_path(spec: str) -> Path:
     )
 
 
+def _spec_stems(spec: str) -> set[str]:
+    raw = spec.strip().strip('"').strip("'")
+    alias = raw.lower().replace("-", "_").replace(" ", "_")
+    stems = {alias, Path(raw).stem.lower()}
+    if alias in PRETRAINED:
+        fname, _ = PRETRAINED[alias]
+        stems.add(Path(fname).stem.lower())
+    return {s for s in stems if s}
+
+
+def keys_matching_specs(specs: list[str], all_keys: list[str]) -> list[str]:
+    """Pick openWakeWord output keys that belong to the given model specs."""
+    wanted: set[str] = set()
+    for spec in specs:
+        wanted |= _spec_stems(spec)
+    matched: list[str] = []
+    seen: set[str] = set()
+    for key in all_keys:
+        k = key.lower()
+        k_base = re.sub(r"_v\d+(?:\.\d+)?$", "", k)
+        if k in wanted or k_base in wanted:
+            if key not in seen:
+                seen.add(key)
+                matched.append(key)
+            continue
+        if any(k.startswith(stem) or stem.startswith(k_base) for stem in wanted if len(stem) >= 4):
+            if key not in seen:
+                seen.add(key)
+                matched.append(key)
+    return matched
+
+
+def _unique_specs(*groups: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for group in groups:
+        for spec in group:
+            key = spec.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(spec.strip())
+    return out
+
+
 def text_mentions_wake_phrase(text: str, phrase: str | None = None) -> bool:
     """True if `text` contains any configured wake phrase (TTS echo guard)."""
     body = (text or "").strip().lower()
@@ -318,6 +408,60 @@ def strip_trailing_wake_phrase(
         pattern = (
             r"^(.*?)(?:[\s,:\-]+)"
             + r"[\s,:\-]+".join(words)
+            + r"(?:[.!?]*)\s*$"
+        )
+        match = re.match(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            kept = match.group(1).strip()
+            if kept:
+                return kept
+    return text
+
+
+def normalize_speech_text(text: str) -> str:
+    """Lowercase, drop punctuation, fold '&' / 'n' to 'and'."""
+    t = (text or "").lower().replace("&", " and ")
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\bn\b", "and", t)
+    return t
+
+
+def transcript_has_end_phrase(text: str, phrases: list[str] | None = None) -> bool:
+    """True when transcript ends with an end-listen closer (e.g. over and out)."""
+    norm = normalize_speech_text(text)
+    if not norm:
+        return False
+    for raw in phrases or END_LISTEN_PHRASES:
+        pn = normalize_speech_text(raw)
+        if not pn:
+            continue
+        if norm == pn or norm.endswith(" " + pn):
+            return True
+    return False
+
+
+def strip_trailing_end_phrase(utterance: str, phrases: list[str] | None = None) -> str:
+    """Remove a trailing end-listen closer, allowing and/n/& variants."""
+    text = (utterance or "").strip()
+    if not text:
+        return text
+    targets = list(phrases or END_LISTEN_PHRASES)
+    if any(normalize_speech_text(text) == normalize_speech_text(p) for p in targets):
+        return ""
+    for raw in sorted(targets, key=lambda p: len(normalize_speech_text(p)), reverse=True):
+        words = re.findall(r"\w+", raw.lower())
+        if not words:
+            continue
+        parts: list[str] = []
+        for w in words:
+            if w in {"and", "n"}:
+                parts.append(r"(?:and|&|n)")
+            else:
+                parts.append(re.escape(w))
+        pattern = (
+            r"^(.*?)(?:[\s,:\-]+)"
+            + r"[\s,:\-]+".join(parts)
             + r"(?:[.!?]*)\s*$"
         )
         match = re.match(pattern, text, flags=re.IGNORECASE | re.DOTALL)
@@ -427,8 +571,6 @@ class WakeSpotter:
 
 
 def listen_end_enabled() -> bool:
-    if WAKE_MODE in {"phrase", "stt", "text", "any"}:
-        return False
     return os.environ.get("WAKE_END_LISTEN", "1").strip().lower() not in {
         "0",
         "false",
@@ -438,17 +580,22 @@ def listen_end_enabled() -> bool:
 
 
 def listen_end_spotter() -> WakeSpotter | None:
-    """Spotter that ends STT when the wake word is heard (same as menu Send)."""
-    if not listen_end_enabled():
+    """Optional ONNX stop-word while listening. Phrase closers do not need this."""
+    if not listen_end_enabled() or not _END_MODEL_SPECS:
         return None
-    spotter = WakeSpotter()
-    if spotter._model is None:
+    try:
+        model = _ensure_model()
+    except Exception as exc:
+        print(f"[wake] listen-end spotter unavailable ({exc})", flush=True)
         return None
-    return spotter
+    keys = list(_end_model_keys)
+    if not keys:
+        return None
+    return WakeSpotter(model=model, keys=keys)
 
 
 def _ensure_model():
-    global _model, _model_keys
+    global _model, _model_keys, _start_model_keys, _end_model_keys
     if _model is not None:
         return _model
 
@@ -460,7 +607,8 @@ def _ensure_model():
     except Exception:
         pass
 
-    paths = [_resolve_model_path(spec) for spec in _MODEL_SPECS]
+    specs = _unique_specs(_MODEL_SPECS, _END_MODEL_SPECS if listen_end_enabled() else [])
+    paths = [_resolve_model_path(spec) for spec in specs]
     from openwakeword.model import Model
 
     _model = Model(
@@ -471,11 +619,21 @@ def _ensure_model():
         vad_threshold=0.0,
     )
     _model_keys = list(_model.models.keys())
+    _start_model_keys = keys_matching_specs(_MODEL_SPECS, _model_keys) or list(_model_keys)
+    _end_model_keys = (
+        keys_matching_specs(_END_MODEL_SPECS, _model_keys) if _END_MODEL_SPECS else []
+    )
     print(
-        f"[wake] model mode — say {format_wake_phrases()} "
-        f"(models={_model_keys}, threshold={DEFAULT_THRESHOLD:g})",
+        f"[wake] model mode — say {format_wake_phrases()} to start "
+        f"(models={_start_model_keys}, threshold={DEFAULT_THRESHOLD:g})",
         flush=True,
     )
+    if listen_end_enabled():
+        extra = f" (onnx={_end_model_keys})" if _end_model_keys else ""
+        print(
+            f"[wake] say {format_end_listen_phrases()} while listening to send{extra}",
+            flush=True,
+        )
     return _model
 
 
@@ -488,7 +646,7 @@ def _wait_for_wake_model(
     play_chime: bool,
 ) -> bool:
     model = _ensure_model()
-    keys = _model_keys or list(model.models.keys())
+    keys = list(_start_model_keys or _model_keys or model.models.keys())
     print(f"[wake] {prompt}", flush=True)
 
     try:

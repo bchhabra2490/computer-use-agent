@@ -40,16 +40,16 @@ You'll need to restart the terminal app after granting these.
 ### Daemon (recommended)
 
 ```bash
-cau start          # background orchestrator (--auto); installs `cau` on PATH
-cau stop           # SIGTERM, then SIGKILL if needed
-cau status
-cau restart
+cua start          # background orchestrator (--auto); installs `cua` on PATH
+cua stop           # SIGTERM, then SIGKILL if needed
+cua status
+cua restart
 ```
 
-`cau start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
-and appends logs to `logs/cau.log`. The first start also installs a `cau` shim
+`cua start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
+and appends logs to `logs/cua.log`. The first start also installs a `cua` shim
 to `~/.local/bin` (and Homebrew `bin` if writable) so the command works from any
-directory. If `cau` is not found, run `./cau start` from this repo, then add
+directory. If `cua` is not found, run `./cua start` from this repo, then add
 `~/.local/bin` to your PATH.
 
 Keyboard barge-in (Space / Esc / Enter) needs a focused terminal — use the wake
@@ -61,7 +61,7 @@ word to interrupt TTS when running as a daemon.
 python orchestrator.py
 python orchestrator.py --auto          # computer agent skips per-step confirms
 python agent.py --voice --auto         # same entry via agent.py
-./cau start --no-auto                  # daemon without --auto
+./cua start --no-auto                  # daemon without --auto
 ```
 
 The orchestrator waits for a wake phrase (local openWakeWord by default),
@@ -77,8 +77,9 @@ Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: w
 then the instruction. While Jarvis is speaking, say the wake word again to
 interrupt TTS and give a new command (`TTS_BARGE_IN=1` by default). Wake barge-in
 is armed **before** the ready TTS and stays on for the whole session (paused only
-while STT owns the mic — the same capture is still scanned so saying the wake
-word again **ends listening** and starts processing, like menu **Send**). You can
+while STT owns the mic — the same capture is scanned for the closer
+**over and out** (`WAKE_END_PHRASE`), which **ends listening** like menu
+**Send**). You can
 also press **Space**, **Esc**, or **Enter** in
 the orchestrator terminal (`TTS_KEYBOARD_BARGE=1`) to stop TTS and start listening.
 Set `TTS_BARGE_IN=0` if an open mic during speech causes
@@ -116,7 +117,10 @@ WAKE_MODE=phrase WAKE_PHRASE="Okay Computer,Computer" python orchestrator.py
 ```
 
 Pretrained aliases: `hey_jarvis`, `alexa`, `hey_mycroft`, `hey_rhasspy`, `timer`,
-`weather`. Tune sensitivity with `WAKE_THRESHOLD` / `WAKE_BARGE_THRESHOLD`.
+`weather`. Start listening with `WAKE_MODEL` (default `hey_jarvis`). End a listen
+with `WAKE_END_MODEL` (default `alexa` — say “Alexa”). `timer` / `weather` match
+long phrases (“set a 10 minute timer”, “what's the weather”), so they are a poor
+stop word. Tune sensitivity with `WAKE_THRESHOLD` / `WAKE_BARGE_THRESHOLD`.
 Note: the stock `hey_jarvis` ONNX is trained on the full “Hey Jarvis”; short
 “Jarvis” is accepted for STT stripping and phrase-mode. For offline acoustic
 detection of short forms, add a custom `.onnx` to `WAKE_MODEL`.
@@ -171,7 +175,7 @@ A small **menu-bar icon** starts with the orchestrator or agent:
 
 - **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
 - **Click** — **Send** (while listening: stop recording and transcribe now;
-  saying the wake word does the same),
+  saying **Alexa** / `WAKE_END_MODEL` does the same),
   **Add Memory** (screenshot + description), in-progress agents,
   **Mark Task Done**, recent logs, **Quit Orchestrator**, open latest `logs/`
   run folder, quit the icon
@@ -269,7 +273,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 
 ## Extending it
 
-- `cau` / `cau.py` — daemon CLI (`cau start` / `cau stop`).
+- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop`).
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).

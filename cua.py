@@ -1,7 +1,7 @@
-"""CLI for the computer-use-agent daemon: ``cau start`` / ``cau stop``.
+"""CLI for the computer-use-agent daemon: ``cua start`` / ``cua stop``.
 
 Runs the voice orchestrator in the background (detached session, logs to
-``logs/cau.log``). ``cau start`` also installs a ``cau`` shim on PATH when
+``logs/cua.log``). ``cua start`` also installs a ``cua`` shim on PATH when
 possible so the command works from any directory.
 """
 
@@ -18,9 +18,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = ROOT / ".runtime"
-PID_PATH = RUNTIME_DIR / "cau.pid"
-LOG_PATH = ROOT / "logs" / "cau.log"
-SHIM_MARK = "# cau — computer-use-agent daemon CLI"
+PID_PATH = RUNTIME_DIR / "cua.pid"
+_LEGACY_PID_PATH = RUNTIME_DIR / "cau.pid"
+LOG_PATH = ROOT / "logs" / "cua.log"
+SHIM_MARK = "# cua — computer-use-agent daemon CLI"
+_LEGACY_SHIM_MARK = "# cau — computer-use-agent daemon CLI"
 
 _STOP_WAIT_SECONDS = 8.0
 
@@ -32,25 +34,34 @@ def _python() -> str:
     return sys.executable
 
 
-def _read_pid_file() -> int | None:
+def _read_pid_at(path: Path) -> int | None:
     try:
-        raw = PID_PATH.read_text(encoding="utf-8").strip()
+        raw = path.read_text(encoding="utf-8").strip()
         pid = int(raw)
     except (OSError, ValueError):
         return None
     return pid if pid > 0 else None
 
 
+def _read_pid_file() -> int | None:
+    return _read_pid_at(PID_PATH) or _read_pid_at(_LEGACY_PID_PATH)
+
+
 def _write_pid_file(pid: int) -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     PID_PATH.write_text(f"{pid}\n", encoding="utf-8")
+    try:
+        _LEGACY_PID_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _clear_pid_file() -> None:
-    try:
-        PID_PATH.unlink(missing_ok=True)
-    except OSError:
-        pass
+    for path in (PID_PATH, _LEGACY_PID_PATH):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -85,7 +96,7 @@ def running_pid() -> int | None:
 
 def _shim_body() -> str:
     py = _python()
-    script = ROOT / "cau.py"
+    script = ROOT / "cua.py"
     return f"""#!/bin/sh
 {SHIM_MARK}
 exec "{py}" "{script}" "$@"
@@ -94,9 +105,10 @@ exec "{py}" "{script}" "$@"
 
 def _is_our_shim(path: Path) -> bool:
     try:
-        return SHIM_MARK in path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return False
+    return SHIM_MARK in text or _LEGACY_SHIM_MARK in text
 
 
 def _writable_bin_dirs() -> list[Path]:
@@ -111,7 +123,7 @@ def _writable_bin_dirs() -> list[Path]:
 
 
 def install_shim() -> list[Path]:
-    """Write ``cau`` wrappers onto PATH. Returns paths written."""
+    """Write ``cua`` wrappers onto PATH. Returns paths written."""
     body = _shim_body()
     written: list[Path] = []
     for directory in _writable_bin_dirs():
@@ -119,7 +131,7 @@ def install_shim() -> list[Path]:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError:
             continue
-        dest = directory / "cau"
+        dest = directory / "cua"
         if dest.exists() and not _is_our_shim(dest):
             continue
         try:
@@ -128,26 +140,45 @@ def install_shim() -> list[Path]:
             written.append(dest)
         except OSError:
             continue
+        # Retarget leftover ``cau`` shims so they still work after the rename.
+        legacy = directory / "cau"
+        if not legacy.exists() or _is_our_shim(legacy):
+            try:
+                legacy.write_text(body, encoding="utf-8")
+                legacy.chmod(legacy.stat().st_mode | 0o111)
+            except OSError:
+                pass
     return written
 
 
-def cau_on_path() -> bool:
-    found = shutil.which("cau")
+def cua_on_path() -> bool:
+    found = shutil.which("cua")
     return bool(found)
+
+
+def cmd_install() -> int:
+    shims = install_shim()
+    if not shims:
+        print("Could not install cua onto PATH", file=sys.stderr)
+        return 1
+    print("Installed cua to " + ", ".join(str(p) for p in shims))
+    if not cua_on_path():
+        print("Add that directory to PATH if `cua` is not found.", flush=True)
+    return 0
 
 
 def cmd_start(*, no_auto: bool = False, max_steps: int = 25) -> int:
     pid = running_pid()
     if pid is not None:
-        print(f"cau is already running (pid {pid})")
+        print(f"cua is already running (pid {pid})")
         return 0
 
     shims = install_shim()
-    if shims and not cau_on_path():
+    if shims and not cua_on_path():
         print(
-            "Installed cau to "
+            "Installed cua to "
             + ", ".join(str(p) for p in shims)
-            + ' — add that directory to PATH if `cau` is not found.',
+            + " — add that directory to PATH if `cua` is not found.",
             flush=True,
         )
 
@@ -165,7 +196,7 @@ def cmd_start(*, no_auto: bool = False, max_steps: int = 25) -> int:
 
     log_fh = open(LOG_PATH, "a", encoding="utf-8")
     try:
-        log_fh.write(f"\n--- cau start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        log_fh.write(f"\n--- cua start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
         log_fh.flush()
         proc = subprocess.Popen(
             cmd,
@@ -182,13 +213,13 @@ def cmd_start(*, no_auto: bool = False, max_steps: int = 25) -> int:
     time.sleep(0.4)
     if proc.poll() is not None:
         print(
-            f"cau failed to start (exit {proc.returncode}). See {LOG_PATH}",
+            f"cua failed to start (exit {proc.returncode}). See {LOG_PATH}",
             file=sys.stderr,
         )
         return 1
 
     _write_pid_file(proc.pid)
-    print(f"cau started (pid {proc.pid})")
+    print(f"cua started (pid {proc.pid})")
     print(f"logs: {LOG_PATH}")
     return 0
 
@@ -228,7 +259,7 @@ def _stop_tray() -> None:
 def cmd_stop() -> int:
     pid = running_pid()
     if pid is None:
-        print("cau is not running")
+        print("cua is not running")
         _clear_pid_file()
         return 0
 
@@ -243,24 +274,24 @@ def cmd_stop() -> int:
     _stop_tray()
     _clear_pid_file()
     if stopped:
-        print(f"cau stopped (pid {pid})")
+        print(f"cua stopped (pid {pid})")
         return 0
-    print(f"cau did not exit (pid {pid})", file=sys.stderr)
+    print(f"cua did not exit (pid {pid})", file=sys.stderr)
     return 1
 
 
 def cmd_status() -> int:
     pid = running_pid()
     if pid is None:
-        print("cau is not running")
+        print("cua is not running")
         return 1
-    print(f"cau is running (pid {pid})")
+    print(f"cua is running (pid {pid})")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="cau",
+        prog="cua",
         description="Start and stop the computer-use-agent daemon",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -283,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("stop", help="Stop the background orchestrator")
     sub.add_parser("status", help="Print whether the daemon is running")
+    sub.add_parser("install", help="Install the cua command on PATH")
 
     args = parser.parse_args(argv)
     if args.command == "start":
@@ -294,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "restart":
         cmd_stop()
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
+    if args.command == "install":
+        return cmd_install()
     parser.print_help()
     return 2
 

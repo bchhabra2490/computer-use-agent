@@ -43,6 +43,38 @@ class StripTrailingTests(unittest.TestCase):
     def test_leading_strip_unchanged(self) -> None:
         self.assertEqual(wake.strip_wake_phrase("Hey Jarvis open chrome"), "open chrome")
 
+    def test_trailing_end_phrase_alexa(self) -> None:
+        self.assertEqual(
+            wake.strip_trailing_wake_phrase(
+                "open chrome alexa",
+                phrase="Alexa",
+                include_short=True,
+            ),
+            "open chrome",
+        )
+        self.assertEqual(
+            wake.strip_trailing_wake_phrase("Alexa", phrase="Alexa"),
+            "",
+        )
+
+
+class EndModelKeyTests(unittest.TestCase):
+    def test_keys_matching_specs_separates_models(self) -> None:
+        keys = ["hey_jarvis_v0.1", "alexa_v0.1"]
+        self.assertEqual(
+            wake.keys_matching_specs(["hey_jarvis"], keys),
+            ["hey_jarvis_v0.1"],
+        )
+        self.assertEqual(
+            wake.keys_matching_specs(["alexa"], keys),
+            ["alexa_v0.1"],
+        )
+
+    def test_default_end_phrase_is_alexa(self) -> None:
+        self.assertIn("Alexa", wake.END_LISTEN_PHRASES)
+        hint = wake.format_listen_end_hint()
+        self.assertIn("Alexa", hint)
+
 
 class WakeSpotterTests(unittest.TestCase):
     def test_feed_triggers_on_threshold(self) -> None:

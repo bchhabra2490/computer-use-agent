@@ -505,6 +505,44 @@ def _speak(client: OpenAI, text: str) -> str | None:
     return None
 
 
+def _confirm_heard_enabled() -> bool:
+    return os.environ.get("TTS_CONFIRM_HEARD", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _heard_confirm_line(text: str) -> str:
+    """One short TTS sentence restating what STT captured."""
+    cleaned = " ".join((text or "").split()).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > 160:
+        cut = cleaned[:157].rsplit(" ", 1)[0].rstrip(",.;:")
+        cleaned = (cut or cleaned[:157]) + "…"
+    return f"I heard: {cleaned}."
+
+
+def _confirm_heard(client: OpenAI, utterance: str) -> str:
+    """
+    After listening ends, speak back what was understood in one sentence.
+
+    If the user barges in during that line, return their new command (no second confirm).
+    """
+    if not utterance or not _confirm_heard_enabled():
+        return utterance
+    line = _heard_confirm_line(utterance)
+    if not line:
+        return utterance
+    barged = _speak(client, line)
+    if barged:
+        return barged
+    time.sleep(POST_TTS_COOLDOWN)
+    return utterance
+
+
 def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     """If the agent is waiting on ask_user, speak/listen and reply. Returns True if handled."""
     req = ask_bridge.poll(timeout=0)
@@ -646,6 +684,7 @@ def _supervise_agent(
         if command is None:
             continue
 
+        command = _confirm_heard(client, command)
         print(f'\n[user] "{command}"')
         status_log(f'[user] "{command}"')
         low = command.lower().strip()
@@ -982,8 +1021,6 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             if pending is not None:
                 utterance = pending
                 pending = None
-                print(f'\n[user] "{utterance}" (from barge-in)')
-                status_log(f'[user] "{utterance}" (barge-in)')
             else:
                 utterance = _listen_command(
                     client,
@@ -997,9 +1034,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     return
                 if utterance is None:
                     continue
-                print(f'\n[user] "{utterance}"')
-                status_log(f'[user] "{utterance}"')
 
+            utterance = _confirm_heard(client, utterance)
+            print(f'\n[user] "{utterance}"')
+            status_log(f'[user] "{utterance}"')
             low = utterance.lower().strip()
             if is_mark_done_utterance(utterance):
                 if active_agents():

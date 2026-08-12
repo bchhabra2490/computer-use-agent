@@ -82,7 +82,10 @@ while STT owns the mic — the same capture is scanned for the closer
 **Send**). You can
 also press **Space**, **Esc**, or **Enter** in
 the orchestrator terminal (`TTS_KEYBOARD_BARGE=1`) to stop TTS and start listening.
-Set `TTS_BARGE_IN=0` if an open mic during speech causes
+After each listen, Jarvis plays a short start chime when the mic opens
+(`STT_START_CHIME`; includes mid-task), an end chime when capture stops
+(`STT_END_CHIME`), then speaks one short confirmation (`I heard: …`; set
+`TTS_CONFIRM_HEARD=0` to disable). Set `TTS_BARGE_IN=0` if an open mic during speech causes
 hiss; `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo triggers.
 Agent `ask_user` prompts skip the wake word (answer directly).
 

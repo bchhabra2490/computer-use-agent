@@ -623,6 +623,12 @@ def listen_realtime(
     if pause_persistent_wake is not None:
         pause_persistent_wake()
     try:
+        from wake import play_listen_start_chime
+
+        play_listen_start_chime()
+    except Exception:
+        pass
+    try:
         from app_status import set_stt_listening
 
         set_stt_listening(True)
@@ -1219,6 +1225,12 @@ def listen_once(
                 mode=mode,
                 max_wait_for_speech=max_wait_for_speech,
             )
+            try:
+                from wake import play_listen_end_chime
+
+                play_listen_end_chime()
+            except Exception:
+                pass
             save_recording(wav, transcript=live, kind=mode, live_transcript=live)
             print(f'Heard: "{live}"')
             return live

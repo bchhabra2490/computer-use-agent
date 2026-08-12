@@ -240,6 +240,78 @@ def play_wake_chime() -> None:
         print(f"[wake] chime failed: {e}", file=sys.stderr)
 
 
+def play_listen_end_chime() -> None:
+    """Short local cue that listening stopped and audio will be processed."""
+    if os.environ.get("STT_END_CHIME", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    if sys.platform == "darwin":
+        sound = os.environ.get(
+            "STT_END_CHIME_SOUND",
+            "/System/Library/Sounds/Pop.aiff",
+        )
+        try:
+            import subprocess
+
+            subprocess.run(
+                ["afplay", sound],
+                check=False,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception as e:
+            print(f"[stt] afplay end-chime failed ({e}); trying tone", file=sys.stderr)
+
+    try:
+        sr = 24_000
+        t = np.linspace(0, 0.08, int(sr * 0.08), endpoint=False)
+        env = np.linspace(1.0, 0.1, t.size)
+        # Lower descending blip — distinct from the rising wake chime.
+        tone = (0.26 * np.sin(2 * np.pi * 660.0 * t) * env).astype(np.float32)
+        sd.play(tone, sr, blocking=True)
+        sd.wait()
+    except Exception as e:
+        print(f"[stt] end-chime failed: {e}", file=sys.stderr)
+
+
+def play_listen_start_chime() -> None:
+    """Short local cue that Jarvis is now listening (idle, mid-task, barge-in, ask)."""
+    if os.environ.get("STT_START_CHIME", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    if sys.platform == "darwin":
+        sound = os.environ.get(
+            "STT_START_CHIME_SOUND",
+            "/System/Library/Sounds/Ping.aiff",
+        )
+        try:
+            import subprocess
+
+            subprocess.run(
+                ["afplay", sound],
+                check=False,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception as e:
+            print(f"[stt] afplay start-chime failed ({e}); trying tone", file=sys.stderr)
+
+    try:
+        sr = 24_000
+        t = np.linspace(0, 0.07, int(sr * 0.07), endpoint=False)
+        env = np.linspace(1.0, 0.12, t.size)
+        # Mid rising blip — distinct from wake (double high) and end (low).
+        tone = (0.26 * np.sin(2 * np.pi * 990.0 * t) * env).astype(np.float32)
+        sd.play(tone, sr, blocking=True)
+        sd.wait()
+    except Exception as e:
+        print(f"[stt] start-chime failed: {e}", file=sys.stderr)
+
+
 def _download_file(name: str, target: Path) -> None:
     import urllib.request
 

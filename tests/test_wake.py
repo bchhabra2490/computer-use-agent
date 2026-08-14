@@ -42,6 +42,10 @@ class StripTrailingTests(unittest.TestCase):
 
     def test_leading_strip_unchanged(self) -> None:
         self.assertEqual(wake.strip_wake_phrase("Hey Jarvis open chrome"), "open chrome")
+        self.assertEqual(
+            wake.strip_wake_phrase("Hey Rekha open chrome", phrase="Hey Rekha,Rekha"),
+            "open chrome",
+        )
 
     def test_trailing_end_phrase_alexa(self) -> None:
         self.assertEqual(
@@ -70,10 +74,19 @@ class EndModelKeyTests(unittest.TestCase):
             ["alexa_v0.1"],
         )
 
-    def test_default_end_phrase_is_alexa(self) -> None:
-        self.assertIn("Alexa", wake.END_LISTEN_PHRASES)
+    def test_default_end_phrase_is_over_and_out(self) -> None:
+        self.assertTrue(
+            any("over and out" in p.lower() for p in wake.END_LISTEN_PHRASES)
+        )
         hint = wake.format_listen_end_hint()
-        self.assertIn("Alexa", hint)
+        self.assertIn("over and out", hint.lower())
+
+    def test_over_and_out_onnx_matches_keys(self) -> None:
+        keys = ["hey_jarvis_v0.1", "over_and_out"]
+        self.assertEqual(
+            wake.keys_matching_specs(["Hey_Rekha.onnx"], ["hey_jarvis_v0.1", "Hey_Rekha"]),
+            ["Hey_Rekha"],
+        )
 
 
 class WakeSpotterTests(unittest.TestCase):

@@ -5,14 +5,13 @@ Two modes (WAKE_MODE):
   - model  — openWakeWord ONNX classifier (pretrained or your custom .onnx)
   - phrase — any phrase via STT matching (no model training; uses the STT API)
 
-While STT is listening, say **over and out** (or `WAKE_END_PHRASE`) to end
-capture and start processing (like menu Send). Optional acoustic end models
-are still available via `WAKE_END_MODEL` (alexa, hey_mycroft, …).
+While STT is listening, say **over and out** to end capture and start
+processing (like menu Send). Uses `models/wake/over_and_out.onnx` when present
+(`WAKE_END_MODEL`), plus transcript matching (`WAKE_END_PHRASE`).
 
 Examples:
-  WAKE_MODEL=hey_jarvis WAKE_PHRASE="Hey Jarvis,Jarvis"   # default (either phrase)
-  WAKE_END_PHRASE="over and out,over n out"               # send while listening
-  WAKE_END_MODEL=alexa WAKE_END_PHRASE=Alexa              # optional ONNX stop word
+  WAKE_MODEL=hey_jarvis,Hey_Rekha.onnx WAKE_PHRASE="Hey Jarvis,Jarvis,Hey Rekha,Rekha"
+  WAKE_END_MODEL=over_and_out.onnx WAKE_END_PHRASE="over and out,over n out"
   WAKE_MODEL=/path/to/hey_bob.onnx WAKE_PHRASE="Hey Bob" # custom ONNX
   WAKE_MODE=phrase WAKE_PHRASE="Okay Computer,Computer"  # any phrases via STT
 """
@@ -45,8 +44,18 @@ WAKE_MODEL_DIR = Path(
     )
 )
 WAKE_MODE = (os.environ.get("WAKE_MODE") or "model").strip().lower()
-# Comma-separated aliases, filenames, or paths. Default: hey jarvis.
-WAKE_MODEL = (os.environ.get("WAKE_MODEL") or "hey_jarvis").strip()
+
+
+def _default_wake_model() -> str:
+    """hey_jarvis plus bundled custom start models when those files exist."""
+    parts = ["hey_jarvis"]
+    if (WAKE_MODEL_DIR / "Hey_Rekha.onnx").is_file():
+        parts.append("Hey_Rekha.onnx")
+    return ",".join(parts)
+
+
+# Comma-separated aliases, filenames, or paths. Default: hey jarvis (+ Hey Rekha if present).
+WAKE_MODEL = (os.environ.get("WAKE_MODEL") or _default_wake_model()).strip()
 
 # Shared feature extractors always required for model mode.
 _FEATURE_MODELS = (
@@ -113,13 +122,26 @@ def _parse_wake_phrases(raw: str) -> list[str]:
 
 _MODEL_SPECS = _parse_model_specs()
 _DEFAULT_PHRASES = "Hey Jarvis,Jarvis"
+if any(Path(spec).stem.lower().replace("-", "_") in {"hey_rekha", "rekha"} for spec in _MODEL_SPECS):
+    _DEFAULT_PHRASES = "Hey Jarvis,Jarvis,Hey Rekha,Rekha"
+
+
+def _default_end_model_spec() -> str:
+    """Prefer the bundled over-and-out ONNX when present."""
+    candidate = WAKE_MODEL_DIR / "over_and_out.onnx"
+    if candidate.is_file():
+        return "over_and_out.onnx"
+    return ""
 
 
 def _parse_end_model_specs() -> list[str]:
-    """Optional ONNX for ending a listen. Empty = phrase-only (over and out)."""
+    """ONNX for ending a listen. Default: over_and_out.onnx if that file exists."""
     raw = (os.environ.get("WAKE_END_MODEL") or "").strip()
-    if not raw or raw.lower() in {"0", "false", "no", "off", "none", "phrase"}:
+    if raw.lower() in {"0", "false", "no", "off", "none", "phrase"}:
         return []
+    if not raw:
+        default = _default_end_model_spec()
+        return [default] if default else []
     if raw.lower() in {"same", "start", "wake"}:
         return list(_MODEL_SPECS)
     return [p.strip() for p in raw.split(",") if p.strip()]
@@ -130,12 +152,16 @@ _wake_phrase_env = (os.environ.get("WAKE_PHRASE") or "").strip()
 if _wake_phrase_env:
     WAKE_PHRASES = _parse_wake_phrases(_wake_phrase_env)
 else:
-    # Default: accept both full and short forms for Jarvis.
-    primary = _default_phrase_for_models(_MODEL_SPECS) if WAKE_MODE != "phrase" else "Hey Jarvis"
-    if primary.lower() in {"hey jarvis", "jarvis"}:
-        WAKE_PHRASES = _parse_wake_phrases(_DEFAULT_PHRASES)
-    else:
-        WAKE_PHRASES = [primary]
+    # Default: accept both full and short forms for Jarvis (and Rekha if loaded).
+    WAKE_PHRASES = _parse_wake_phrases(_DEFAULT_PHRASES)
+    extra = [
+        _default_phrase_for_models([spec])
+        for spec in _MODEL_SPECS
+        if WAKE_MODE != "phrase"
+    ]
+    for phrase in extra:
+        if phrase and phrase.lower() not in {p.lower() for p in WAKE_PHRASES}:
+            WAKE_PHRASES.append(phrase)
 if not WAKE_PHRASES:
     WAKE_PHRASES = _parse_wake_phrases(_DEFAULT_PHRASES)
 
@@ -146,8 +172,6 @@ _END_PHRASE_DEFAULT = "over and out,over n out"
 _end_phrase_env = (os.environ.get("WAKE_END_PHRASE") or "").strip()
 if _end_phrase_env:
     END_LISTEN_PHRASES = _parse_wake_phrases(_end_phrase_env)
-elif _END_MODEL_SPECS:
-    END_LISTEN_PHRASES = [_default_phrase_for_models(_END_MODEL_SPECS)]
 else:
     END_LISTEN_PHRASES = _parse_wake_phrases(_END_PHRASE_DEFAULT)
 if not END_LISTEN_PHRASES:

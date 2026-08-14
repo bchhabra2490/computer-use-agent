@@ -104,8 +104,9 @@ streams Bulbul audio (`SARVAM_TTS_MODEL=bulbul:v3`, voice `shubh`; needs
 
 ### Wake word (any phrase)
 
-**Default (offline model):** `Hey Jarvis` or `Jarvis` via openWakeWord
-(`WAKE_PHRASE=Hey Jarvis,Jarvis`). Comma-separate multiple spoken forms.
+**Default (offline model):** `Hey Jarvis` / `Jarvis` or `Hey Rekha` / `Rekha`
+via openWakeWord (`WAKE_MODEL=hey_jarvis,Hey_Rekha.onnx` when that ONNX is in
+`models/wake/`). Comma-separate multiple spoken forms.
 
 ```bash
 # Other pretrained models
@@ -121,9 +122,10 @@ WAKE_MODE=phrase WAKE_PHRASE="Okay Computer,Computer" python orchestrator.py
 
 Pretrained aliases: `hey_jarvis`, `alexa`, `hey_mycroft`, `hey_rhasspy`, `timer`,
 `weather`. Start listening with `WAKE_MODEL` (default `hey_jarvis`). End a listen
-with `WAKE_END_MODEL` (default `alexa` — say “Alexa”). `timer` / `weather` match
-long phrases (“set a 10 minute timer”, “what's the weather”), so they are a poor
-stop word. Tune sensitivity with `WAKE_THRESHOLD` / `WAKE_BARGE_THRESHOLD`.
+with `WAKE_END_MODEL` (default `over_and_out.onnx` when that file is in
+`models/wake/`). Say **over and out** — the closer is also matched in the
+transcript (`WAKE_END_PHRASE`). Tune sensitivity with `WAKE_THRESHOLD` /
+`WAKE_BARGE_THRESHOLD`.
 Note: the stock `hey_jarvis` ONNX is trained on the full “Hey Jarvis”; short
 “Jarvis” is accepted for STT stripping and phrase-mode. For offline acoustic
 detection of short forms, add a custom `.onnx` to `WAKE_MODEL`.
@@ -178,7 +180,7 @@ A small **menu-bar icon** starts with the orchestrator or agent:
 
 - **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
 - **Click** — **Send** (while listening: stop recording and transcribe now;
-  saying **Alexa** / `WAKE_END_MODEL` does the same),
+  saying **over and out** does the same),
   **Add Memory** (screenshot + description), in-progress agents,
   **Mark Task Done**, recent logs, **Quit Orchestrator**, open latest `logs/`
   run folder, quit the icon

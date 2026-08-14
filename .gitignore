@@ -5,7 +5,6 @@ recordings/
 __pycache__/
 *.pyc
 .env
-models/wake/
 .DS_Store
 tts_latency.log
 memory/personal/*.md

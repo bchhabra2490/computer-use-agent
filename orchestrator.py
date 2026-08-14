@@ -78,6 +78,7 @@ from wake import (
     WAKE_PHRASE,
     ensure_persistent_wake,
     format_wake_phrases,
+    get_last_wake,
     get_wake_remainder,
     stop_persistent_wake,
     wait_for_wake,
@@ -586,7 +587,9 @@ def _listen_command(
         return None
     if quit_requested():
         return None
-    set_and_log("listening", "Wake word heard — listening")
+    hit = get_last_wake()
+    heard = hit.label if hit else "Wake word"
+    set_and_log("listening", f"{heard} heard — listening")
     remainder = get_wake_remainder()
     if remainder:
         return strip_wake_prefix(remainder).strip() or remainder

@@ -62,6 +62,29 @@ class StripTrailingTests(unittest.TestCase):
         )
 
 
+class WakeIdentityTests(unittest.TestCase):
+    def test_label_for_pretrained_key(self) -> None:
+        self.assertEqual(wake.label_for_wake_key("hey_jarvis_v0.1"), "Hey Jarvis")
+        self.assertEqual(wake.label_for_wake_key("alexa_v0.1"), "Alexa")
+
+    def test_label_for_custom_onnx_key(self) -> None:
+        self.assertEqual(wake.label_for_wake_key("Hey_Rekha"), "Hey Rekha")
+
+    def test_matched_phrase_prefers_longest(self) -> None:
+        self.assertEqual(
+            wake.matched_wake_phrase(
+                "Hey Rekha open chrome",
+                phrase="Hey Jarvis,Jarvis,Hey Rekha,Rekha",
+            ),
+            "Hey Rekha",
+        )
+        self.assertEqual(
+            wake.matched_wake_phrase("Rekha", phrase="Hey Rekha,Rekha"),
+            "Rekha",
+        )
+        self.assertIsNone(wake.matched_wake_phrase("hello there"))
+
+
 class EndModelKeyTests(unittest.TestCase):
     def test_keys_matching_specs_separates_models(self) -> None:
         keys = ["hey_jarvis_v0.1", "alexa_v0.1"]

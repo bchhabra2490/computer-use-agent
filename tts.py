@@ -70,6 +70,49 @@ def _use_sarvam() -> bool:
     return TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}
 
 
+def _wake_blob() -> str:
+    try:
+        from wake import get_last_wake
+
+        hit = get_last_wake()
+    except Exception:
+        return ""
+    if hit is None:
+        return ""
+    return f"{hit.label or ''} {hit.key or ''}".lower()
+
+
+def active_tts_voice() -> str:
+    """
+    Voice for this turn: Rekha → Priya, Jarvis → Shubh (Sarvam).
+
+    Override with TTS_VOICE_REKHA / TTS_VOICE_JARVIS (or SARVAM_TTS_VOICE_*).
+    Falls back to TTS_VOICE when no wake has fired yet.
+    """
+    blob = _wake_blob()
+    if _use_sarvam():
+        rekha = (
+            os.environ.get("TTS_VOICE_REKHA")
+            or os.environ.get("SARVAM_TTS_VOICE_REKHA")
+            or "priya"
+        ).strip().lower() or "priya"
+        jarvis = (
+            os.environ.get("TTS_VOICE_JARVIS")
+            or os.environ.get("SARVAM_TTS_VOICE_JARVIS")
+            or "shubh"
+        ).strip().lower() or "shubh"
+        if "rekha" in blob:
+            return rekha
+        if "jarvis" in blob:
+            return jarvis
+        return TTS_VOICE
+    if "rekha" in blob:
+        return (os.environ.get("TTS_VOICE_REKHA") or TTS_VOICE).strip() or TTS_VOICE
+    if "jarvis" in blob:
+        return (os.environ.get("TTS_VOICE_JARVIS") or TTS_VOICE).strip() or TTS_VOICE
+    return TTS_VOICE
+
+
 def _numpy():
     import numpy as np
 
@@ -89,11 +132,13 @@ def _try_sd_stop() -> None:
         pass
 
 
-def synthesize(client: OpenAI, text: str, voice: str = TTS_VOICE) -> bytes:
+def synthesize(client: OpenAI, text: str, voice: str | None = None) -> bytes:
     """Return WAV bytes for `text`."""
     text = text.strip()
     if not text:
         raise ValueError("Nothing to speak.")
+    if not voice:
+        voice = active_tts_voice()
 
     if _use_sarvam():
         from sarvam_tts import synthesize_wav
@@ -266,7 +311,7 @@ def play_wav(
 def speak(
     client: OpenAI,
     text: str,
-    voice: str = TTS_VOICE,
+    voice: str | None = None,
     *,
     barge_in: bool | None = None,
 ) -> bool:
@@ -306,7 +351,7 @@ def speak(
             print(f"[tts] persistent wake unavailable ({exc})", flush=True)
             monitor = None
 
-    wav_bytes = synthesize(client, text, voice=voice)
+    wav_bytes = synthesize(client, text, voice=voice or active_tts_voice())
 
     wake_event = monitor.woken if (enable and monitor is not None) else None
     try:

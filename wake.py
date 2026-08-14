@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +85,17 @@ _model_keys: list[str] = []
 _start_model_keys: list[str] = []
 _end_model_keys: list[str] = []
 _last_wake_remainder: str | None = None
+_last_wake: WakeHit | None = None
+
+
+@dataclass(frozen=True)
+class WakeHit:
+    """Which start-wake fired. `key` is the ONNX model id (None in phrase mode)."""
+
+    label: str
+    key: str | None = None
+    score: float | None = None
+    source: str = "model"  # "model" | "phrase"
 
 
 def _default_phrase_for_models(specs: list[str]) -> str:
@@ -222,6 +234,56 @@ def get_wake_remainder() -> str | None:
 def _set_wake_remainder(text: str | None) -> None:
     global _last_wake_remainder
     _last_wake_remainder = (text or "").strip() or None
+
+
+def get_last_wake() -> WakeHit | None:
+    """Which start-wake just fired (model key + spoken label). Not consumed."""
+    return _last_wake
+
+
+def _set_last_wake(hit: WakeHit | None) -> None:
+    global _last_wake
+    _last_wake = hit
+
+
+def label_for_wake_key(key: str) -> str:
+    """Map an openWakeWord model id (e.g. hey_jarvis_v0.1) to a spoken label."""
+    raw = (key or "").strip()
+    if not raw:
+        return WAKE_PHRASE
+    k = raw.lower().replace("-", "_")
+    k_base = re.sub(r"_v\d+(?:\.\d+)?$", "", k)
+    for alias, (fname, phrase) in PRETRAINED.items():
+        stem = Path(fname).stem.lower().replace("-", "_")
+        stem_base = re.sub(r"_v\d+(?:\.\d+)?$", "", stem)
+        if k == stem or k_base in {alias, stem_base} or k.startswith(stem):
+            return phrase
+    for phrase in WAKE_PHRASES:
+        pkey = re.sub(r"[^\w]+", "_", phrase.lower()).strip("_")
+        if k_base == pkey or k_base.replace("_", "") == pkey.replace("_", ""):
+            return phrase
+    cleaned = re.sub(r"_v?\d+(\.\d+)?$", "", k_base)
+    cleaned = cleaned.replace("_", " ").strip()
+    return cleaned.title() if cleaned else raw
+
+
+def matched_wake_phrase(transcript: str, phrase: str | None = None) -> str | None:
+    """Longest configured wake phrase that starts `transcript`, or None."""
+    text = (transcript or "").strip().lower()
+    if not text:
+        return None
+    norm_text = re.sub(r"[^\w\s]", " ", text)
+    norm_text = re.sub(r"\s+", " ", norm_text).strip()
+    best: str | None = None
+    for target in sorted(_phrases_to_check(phrase), key=lambda p: len(p), reverse=True):
+        norm_phrase = re.sub(r"[^\w\s]", " ", target.lower())
+        norm_phrase = re.sub(r"\s+", " ", norm_phrase).strip()
+        if not norm_phrase:
+            continue
+        if norm_text == norm_phrase or norm_text.startswith(norm_phrase + " "):
+            if best is None or len(target) > len(best):
+                best = target
+    return best
 
 
 def play_wake_chime() -> None:
@@ -788,17 +850,21 @@ def _wait_for_wake_model(
 
             scores = model.predict(audio)
             frames += 1
+            best_key = None
+            best_score = -1.0
             for key in keys:
                 raw = scores.get(key, 0.0)
                 try:
                     score = float(np.asarray(raw).reshape(-1)[0])
                 except Exception:
                     score = 0.0
-                if score >= threshold:
-                    hit_key = key
-                    hit_score = score
-                    detected = True
-                    break
+                if score >= threshold and score > best_score:
+                    best_key = key
+                    best_score = score
+            if best_key is not None:
+                hit_key = best_key
+                hit_score = best_score
+                detected = True
             if detected:
                 try:
                     model.reset()
@@ -807,8 +873,12 @@ def _wait_for_wake_model(
                 break
 
     if detected:
+        label = label_for_wake_key(hit_key or "")
+        _set_last_wake(
+            WakeHit(label=label, key=hit_key, score=hit_score, source="model")
+        )
         print(
-            f"[wake] detected wake via {hit_key} (score={hit_score:.2f})",
+            f"[wake] detected {label} via {hit_key} (score={hit_score:.2f})",
             flush=True,
         )
         if play_chime:
@@ -863,11 +933,15 @@ def _wait_for_wake_phrase(
         if not text:
             continue
         print(f'[wake] heard: "{text}"', flush=True)
-        if matches_wake_phrase(text):
+        matched = matched_wake_phrase(text)
+        if matched:
             remainder = strip_wake_phrase(text)
             _set_wake_remainder(remainder)
+            _set_last_wake(
+                WakeHit(label=matched, key=None, score=None, source="phrase")
+            )
             print(
-                "[wake] detected wake phrase"
+                f"[wake] detected {matched}"
                 + (f" — remainder: {remainder!r}" if remainder else ""),
                 flush=True,
             )
@@ -904,8 +978,10 @@ def wait_for_wake(
         and mon._thread is not None
         and threading.current_thread() is not mon._thread
     ):
+        # Keep last_wake from the monitor thread; do not clear a pending hit.
         return mon.wait(should_stop=should_stop, prompt=prompt)
 
+    _set_last_wake(None)
     mode = WAKE_MODE
     if mode in {"phrase", "stt", "text", "any"}:
         return _wait_for_wake_phrase(

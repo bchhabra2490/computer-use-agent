@@ -37,7 +37,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from tts import BARGE_IN_DEFAULT, TTS_VOICE, play_wav, synthesize
+from tts import BARGE_IN_DEFAULT, TTS_VOICE, active_tts_voice, play_wav, synthesize
 
 # Lower defaults = sooner first audio; still large enough for natural clauses.
 _MIN_CHARS = int(os.environ.get("TTS_CHUNK_MIN_CHARS", "20"))
@@ -228,7 +228,7 @@ class LowLatencyTTS:
         started = time.monotonic()
         try:
             # Primes DNS/TLS/HTTP and provider-side model before the first reply.
-            synthesize(self.client, "Ready.", voice=TTS_VOICE)
+            synthesize(self.client, "Ready.", voice=TTS_VOICE)  # warmup: default voice
             self._log(
                 "engine_warm",
                 detail=f"seconds={time.monotonic() - started:.3f}",
@@ -400,7 +400,7 @@ class LowLatencyTTS:
                     continue
                 try:
                     started = time.monotonic()
-                    audio = synthesize(self.client, text, voice=TTS_VOICE)
+                    audio = synthesize(self.client, text, voice=active_tts_voice())
                     self._log(
                         "audio_chunk_ready",
                         response_id=response_id,

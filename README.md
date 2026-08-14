@@ -99,14 +99,16 @@ for the older synchronous `speak()` path (still used as fallback and for
 barge-in-capable lines).
 
 `TTS_PROVIDER=openai` (default) uses `gpt-4o-mini-tts`. `TTS_PROVIDER=sarvam`
-streams Bulbul audio (`SARVAM_TTS_MODEL=bulbul:v3`, voice `shubh`; needs
-`SARVAM_API_KEY`) through the same clause pipeline.
+streams Bulbul audio (`SARVAM_TTS_MODEL=bulbul:v3`; needs `SARVAM_API_KEY`).
+Wake word picks the speaker: **Hey Jarvis** → `shubh`, **Hey Rekha** → `priya`
+(`TTS_VOICE_JARVIS` / `TTS_VOICE_REKHA`).
 
 ### Wake word (any phrase)
 
 **Default (offline model):** `Hey Jarvis` / `Jarvis` or `Hey Rekha` / `Rekha`
 via openWakeWord (`WAKE_MODEL=hey_jarvis,Hey_Rekha.onnx` when that ONNX is in
-`models/wake/`). Comma-separate multiple spoken forms.
+`models/wake/`). Comma-separate multiple spoken forms. Logs and tray status name
+the wake that fired (`Hey Rekha heard — listening`).
 
 ```bash
 # Other pretrained models

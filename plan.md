@@ -1,6 +1,6 @@
 # Plan
 
-Four follow-on tracks. The voice loop (wake → STT → orchestrator → computer agent) stays as it is; these sit beside it or behind the same interfaces.
+Five follow-on tracks. The voice loop (wake → STT → orchestrator → computer agent) stays as it is; these sit beside it or behind the same interfaces.
 
 ## 1. Passive activity tracker (skills + memories)
 
@@ -71,3 +71,30 @@ Don’t rebuild ambient recall from scratch. Apps like [Minimi](https://halotool
 - Tracker vs Minimi: if Minimi is running, the tracker should skip overlapping capture (tabs / frontmost app) and only write CU-specific notes (skills, task outcomes, spoken preferences).
 
 **Done when.** With Minimi connected, “Hey Jarvis, what was I reading about checkout?” can answer from Minimi context without a desktop takeover, and a finished CU task can be recalled later from the same memory layer.
+
+## 5. Dense apps (EasyEDA, CAD, schematic / PCB)
+
+Screenshot-and-click is a poor fit for canvas tools. EasyEDA, KiCad, Fusion, and similar apps draw the work surface in WebGL / custom widgets, so `read_ui_text` often returns almost nothing (already noted in `accessibility.py`). The evaluator already treats this class as **hard**. Goal: CUA can open, navigate, and do routine work in these apps without guessing at pixels.
+
+**Don’t drive the canvas by click coordinates.** Prefer, in order:
+
+1. **Official API / scripting** — KiCad Python, Fusion 360 API, EasyEDA export/CLI or plugin if it exists. Add a thin `run_app_script` (or reuse `run_terminal`) that runs a known-safe script inside the app instead of dragging traces with the mouse.
+2. **Keyboard and named UI** — menus, search palettes (Cmd+K / type-to-filter), documented hotkeys. Skills should list those, not “click the left toolbar ~40px down.”
+3. **AX where it works** — ribbon, dialogs, project tree. Fall back to screenshots only for confirming the canvas, not for choosing tools.
+4. **Last resort: labeled UI maps** — a per-app overlay or saved atlas (`memory/apps/easyeda.md` + reference screenshots) of tool names → regions, regenerated when the window size changes. Still better than the model inventing coordinates every turn.
+
+**Per-app packs (start with EasyEDA).** Today `skills/use-easyeda` only covers open + new project + save. Expand into a small pack, not one giant skill:
+
+- Window map: project tree, canvas, properties, library.
+- Navigation: pan/zoom, select vs wire vs place, how to get back to schematic vs PCB.
+- Library / search: add a part by name without hunting icons.
+- Safe edits: rename, save, export Gerber/PDF — operations that don’t require freehand drawing.
+- “Don’t”: redraw nets, move footprints, or route unless an API/script does it.
+
+Same pattern later for KiCad / other CAD: one pack per app, same structure, loaded via `read_skill` when the task names that software.
+
+**How the agent chooses.** Orchestrator / agent: if the task mentions EasyEDA, KiCad, CAD, schematic, PCB → load the pack first, set a **keyboard-first** policy, and skip long screenshot loops for tool picking. If AX is empty, say so and use the pack’s hotkeys rather than clicking the canvas.
+
+**Virtual layer.** These apps are a good fit for `CU_MODE=virtual` (section 3): a dedicated guest with EasyEDA already logged in, so experiments don’t fight the user’s Mac session.
+
+**Done when.** “Hey Rekha, open EasyEDA, new project named `usb-hub`, add a USB-C connector from the library, save” completes via menus/search/hotkeys (or a script), without the pointer hunting the canvas. Trace routing / 3D modeling stay out of scope until an API path exists.

@@ -593,7 +593,6 @@ def _listen_command(
     remainder = get_wake_remainder()
     if remainder:
         return strip_wake_prefix(remainder).strip() or remainder
-    time.sleep(0.15)
     try:
         utterance = listen_for_utterance(
             client,

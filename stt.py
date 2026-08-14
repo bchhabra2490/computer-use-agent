@@ -250,7 +250,16 @@ def _prepare_mic() -> None:
         sd.stop()
     except Exception:
         pass
-    time.sleep(0.15)
+
+
+def _cue_listen_start() -> None:
+    """Ping as soon as the STT stream is open — do not block capture."""
+    try:
+        from wake import play_listen_start_chime
+
+        play_listen_start_chime(blocking=False)
+    except Exception:
+        pass
 
 
 def _open_input_stream(capture_rate: int, chunk_frames: int):
@@ -557,12 +566,18 @@ class _EndPhraseWatcher:
                         self.partial += piece
                         if transcript_has_end_phrase(self.partial):
                             print("[stt] over and out — processing audio.")
+                            from wake import play_over_and_out_chime
+
+                            play_over_and_out_chime()
                             self.hit.set()
                             break
                     elif et == "conversation.item.input_audio_transcription.completed":
                         text = _event_transcript(event) or self.partial
                         if transcript_has_end_phrase(text):
                             print("[stt] over and out — processing audio.")
+                            from wake import play_over_and_out_chime
+
+                            play_over_and_out_chime()
                             self.hit.set()
                             break
         except Exception as exc:
@@ -623,9 +638,9 @@ def listen_realtime(
     if pause_persistent_wake is not None:
         pause_persistent_wake()
     try:
-        from wake import play_listen_start_chime
+        from wake import reset_over_and_out_chime
 
-        play_listen_start_chime()
+        reset_over_and_out_chime()
     except Exception:
         pass
     try:
@@ -775,9 +790,18 @@ def _listen_realtime_body(
     def mic_worker(connection) -> None:
         try:
             with _open_input_stream(capture_rate, chunk_frames) as stream:
+                _cue_listen_start()
                 if warmup_frames > 0:
                     data, _ = stream.read(warmup_frames)
-                    noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                    raw = np.asarray(data, dtype=np.float32).reshape(-1)
+                    cleaned = noise.process(raw)
+                    pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
+                    if pcm_24k.size:
+                        pcm_24k_chunks.append(pcm_24k.copy())
+                        b64 = _float_to_pcm16_b64(pcm_24k)
+                        with send_lock:
+                            if not committed.is_set():
+                                connection.input_audio_buffer.append(audio=b64)
                 while not stop.is_set():
                     if time.monotonic() > mic_deadline:
                         break
@@ -791,6 +815,9 @@ def _listen_realtime_body(
                             if wake_spotter.feed(cleaned, capture_rate):
                                 print("[stt] wake word — processing audio.")
                                 wake_send.set()
+                                from wake import play_over_and_out_chime
+
+                                play_over_and_out_chime()
                         except Exception:
                             pass
                     pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
@@ -884,6 +911,9 @@ def _listen_realtime_body(
 
                             if transcript_has_end_phrase(live):
                                 print("\n[stt] over and out — processing audio.")
+                                from wake import play_over_and_out_chime
+
+                                play_over_and_out_chime()
                                 wake_send.set()
                                 _commit_once(connection, "end phrase — processing audio.")
                         except Exception:
@@ -988,9 +1018,12 @@ def record_until_silence(
     sent = False
     silent_run = waited = total = 0.0
     with _open_input_stream(capture_rate, chunk_frames) as stream:
+        _cue_listen_start()
         if warmup_frames:
             data, _ = stream.read(warmup_frames)
-            noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+            cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+            chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
+            total += warmup_frames / float(capture_rate)
         while total < max_record_seconds:
             data, _ = stream.read(chunk_frames)
             cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
@@ -1001,6 +1034,9 @@ def record_until_silence(
                 try:
                     end_watch.feed_pcm24k(pcm_24k)
                     if end_watch.hit.is_set():
+                        from wake import play_over_and_out_chime
+
+                        play_over_and_out_chime()
                         sent = True
                         break
                 except Exception:
@@ -1009,6 +1045,9 @@ def record_until_silence(
                 try:
                     if wake_spotter.feed(cleaned, capture_rate):
                         print("[stt] wake word — processing audio.")
+                        from wake import play_over_and_out_chime
+
+                        play_over_and_out_chime()
                         sent = True
                         break
                 except Exception:

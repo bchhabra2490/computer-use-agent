@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -110,6 +110,19 @@ class EndModelKeyTests(unittest.TestCase):
             wake.keys_matching_specs(["Hey_Rekha.onnx"], ["hey_jarvis_v0.1", "Hey_Rekha"]),
             ["Hey_Rekha"],
         )
+
+
+class OverAndOutChimeTests(unittest.TestCase):
+    def test_plays_once_per_listen(self) -> None:
+        wake.reset_over_and_out_chime()
+        with patch.object(wake, "play_wake_chime") as mocked:
+            wake.play_over_and_out_chime()
+            wake.play_over_and_out_chime()
+            mocked.assert_called_once_with(force=True, blocking=False)
+        wake.reset_over_and_out_chime()
+        with patch.object(wake, "play_wake_chime") as mocked:
+            wake.play_over_and_out_chime()
+            mocked.assert_called_once()
 
 
 class WakeSpotterTests(unittest.TestCase):

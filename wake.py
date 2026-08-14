@@ -286,19 +286,14 @@ def matched_wake_phrase(transcript: str, phrase: str | None = None) -> str | Non
     return best
 
 
-def play_wake_chime() -> None:
-    """Short local cue that the wake word was heard (no API)."""
-    if os.environ.get("WAKE_CHIME", "1").strip().lower() in {"0", "false", "no", "off"}:
-        return
+def _afplay(sound: str, *, blocking: bool) -> bool:
+    """Play a macOS system sound. Returns True if afplay was started."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import subprocess
 
-    if sys.platform == "darwin":
-        sound = os.environ.get(
-            "WAKE_CHIME_SOUND",
-            "/System/Library/Sounds/Tink.aiff",
-        )
-        try:
-            import subprocess
-
+        def _run() -> None:
             subprocess.run(
                 ["afplay", sound],
                 check=False,
@@ -306,9 +301,38 @@ def play_wake_chime() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            return
-        except Exception as e:
-            print(f"[wake] afplay chime failed ({e}); trying tone", file=sys.stderr)
+
+        if blocking:
+            _run()
+        else:
+            threading.Thread(target=_run, name="chime", daemon=True).start()
+        return True
+    except Exception:
+        return False
+
+
+_over_and_out_chimed = threading.Event()
+
+
+def reset_over_and_out_chime() -> None:
+    _over_and_out_chimed.clear()
+
+
+def play_wake_chime(*, force: bool = False, blocking: bool = True) -> None:
+    """Tink. Off on wake-detect unless WAKE_CHIME=1; over-and-out uses force=True."""
+    if not force and os.environ.get("WAKE_CHIME", "0").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return
+
+    if _afplay(
+        os.environ.get("WAKE_CHIME_SOUND", "/System/Library/Sounds/Tink.aiff"),
+        blocking=blocking,
+    ):
+        return
 
     try:
         sr = 24_000
@@ -320,10 +344,21 @@ def play_wake_chime() -> None:
         tone2 = (0.24 * np.sin(2 * np.pi * 1318.5 * t2) * env2).astype(np.float32)
         gap = np.zeros(int(sr * 0.025), dtype=np.float32)
         audio = np.concatenate([tone1, gap, tone2])
-        sd.play(audio, sr, blocking=True)
-        sd.wait()
+        if blocking:
+            sd.play(audio, sr, blocking=True)
+            sd.wait()
+        else:
+            sd.play(audio, sr, blocking=False)
     except Exception as e:
         print(f"[wake] chime failed: {e}", file=sys.stderr)
+
+
+def play_over_and_out_chime() -> None:
+    """Tink when the listen-end closer is heard. Independent of WAKE_CHIME=0."""
+    if _over_and_out_chimed.is_set():
+        return
+    _over_and_out_chimed.set()
+    play_wake_chime(force=True, blocking=False)
 
 
 def play_listen_end_chime() -> None:
@@ -331,30 +366,17 @@ def play_listen_end_chime() -> None:
     if os.environ.get("STT_END_CHIME", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
 
-    if sys.platform == "darwin":
-        sound = os.environ.get(
-            "STT_END_CHIME_SOUND",
-            "/System/Library/Sounds/Pop.aiff",
-        )
-        try:
-            import subprocess
-
-            subprocess.run(
-                ["afplay", sound],
-                check=False,
-                timeout=3,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
-        except Exception as e:
-            print(f"[stt] afplay end-chime failed ({e}); trying tone", file=sys.stderr)
+    if _afplay(
+        os.environ.get("STT_END_CHIME_SOUND", "/System/Library/Sounds/Pop.aiff"),
+        blocking=True,
+    ):
+        return
 
     try:
         sr = 24_000
         t = np.linspace(0, 0.08, int(sr * 0.08), endpoint=False)
         env = np.linspace(1.0, 0.1, t.size)
-        # Lower descending blip — distinct from the rising wake chime.
+        # Lower descending blip — distinct from the rising start chime.
         tone = (0.26 * np.sin(2 * np.pi * 660.0 * t) * env).astype(np.float32)
         sd.play(tone, sr, blocking=True)
         sd.wait()
@@ -362,40 +384,32 @@ def play_listen_end_chime() -> None:
         print(f"[stt] end-chime failed: {e}", file=sys.stderr)
 
 
-def play_listen_start_chime() -> None:
-    """Short local cue that Jarvis is now listening (idle, mid-task, barge-in, ask)."""
+def play_listen_start_chime(*, blocking: bool = False) -> None:
+    """Cue that the mic is open. Non-blocking so capture is not delayed."""
     if os.environ.get("STT_START_CHIME", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
 
-    if sys.platform == "darwin":
-        sound = os.environ.get(
-            "STT_START_CHIME_SOUND",
-            "/System/Library/Sounds/Ping.aiff",
-        )
+    if _afplay(
+        os.environ.get("STT_START_CHIME_SOUND", "/System/Library/Sounds/Ping.aiff"),
+        blocking=blocking,
+    ):
+        return
+
+    def _tone() -> None:
         try:
-            import subprocess
-
-            subprocess.run(
-                ["afplay", sound],
-                check=False,
-                timeout=3,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
+            sr = 24_000
+            t = np.linspace(0, 0.07, int(sr * 0.07), endpoint=False)
+            env = np.linspace(1.0, 0.12, t.size)
+            tone = (0.26 * np.sin(2 * np.pi * 990.0 * t) * env).astype(np.float32)
+            sd.play(tone, sr, blocking=True)
+            sd.wait()
         except Exception as e:
-            print(f"[stt] afplay start-chime failed ({e}); trying tone", file=sys.stderr)
+            print(f"[stt] start-chime failed: {e}", file=sys.stderr)
 
-    try:
-        sr = 24_000
-        t = np.linspace(0, 0.07, int(sr * 0.07), endpoint=False)
-        env = np.linspace(1.0, 0.12, t.size)
-        # Mid rising blip — distinct from wake (double high) and end (low).
-        tone = (0.26 * np.sin(2 * np.pi * 990.0 * t) * env).astype(np.float32)
-        sd.play(tone, sr, blocking=True)
-        sd.wait()
-    except Exception as e:
-        print(f"[stt] start-chime failed: {e}", file=sys.stderr)
+    if blocking:
+        _tone()
+    else:
+        threading.Thread(target=_tone, name="chime", daemon=True).start()
 
 
 def _download_file(name: str, target: Path) -> None:
@@ -881,8 +895,6 @@ def _wait_for_wake_model(
             f"[wake] detected {label} via {hit_key} (score={hit_score:.2f})",
             flush=True,
         )
-        if play_chime:
-            play_wake_chime()
         return True
     return False
 
@@ -945,8 +957,6 @@ def _wait_for_wake_phrase(
                 + (f" — remainder: {remainder!r}" if remainder else ""),
                 flush=True,
             )
-            if play_chime:
-                play_wake_chime()
             return True
         print(f"[wake] ignored (does not start with {format_wake_phrases()})", flush=True)
 
@@ -957,7 +967,7 @@ def wait_for_wake(
     should_stop: Callable[[], bool] | None = None,
     poll_hz: float = 20.0,
     prompt: str | None = None,
-    play_chime: bool = True,
+    play_chime: bool = False,
 ) -> bool:
     """
     Block until the configured wake word/phrase is detected.
@@ -965,6 +975,7 @@ def wait_for_wake(
     Returns True on wake, False if should_stop() became true first.
     When a persistent barge-in monitor is already running, waits on that
     instead of opening a second mic (except from the monitor thread itself).
+    The listen-start chime plays when STT opens the mic, not here.
     """
     _set_wake_remainder(None)
     thresh = DEFAULT_THRESHOLD if threshold is None else float(threshold)
@@ -1077,8 +1088,6 @@ class WakeMonitor:
                 if hit:
                     self.woken.set()
                     print("[wake] barge-in triggered", flush=True)
-                    time.sleep(0.08)
-                    play_wake_chime()
                     if not self.persistent:
                         break
         except Exception as e:

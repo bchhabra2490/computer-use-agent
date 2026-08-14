@@ -135,7 +135,28 @@ detection of short forms, add a custom `.onnx` to `WAKE_MODEL`.
 A custom wake word needs a **trained** openWakeWord `.onnx` — setting `WAKE_PHRASE`
 alone does not create one.
 
-**Easiest: Google Colab (official)**
+**Recommended: [wake-word-classifier](https://github.com/bchhabra2490/wake-word-classifier)**
+
+Local trainer for a custom phrase (US, UK, and Indian English TTS). Use Python
+3.12.8, then:
+
+```bash
+git clone https://github.com/bchhabra2490/wake-word-classifier
+cd wake-word-classifier
+~/.pyenv/versions/3.12.8/bin/python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+.venv/bin/python train_wake_word.py --phrase "hey rekha" --n-samples 10000 --n-samples-val 500
+```
+
+The ONNX lands in `my_custom_model/` (spaces become underscores, e.g.
+`hey_rekha.onnx`). Copy it into this repo’s `models/wake/`, then set
+`WAKE_MODEL` (start listening) or `WAKE_END_MODEL` (stop listening / send).
+`--n-samples 1000` is enough to try the pipeline; **10000** is the working
+dataset size. Mic testing needs Terminal.app (not Cursor) for microphone
+permission — see that repo’s README.
+
+**Alternative: Google Colab (official openWakeWord)**
 
 1. Open the [openWakeWord custom training Colab](https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb?usp=sharing).
 2. Enter your wake phrase (e.g. `hey bob`).

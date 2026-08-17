@@ -6,6 +6,10 @@ Kinds:
   - app — per-application notes (usernames, UI quirks, usual workflows)
   - screen — screenshot + LLM description for later recall
 
+After each orchestrator turn and computer-use run, user input plus LLM
+steps are reviewed and durable facts (repos, songs, preferences) are
+appended here automatically.
+
 Files: ``memory/personal/<slug>.md``, ``memory/apps/<slug>.md``,
 ``memory/screens/<slug>.md`` (+ matching ``.png`` for screen captures).
 """
@@ -13,19 +17,28 @@ Files: ``memory/personal/<slug>.md``, ``memory/apps/<slug>.md``,
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 MEMORY_DIR = Path(__file__).resolve().parent / "memory"
+_MEMORY_WRITE_LOCK = threading.Lock()
 MEMORY_VISION_MODEL = (
     os.environ.get("MEMORY_VISION_MODEL")
     or os.environ.get("ORCHESTRATOR_MODEL")
     or "gpt-4o-mini"
 ).strip() or "gpt-4o-mini"
+MEMORY_EXTRACT_MODEL = (
+    os.environ.get("MEMORY_EXTRACT_MODEL")
+    or os.environ.get("EVAL_MODEL")
+    or os.environ.get("ORCHESTRATOR_MODEL")
+    or "gpt-5-mini"
+).strip() or "gpt-5-mini"
 
 _KIND_DIR = {
     "personal": "personal",
@@ -176,12 +189,13 @@ def save_memory(
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     block = f"## {stamp}\n\n{body}\n"
 
-    if how == "replace" or not path.exists():
-        header = f"# {canon} / {slug}\n\n"
-        path.write_text(header + block, encoding="utf-8")
-    else:
-        existing = path.read_text(encoding="utf-8").rstrip() + "\n\n"
-        path.write_text(existing + block, encoding="utf-8")
+    with _MEMORY_WRITE_LOCK:
+        if how == "replace" or not path.exists():
+            header = f"# {canon} / {slug}\n\n"
+            path.write_text(header + block, encoding="utf-8")
+        else:
+            existing = path.read_text(encoding="utf-8").rstrip() + "\n\n"
+            path.write_text(existing + block, encoding="utf-8")
     return path
 
 
@@ -200,6 +214,251 @@ def format_memory_catalog(*, memory_dir: Path | None = None) -> str:
     for note in notes:
         lines.append(f"  - {note.rel}: {_preview(note.text)}")
     return "\n".join(lines)
+
+
+def memory_extract_enabled() -> bool:
+    return os.environ.get("MEMORY_EXTRACT", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+class TurnTrace:
+    """User utterance plus each LLM step (replies, tool calls, results)."""
+
+    def __init__(self, user_input: str = ""):
+        self.user_input = (user_input or "").strip()
+        self.steps: list[tuple[str, str]] = []
+
+    def add(self, kind: str, text: str, *, max_len: int = 4000) -> None:
+        body = (text or "").strip()
+        if not body:
+            return
+        if len(body) > max_len:
+            body = body[:max_len] + "\n… (truncated)"
+        self.steps.append(((kind or "step").strip() or "step", body))
+
+    def as_text(self, max_chars: int = 20_000) -> str:
+        parts = [f"User input:\n{self.user_input or '(empty)'}"]
+        for i, (kind, text) in enumerate(self.steps, start=1):
+            parts.append(f"Step {i} [{kind}]:\n{text}")
+        blob = "\n\n".join(parts)
+        if len(blob) > max_chars:
+            return blob[:max_chars] + "\n… (truncated)"
+        return blob
+
+
+_SECRET_TEXT_RE = re.compile(
+    r"(?i)\b(password|passwd|api[_-]?key|secret|otp|one[- ]time(?: code)?)\b\s*[:=]"
+    r"|sk-[A-Za-z0-9]{10,}"
+    r"|ghp_[A-Za-z0-9]{10,}"
+    r"|github_pat_[A-Za-z0-9_]{10,}"
+)
+
+
+def _text_looks_secret(text: str) -> bool:
+    return bool(_SECRET_TEXT_RE.search(text or ""))
+
+
+def _response_output_text(response: Any) -> str:
+    text = _response_text(response)
+    if text:
+        return text
+    return (getattr(response, "output_text", None) or "").strip()
+
+
+def parse_extracted_memory_items(payload: Any) -> list[dict[str, str]]:
+    """Normalize extractor JSON into ``{kind, name, text}`` rows."""
+    if payload is None:
+        return []
+    raw: Any
+    if isinstance(payload, list):
+        raw = payload
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("kind"), str) and payload.get("text"):
+            raw = [payload]
+        else:
+            raw = payload.get("items") or payload.get("memories") or []
+    else:
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    items: list[dict[str, str]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "").strip().lower()
+        name = str(row.get("name") or "").strip()
+        text = str(row.get("text") or "").strip()
+        if kind not in {"personal", "app"} or not name or not text:
+            continue
+        if _text_looks_secret(text):
+            continue
+        items.append({"kind": kind, "name": name, "text": text})
+    return items
+
+
+def _parse_json_object(text: str) -> Any | None:
+    blob = (text or "").strip()
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", blob, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def apply_extracted_memory_items(
+    items: list[dict[str, str]],
+    *,
+    memory_dir: Path | None = None,
+) -> list[str]:
+    """Append extracted facts. Returns relative paths that were written."""
+    written: list[str] = []
+    for item in items:
+        try:
+            path = save_memory(
+                item["kind"],
+                item["name"],
+                item["text"],
+                mode="append",
+                memory_dir=memory_dir,
+            )
+        except (ValueError, OSError) as e:
+            print(f"[memory] skip {item.get('kind')}/{item.get('name')}: {e}", flush=True)
+            continue
+        try:
+            shown = str(path.relative_to(_root(memory_dir)))
+        except ValueError:
+            shown = path.name
+        written.append(shown)
+        print(f"[memory] extracted → {shown}", flush=True)
+    return written
+
+
+_EXTRACT_PROMPT = """You extract durable memories from a completed voice-assistant run.
+
+Save facts the assistant should recall on later tasks, for example:
+- GitHub repos the user owns or asked about (owner/name, star count if known)
+- Songs, artists, playlists, or YouTube videos that were played or requested
+- App usernames, preferred apps, labels, issue-splitting choices, volume
+- People, places, standing preferences, accounts (not passwords)
+
+Do NOT save:
+- Passwords, API keys, OTPs, tokens, or payment details
+- One-off clicks, "opened Chrome", raw tool dumps, or the task itself with no fact
+- Anything already in existing memories unless this run has a new or updated value
+
+Existing memories (do not repeat unless updated):
+<<<CATALOG>>>
+
+Full run (user input, model replies, tool calls, tool results):
+<<<TRANSCRIPT>>>
+
+Respond with JSON only (no markdown fences):
+{"items": [{"kind": "personal" or "app", "name": "short-slug", "text": "one or more bullets", "reason": "why"}]}
+
+Use kind=app and a slug like github, youtube, hn, chrome when the fact is tied to an app.
+Use kind=personal and name=profile for who the user is / standing preferences.
+If nothing is worth saving, return {"items": []}.
+"""
+
+
+def _new_extract_client() -> Any:
+    from openai import OpenAI
+
+    return OpenAI()
+
+
+def _extract_run_memories_impl(
+    client: Any,
+    *,
+    user_input: str,
+    transcript: str,
+    memory_dir: Path | None = None,
+) -> list[str]:
+    catalog = format_memory_catalog(memory_dir=memory_dir)
+    prompt = _EXTRACT_PROMPT.replace("<<<CATALOG>>>", catalog).replace(
+        "<<<TRANSCRIPT>>>", transcript
+    )
+    print("[memory] extracting facts from this run…", flush=True)
+    try:
+        response = client.responses.create(
+            model=MEMORY_EXTRACT_MODEL,
+            input=prompt,
+        )
+        raw = _response_output_text(response)
+        payload = _parse_json_object(raw)
+        items = parse_extracted_memory_items(payload)
+        if not items:
+            print("[memory] nothing durable to save", flush=True)
+            return []
+        return apply_extracted_memory_items(items, memory_dir=memory_dir)
+    except Exception as e:
+        print(f"[memory] extract failed: {e}", flush=True)
+        return []
+
+
+def maybe_extract_run_memories(
+    client: Any | None = None,
+    *,
+    user_input: str,
+    transcript: str,
+    memory_dir: Path | None = None,
+    background: bool = True,
+) -> list[str]:
+    """
+    After a run, combine user input + LLM steps and append durable facts.
+
+    By default this starts a daemon thread and returns immediately so the
+    agent / orchestrator are not blocked on the extract LLM call. Pass
+    ``background=False`` to run inline (tests). Failures are logged and
+    do not raise.
+    """
+    if not memory_extract_enabled():
+        return []
+    user = (user_input or "").strip()
+    blob = (transcript or "").strip()
+    if not user and not blob:
+        return []
+    if not blob:
+        blob = f"User input:\n{user}"
+
+    if not background:
+        if client is None:
+            return []
+        return _extract_run_memories_impl(
+            client,
+            user_input=user,
+            transcript=blob,
+            memory_dir=memory_dir,
+        )
+
+    def _work() -> None:
+        try:
+            worker_client = _new_extract_client()
+            _extract_run_memories_impl(
+                worker_client,
+                user_input=user,
+                transcript=blob,
+                memory_dir=memory_dir,
+            )
+        except Exception as e:
+            print(f"[memory] extract failed: {e}", flush=True)
+
+    threading.Thread(target=_work, name="memory-extract", daemon=True).start()
+    print("[memory] extracting facts in background…", flush=True)
+    return []
 
 
 _SAVE_SCREEN_RE = re.compile(

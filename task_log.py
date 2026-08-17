@@ -118,8 +118,8 @@ class TaskLog:
         except Exception:
             pass
 
-    def steps_for_prompt(self, max_chars: int = 12_000) -> str:
-        """Compact transcript for skill-proposal prompts."""
+    def steps_for_prompt(self, max_chars: int = 12_000, *, snippet_chars: int = 500) -> str:
+        """Compact transcript for skill-proposal and memory-extract prompts."""
         if not self.steps_path.exists():
             return "(no steps recorded)"
         lines = []
@@ -129,8 +129,8 @@ class TaskLog:
             data = entry.get("data")
             if data:
                 snippet = json.dumps(data, ensure_ascii=False)
-                if len(snippet) > 500:
-                    snippet = snippet[:500] + "…"
+                if len(snippet) > snippet_chars:
+                    snippet = snippet[:snippet_chars] + "…"
                 lines.append(f"   {snippet}")
         text = "\n".join(lines)
         if len(text) > max_chars:

@@ -54,8 +54,7 @@ def accessibility_available() -> tuple[bool, str]:
     except ImportError:
         return (
             False,
-            "Missing pyobjc ApplicationServices. Install: "
-            "pip install pyobjc-framework-ApplicationServices",
+            "Missing pyobjc ApplicationServices. Install: " "pip install pyobjc-framework-ApplicationServices",
         )
     if not AXIsProcessTrusted():
         return (
@@ -125,6 +124,17 @@ def _ax_frame(element) -> tuple[float, float, float, float] | None:
     return None
 
 
+def frontmost_app_name() -> str | None:
+    """Localized name of the frontmost macOS app, or None."""
+    try:
+        app = _frontmost_app()
+        if app is None:
+            return None
+        return (app.localizedName() or "").strip() or None
+    except Exception:
+        return None
+
+
 def _frontmost_app():
     from AppKit import NSWorkspace
 
@@ -180,7 +190,10 @@ def _collect_lines(
     text_bits = [t for t in (title, value, desc, label, help_text) if t]
     # Always emit windows / interesting roles; emit others only if they have text.
     interesting = role in _INTERESTING_ROLES or bool(text_bits)
-    if interesting and (text_bits or role in {"AXWindow", "AXButton", "AXTextField", "AXTextArea", "AXStaticText", "AXLink", "AXMenuItem"}):
+    if interesting and (
+        text_bits
+        or role in {"AXWindow", "AXButton", "AXTextField", "AXTextArea", "AXStaticText", "AXLink", "AXMenuItem"}
+    ):
         state["nodes"] += 1
         indent = "  " * depth
         parts = [f"[{role}]"]

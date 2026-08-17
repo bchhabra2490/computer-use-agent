@@ -3,6 +3,12 @@
 Runs the voice orchestrator in the background (detached session, logs to
 ``logs/cua.log``). ``cua start`` also installs a ``cua`` shim on PATH when
 possible so the command works from any directory.
+
+MCP apps (Linear, GitHub, …) connect with browser login::
+
+    cua mcp login linear
+    cua mcp status
+    cua mcp logout linear
 """
 
 from __future__ import annotations
@@ -316,6 +322,36 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Print whether the daemon is running")
     sub.add_parser("install", help="Install the cua command on PATH")
 
+    mcp_p = sub.add_parser(
+        "mcp",
+        help="Connect MCP apps by logging in (Linear, GitHub, …)",
+    )
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
+    login_p = mcp_sub.add_parser(
+        "login",
+        help="Open a browser, log in to an app, enable it in mcp.json",
+    )
+    login_p.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="App name (linear, github, notion) or a custom slug with --url",
+    )
+    login_p.add_argument(
+        "--url",
+        default=None,
+        help="Remote MCP URL (required for apps not in the known list)",
+    )
+    login_p.add_argument(
+        "--token",
+        default=None,
+        help="Access token (GitHub PAT). Prefer `cua mcp login github` with gh CLI.",
+    )
+    logout_p = mcp_sub.add_parser("logout", help="Forget stored OAuth tokens")
+    logout_p.add_argument("name", help="App name (linear, github, …)")
+    mcp_sub.add_parser("status", help="Show which MCP apps are logged in")
+    mcp_sub.add_parser("apps", help="List known apps you can log in to")
+
     args = parser.parse_args(argv)
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
@@ -328,6 +364,24 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
     if args.command == "install":
         return cmd_install()
+    if args.command == "mcp":
+        from mcp_auth import (
+            cmd_mcp_login,
+            cmd_mcp_logout,
+            cmd_mcp_status,
+            format_apps_help,
+        )
+
+        if args.mcp_command == "login":
+            return cmd_mcp_login(args.name, url=args.url, token=args.token)
+        if args.mcp_command == "logout":
+            return cmd_mcp_logout(args.name)
+        if args.mcp_command == "status":
+            return cmd_mcp_status()
+        if args.mcp_command == "apps":
+            print(format_apps_help())
+            return 0
+        return 2
     parser.print_help()
     return 2
 

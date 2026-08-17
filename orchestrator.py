@@ -13,7 +13,9 @@ Cloud STT only runs after the wake word. While Jarvis is speaking, say
 "Hey Jarvis" again (or press Space / Esc / Enter in the terminal) to interrupt
 TTS and give a new command (barge-in).
 When the agent calls ask_user, the question is spoken and answered here on
-the main thread (no wake word required; barge-in still works).
+the main thread (no wake word required; barge-in still works). If the model
+dumps a question as a plain message or inside give_response_to_user, the
+runtime still speaks it and listens without a wake word.
 
 Usage:
     export OPENAI_API_KEY=sk-...
@@ -66,9 +68,11 @@ from bus import (
 )
 from memory import (
     MEMORY_TOOLS,
+    TurnTrace,
     capture_and_save_screen,
     format_memory_catalog,
     is_save_screen_utterance,
+    maybe_extract_run_memories,
     run_memory_tool,
 )
 from mcp_client import (
@@ -80,7 +84,7 @@ from mcp_client import (
 )
 from skills import format_skill_catalog
 from status_tray import ensure_tray_running
-from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
+from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance, listen_once
 from tts import speak
 from wake import (
     WAKE_PHRASE,
@@ -139,15 +143,20 @@ ASK_USER_TOOL = {
     "type": "function",
     "name": "ask_user",
     "description": (
-        "Ask the user a clarifying question aloud and receive their spoken answer. "
-        "Use before start_task when a preference, account, or choice is missing."
+        "Ask the user a clarifying question aloud and capture their spoken answer "
+        "immediately (no wake word). Required whenever you need a reply — never put "
+        "questions in a plain assistant message or in give_response_to_user. Ask one "
+        "short spoken question, not a numbered list."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "question": {
                 "type": "string",
-                "description": "The question to speak.",
+                "description": (
+                    "One short question to speak. Natural wording; titles "
+                    "instead of raw URLs. Not a numbered list."
+                ),
             },
         },
         "required": ["question"],
@@ -160,16 +169,21 @@ GIVE_RESPONSE_TOOL = {
     "type": "function",
     "name": "give_response_to_user",
     "description": (
-        "Speak a response to the user (status, answer, greeting, or small talk). "
-        "After finishing a normal request, set end_session=false so you can listen "
-        "for the next task. Set end_session=true ONLY when the user says goodbye / quit."
+        "Speak the answer once, in one or two short sentences, then stop. "
+        "Do not ask questions here (use ask_user). Do not say you will wait, "
+        "that you are ready, or recap the same result a second time. "
+        "Set end_session=true ONLY when the user says goodbye / quit."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "message": {
                 "type": "string",
-                "description": "What to say aloud. Keep it concise.",
+                "description": (
+                    "What to say aloud. Speak like a person: short natural "
+                    "sentences. Use titles and names, not raw URLs or https "
+                    "links (painful to hear). No markdown."
+                ),
             },
             "end_session": {
                 "type": "boolean",
@@ -197,9 +211,12 @@ def orchestrator_tools() -> list:
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
-You receive transcribed speech from the user. Decide the next action with tools only:
-- give_response_to_user — speak an answer or acknowledgment (no desktop control)
-- ask_user — ask one clarifying question when needed, then wait for their reply
+You receive transcribed speech from the user. Decide the next action with tools only
+— never reply with a plain assistant message (the user will not hear it, and the mic
+will not open):
+- give_response_to_user — speak an answer or acknowledgment that does not need a reply
+- ask_user — ask one short clarifying question aloud, then listen for their answer
+  (no wake word). Use this for any question, confirmation, or choice.
 - start_task — run the computer-use agent for real mouse/keyboard/UI work
 - list_memories / read_memory / save_memory — personal facts and per-app notes
   under memory/ (see skill read-memory). Read before asking for a known preference;
@@ -216,12 +233,18 @@ Rules:
 - Call read_memory before ask_user when the missing detail may already be stored
   (name, usernames, usual apps, what was on screen). save_memory for durable
   facts they state. save_screen_memory when they want the current display stored.
-- Call ask_user when a required detail is missing (which app, which account, confirm destructive work).
-- Keep spoken messages short.
+- Call ask_user when a required detail is missing (which app, which account, confirm
+  destructive work, how to split issues, labels). One short spoken question — never a
+  numbered list in a message or in give_response_to_user.
+- Keep spoken messages short. Write as if talking, not as a written report:
+  titles and names instead of raw URLs or https links (those are painful to hear);
+  no markdown, no reading out slugs or file paths unless asked.
+  After give_response_to_user, STOP — do not emit a plain message or speak again.
+  Never say “I’ll wait”, “I’m ready”, or repeat that you marked the task done.
 - After each start_task, you receive that task's result plus the full history of tasks
   already run in this session. Use that history to decide:
-  - If the user's request is fully satisfied → give_response_to_user with the answer
-    and end_session=false (keep listening for the next task).
+  - If the user's request is fully satisfied → give_response_to_user ONCE with the
+    outcome (one or two sentences) and stop. The runtime already listens next.
   - If a distinct remaining step is still needed → start_task with only the leftover work.
   - Do not restart a task that already succeeded just to rephrase it.
 - Stay in the conversation after completing work. Only set end_session=true when the
@@ -273,6 +296,96 @@ def _print_messages(response) -> None:
             for part in item.content:
                 if getattr(part, "type", None) == "output_text":
                     print(f"\n[orchestrator] {part.text}")
+
+
+def _record_llm_step(turn: TurnTrace | None, response) -> None:
+    if turn is None:
+        return
+    text = _assistant_message_text(response)
+    if text:
+        turn.add("llm_response", text)
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "function_call":
+            continue
+        name = getattr(item, "name", "") or "tool"
+        args = getattr(item, "arguments", None) or ""
+        turn.add("llm_tool_call", f"{name} {args}", max_len=2500)
+
+
+def _assistant_message_text(response) -> str:
+    """Plain assistant text from a Responses API turn (not tool-call arguments)."""
+    parts: list[str] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "message":
+            continue
+        for part in getattr(item, "content", None) or []:
+            if getattr(part, "type", None) == "output_text":
+                text = (getattr(part, "text", None) or "").strip()
+                if text:
+                    parts.append(text)
+    return "\n".join(parts).strip()
+
+
+_QUESTION_HINT = re.compile(
+    r"\?"
+    r"|^\s*\d+[.)]\s"
+    r"|\b("
+    r"which option|which should|do you want|should I|"
+    r"confirm (the|that)|any default|quick questions?|"
+    r"before I (create|do|start|open)|want me to"
+    r")\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    """True when spoken text expects a reply (so we must open the mic)."""
+    return bool(text and _QUESTION_HINT.search(text.strip()))
+
+
+_WAIT_FILLER_RE = re.compile(
+    r"(?is)"
+    r"(?:\s*(?:"
+    r"I(?:'ll| will) wait(?: for (?:any )?(?:further )?instructions?)?|"
+    r"I(?:'m| am) ready(?: for (?:your )?next(?: task)?)?|"
+    r"Let me know if you need anything else|"
+    r"What(?:'s| is) next\??"
+    r")\.?)+\s*$"
+)
+
+
+def _strip_wait_filler(text: str) -> str:
+    """Drop trailing 'I'll wait / I'm ready' padding from a spoken reply."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    stripped = _WAIT_FILLER_RE.sub("", cleaned).strip()
+    return stripped or cleaned
+
+
+def _turn_already_spoke(turn: TurnTrace | None) -> bool:
+    if turn is None:
+        return False
+    return any(kind == "spoken" for kind, _ in turn.steps)
+
+
+def _give_response_closes_turn(call, out: dict | None) -> bool:
+    """True when a statement was spoken and the model must not talk again."""
+    if getattr(call, "name", None) != "give_response_to_user" or not out:
+        return False
+    text = str(out.get("output") or "")
+    if "captured their answer" in text or text.startswith("Speech interrupted"):
+        return False
+    return text.startswith("Spoke to user")
+
+
+def _listen_for_answer(client: OpenAI) -> str:
+    """Capture a spoken reply without requiring the wake word."""
+    return listen_once(
+        client,
+        mode="freeform",
+        prompt="Listening for your answer… (sends after 3s without new words)",
+    )
 
 
 def _create_response(
@@ -786,6 +899,7 @@ def _handle_tool(
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
     llm_tts: Any | None = None,
+    turn: TurnTrace | None = None,
 ) -> tuple[dict | None, bool, AgentJob | None]:
     """
     Execute one tool call.
@@ -796,7 +910,9 @@ def _handle_tool(
     end_session = False
 
     if call.name == "give_response_to_user":
-        message = (args.get("message") or "").strip()
+        message = _strip_wait_filler((args.get("message") or "").strip())
+        if turn is not None and message:
+            turn.add("spoken", message)
         end_session = bool(args.get("end_session"))
         farewell = bool(
             re.search(
@@ -811,6 +927,7 @@ def _handle_tool(
         already_streamed = bool(
             llm_tts is not None and getattr(call, "call_id", None) and llm_tts.took_call(call.call_id)
         )
+        handled_barge = False
         if message and already_streamed:
             # Playback may still be draining — wait, do not speak again.
             print("[orchestrator] give_response already streaming via low-latency TTS", flush=True)
@@ -818,6 +935,7 @@ def _handle_tool(
             interrupted = bool(llm_tts.wait_call(call.call_id))
             llm_tts.acknowledge_call(call.call_id)
             if interrupted:
+                handled_barge = True
                 end_session = False
                 set_state("listening", "barge-in")
                 barge = _listen_after_barge(client)
@@ -837,6 +955,7 @@ def _handle_tool(
         elif message:
             barge = _speak(client, message)
             if barge:
+                handled_barge = True
                 end_session = False
                 output = (
                     f"Speech interrupted. User then said: {barge}. "
@@ -847,6 +966,26 @@ def _handle_tool(
                 output = f"Spoke to user. end_session={end_session}"
         else:
             output = f"Spoke to user. end_session={end_session}"
+
+        # give_response does not open the mic. If the model asked a question
+        # here anyway, listen without a wake word so the user can answer.
+        if (
+            not handled_barge
+            and not end_session
+            and message
+            and _looks_like_question(message)
+        ):
+            print(
+                "[orchestrator] give_response asked a question — "
+                "listening without wake word",
+                flush=True,
+            )
+            answer = _listen_for_answer(client)
+            output = (
+                f"Spoke to user, then captured their answer (no wake word): {answer}. "
+                "Continue with that answer. Further questions must use ask_user "
+                "(one short spoken question, not a numbered list)."
+            )
         print(f"[orchestrator] give_response_to_user → {output}")
 
     elif call.name == "ask_user":
@@ -856,6 +995,8 @@ def _handle_tool(
         else:
             output = ask_user(client, question)
             print(f"[orchestrator] ask_user answer: {output}")
+            if turn is not None:
+                turn.add("ask_user", f"Q: {question}\nA: {output}")
 
     elif call.name == "start_task":
         task = (args.get("task") or "").strip()
@@ -916,21 +1057,80 @@ def _process_response(
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
     llm_tts: Any | None = None,
-) -> tuple[Any, bool]:
+    turn: TurnTrace | None = None,
+) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
     start_task runs the agent in a thread; this function blocks in a Jarvis
     listen loop until that agent finishes, then resumes the tool loop.
+
+    The third value is function_call_output items that must be sent on the
+    next user turn when we already spoke and skipped a recap model call.
     """
     end_session = False
     while True:
         _print_messages(response)
+        _record_llm_step(turn, response)
         function_calls = [i for i in response.output if i.type == "function_call"]
         if not function_calls:
-            return response, end_session
+            leftover = _assistant_message_text(response)
+            already_spoke = _turn_already_spoke(turn)
+            if leftover and _looks_like_question(leftover) and not already_spoke:
+                print(
+                    "[orchestrator] model asked in a message instead of ask_user — "
+                    "speaking and listening without wake word",
+                    flush=True,
+                )
+                answer = ask_user(client, leftover)
+                if turn is not None:
+                    turn.add("ask_user", f"Q: {leftover}\nA: {answer}")
+                response = _create_response(
+                    client,
+                    llm_tts=llm_tts,
+                    model=MODEL,
+                    tools=orchestrator_tools(),
+                    previous_response_id=response.id,
+                    input=(
+                        f"User answered: {answer}\n\n"
+                        "Continue the task with this answer. Never put questions in a "
+                        "plain message; call ask_user (one short question) or "
+                        "give_response_to_user (statements only)."
+                    ),
+                )
+                continue
+            if leftover and not already_spoke:
+                print(
+                    "[orchestrator] model replied with a message instead of "
+                    "give_response_to_user — speaking it",
+                    flush=True,
+                )
+                barge = _speak(client, leftover)
+                if barge:
+                    if turn is not None:
+                        turn.add("barge_in", barge)
+                    response = _create_response(
+                        client,
+                        llm_tts=llm_tts,
+                        model=MODEL,
+                        tools=orchestrator_tools(),
+                        previous_response_id=response.id,
+                        input=(
+                            f"Speech interrupted. User then said: {barge}. "
+                            "Act on that instruction next."
+                        ),
+                    )
+                    continue
+            elif leftover and already_spoke:
+                print(
+                    "[orchestrator] skipping leftover message "
+                    "(already spoke this turn)",
+                    flush=True,
+                )
+            return response, end_session, []
 
         outputs: list[dict] = []
         deferred_job: AgentJob | None = None
+        close_after_speech = False
 
         for call in function_calls:
             out, stop, job = _handle_tool(
@@ -942,16 +1142,26 @@ def _process_response(
                 publisher=publisher,
                 ask_bridge=ask_bridge,
                 llm_tts=llm_tts,
+                turn=turn,
             )
             end_session = end_session or stop
             if job is not None:
                 deferred_job = job
+                if turn is not None:
+                    turn.add("start_task", job.task)
             elif out is not None:
                 outputs.append(out)
+                if turn is not None:
+                    result_text = str(out.get("output") or "")
+                    turn.add("tool_result", f"{call.name}: {result_text}", max_len=3000)
+                if _give_response_closes_turn(call, out):
+                    close_after_speech = True
 
         if deferred_job is not None:
             result = _supervise_agent(client, deferred_job, publisher, ask_bridge)
             task_history.append({"task": deferred_job.task, "result": result})
+            if turn is not None:
+                turn.add("start_task_result", result or "", max_len=4000)
             history_blob = _format_task_history(task_history)
             outputs.append(
                 {
@@ -964,7 +1174,9 @@ def _process_response(
                         f"{history_blob}\n\n"
                         "Decide next:\n"
                         "- If the user's request is fully satisfied, call "
-                        "give_response_to_user with a short spoken summary.\n"
+                        "give_response_to_user ONCE with a short spoken summary "
+                        "(titles/names, not raw URLs), then stop. Do not recap "
+                        "again in a message.\n"
                         "- If distinct work remains, call start_task with only "
                         "the remaining step.\n"
                         "- Do not redo a task that already succeeded."
@@ -975,9 +1187,17 @@ def _process_response(
                 f"[orchestrator] task #{len(task_history)} finished "
                 f"({(result or '').splitlines()[0] if result else 'empty'})"
             )
+            close_after_speech = False
+
+        if close_after_speech:
+            print(
+                "[orchestrator] already spoke — not asking the model to recap",
+                flush=True,
+            )
+            return response, end_session, outputs
 
         if not outputs:
-            return response, end_session
+            return response, end_session, []
 
         response = _create_response(
             client,
@@ -989,7 +1209,8 @@ def _process_response(
         )
         if end_session:
             _print_messages(response)
-            return response, True
+            _record_llm_step(turn, response)
+            return response, True, []
 
 
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
@@ -1017,9 +1238,6 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             llm_tts = None
 
     start_mcp()
-    skills = format_skill_catalog()
-    memories = format_memory_catalog()
-    mcp_catalog = format_mcp_catalog()
     mcp_rule = ""
     if mcp_openai_tools(for_agent=False):
         mcp_rule = (
@@ -1027,12 +1245,15 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             "Linear, docs, APIs). Prefer this over start_task when it can complete "
             "the request.\n"
         )
-    system = SYSTEM_PROMPT.format(
-        skills=skills,
-        memories=memories,
-        mcp=mcp_catalog,
-        mcp_rule=mcp_rule,
-    )
+
+    def _system_prompt() -> str:
+        return SYSTEM_PROMPT.format(
+            skills=format_skill_catalog(),
+            memories=format_memory_catalog(),
+            mcp=format_mcp_catalog(),
+            mcp_rule=mcp_rule,
+        )
+
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
 
@@ -1051,6 +1272,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
 
     previous_id: str | None = None
     task_history: list[dict[str, str]] = []
+    pending_fn_outputs: list[dict] = []
 
     try:
         while True:
@@ -1112,6 +1334,16 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             history_note = (
                 f"User said: {utterance}\n\n" f"Computer task history so far:\n{_format_task_history(task_history)}"
             )
+            turn = TurnTrace(utterance)
+            system = _system_prompt()
+            if pending_fn_outputs:
+                turn_input: Any = [
+                    *pending_fn_outputs,
+                    {"role": "user", "content": history_note},
+                ]
+                pending_fn_outputs = []
+            else:
+                turn_input = history_note
 
             if previous_id is None:
                 response = _create_response(
@@ -1120,7 +1352,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     model=MODEL,
                     tools=orchestrator_tools(),
                     instructions=system,
-                    input=history_note,
+                    input=turn_input,
                 )
             else:
                 response = _create_response(
@@ -1130,10 +1362,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     tools=orchestrator_tools(),
                     instructions=system,
                     previous_response_id=previous_id,
-                    input=history_note,
+                    input=turn_input,
                 )
 
-            response, end_session = _process_response(
+            response, end_session, pending_fn_outputs = _process_response(
                 client,
                 response,
                 auto=auto,
@@ -1142,8 +1374,13 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 publisher=publisher,
                 ask_bridge=ask_bridge,
                 llm_tts=llm_tts,
+                turn=turn,
             )
             previous_id = response.id
+            maybe_extract_run_memories(
+                user_input=utterance,
+                transcript=turn.as_text(),
+            )
 
             if quit_requested():
                 print("[orchestrator] quit requested from menu bar.")

@@ -55,7 +55,7 @@ from evaluator import (
     resolve_agent_model,
     screenshot_b64_from_computer_output,
 )
-from memory import MEMORY_TOOLS, format_memory_catalog, run_memory_tool
+from memory import MEMORY_TOOLS, format_memory_catalog, maybe_extract_run_memories, run_memory_tool
 from mcp_client import (
     format_mcp_catalog,
     mcp_openai_tools,
@@ -98,7 +98,10 @@ ASK_USER_TOOL = {
         "properties": {
             "question": {
                 "type": "string",
-                "description": "The question to speak to the user.",
+                "description": (
+                    "The question to speak. Sound like a person talking: short, "
+                    "natural sentences. Use page or video titles, not raw URLs."
+                ),
             },
         },
         "required": ["question"],
@@ -234,7 +237,12 @@ MARK_DONE_TOOL = {
         "properties": {
             "summary": {
                 "type": "string",
-                "description": "One or two sentences on what was completed.",
+                "description": (
+                    "One or two spoken sentences on what was completed. Write as "
+                    "if talking to the user: natural wording, names and titles "
+                    "(the Hacker News post, the YouTube video), never raw URLs, "
+                    "markdown, or https links that are painful to hear."
+                ),
             },
         },
         "required": ["summary"],
@@ -750,6 +758,14 @@ Respond with JSON only (no markdown fences):
     log.record("skill_create", f"wrote {name}", {"path": str(path)})
 
 
+def _extract_memories_from_log(_client: OpenAI, log: TaskLog, task: str) -> None:
+    transcript = (
+        f"User input:\n{task}\n\n"
+        f"LLM steps and tool context:\n{log.steps_for_prompt(max_chars=20_000, snippet_chars=2000)}"
+    )
+    maybe_extract_run_memories(user_input=task, transcript=transcript)
+
+
 def run(
     task: str,
     auto: bool,
@@ -890,16 +906,20 @@ def run(
                 "5. Use the computer tool for UI actions on this real desktop.\n"
                 "6. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
-                "7. When you need clarification or information only the human knows, "
+                "7. Anything the user will hear (mark_done summary, ask_user, on-screen "
+                "status) should sound like a person speaking, not a written report. "
+                "Say titles and names (“the Linear checkout issue”, “the AC/DC video”) "
+                "instead of raw URLs, slugs, or https links."
+                "8. When you need clarification or information only the human knows, "
                 "call ask_user instead of guessing — unless read_memory already has it. "
                 "save_memory when they state a durable fact. "
                 "If they want the current display remembered, call save_screen_memory "
                 "(screenshot + description) — do not use the computer tool for that.\n"
-                "8. Before each turn, you may receive new user messages that arrived "
+                "9. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
-                "9. You may periodically receive evaluator coaching — treat it as "
+                "10. You may periodically receive evaluator coaching — treat it as "
                 "advisory guidance and adapt.\n"
-                "10. When the request is complete and no other action is required, "
+                "11. When the request is complete and no other action is required, "
                 "call mark_done (do not keep using the computer tool)."
             ),
         )
@@ -936,6 +956,7 @@ def run(
                 log.finish("completed")
                 maybe_create_skill(client, log, voice=voice)
                 maybe_save_trace(log, task)
+                _extract_memories_from_log(client, log, task)
                 summary = "\n".join(last_messages).strip()
                 if summary:
                     return f"completed\nResult:\n{summary}"
@@ -1000,6 +1021,7 @@ def run(
 
         print(f"\nStopped: hit max-steps ({max_steps}) without finishing.")
         log.finish("max_steps", f"Hit max-steps ({max_steps}).")
+        _extract_memories_from_log(client, log, task)
         summary = "\n".join(last_messages).strip()
         if summary:
             return f"max_steps\nPartial result:\n{summary}"
@@ -1011,6 +1033,7 @@ def run(
         log.finish("completed", e.summary)
         maybe_create_skill(client, log, voice=voice)
         maybe_save_trace(log, task)
+        _extract_memories_from_log(client, log, task)
         return f"completed\nResult:\n{e.summary}"
     except KeyboardInterrupt:
         log.finish("interrupted", "KeyboardInterrupt")

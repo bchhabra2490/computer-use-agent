@@ -45,8 +45,14 @@ reveals something you will need again:
 - “Remember that…”, “save this”, “my HN username is…”
 - A preference you had to ask for (OLED is I2C, default volume, etc.)
 
+The runtime also extracts memories automatically after each voice turn and
+computer-use run (user request + model replies + tool context). You still
+save immediately when they say remember/save this — do not wait for the
+post-run pass.
+
 Use **append** for new facts; **replace** only when they correct or rewrite
-the whole note. Pick a short slug (`profile`, `hn`, `gmail`).
+the whole note. Pick a short slug (`profile`, `hn`, `gmail`, `github`,
+`youtube`).
 
 Do **not** store passwords, API keys, OTPs, or payment details unless the
 user explicitly asks you to.

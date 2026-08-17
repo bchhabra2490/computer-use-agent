@@ -284,8 +284,14 @@ Durable notes live under `memory/personal/` (who the user is),
 `memory/apps/` (per-application usernames, quirks, usual workflows), and
 `memory/screens/` (screenshot + LLM description). The orchestrator and
 computer agent use `read_memory` / `save_memory` / `save_screen_memory`
-(skill `read-memory`). Say “remember that…” to store a fact, or “save the
-screen as memory” to snapshot the display. Those folders are gitignored.
+(skill `read-memory`). After every voice turn and computer-use run, the
+full user request plus each LLM step (replies, tool calls, results) is
+reviewed and durable facts are appended automatically — GitHub repos,
+songs played, usernames, preferences, and similar. Extraction runs in a
+background thread so it does not block listening or the computer agent. Say “remember that…”
+to store a fact yourself, or “save the screen as memory” to snapshot the
+display. Set `MEMORY_EXTRACT=0` to disable auto-extract. Those folders
+are gitignored.
 
 ### MCP servers
 
@@ -347,7 +353,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks.
 - `traces/` + `traces.py` — saved easy-task action sequences (replay without vision).
-- `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`).
+- `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`); auto-extract after each run.
 - `mcp.json` + `mcp_client.py` + `mcp_auth.py` — MCP servers (`cua mcp login linear`).
 - `task_log.py` — per-run logs under `logs/`.
 - `stt.py` / `sarvam_stt.py` / `tts.py` / `sarvam_tts.py` — speech in/out

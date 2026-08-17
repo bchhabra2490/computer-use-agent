@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -99,6 +102,156 @@ class MemoryStoreTests(unittest.TestCase):
                 "read_memory", {"kind": "personal", "name": "profile"}
             )
             self.assertIn("Hi", body)
+
+
+class TurnTraceTests(unittest.TestCase):
+    def test_as_text_includes_user_and_steps(self) -> None:
+        turn = mem.TurnTrace("How many stars on my computer-use agent?")
+        turn.add("llm_tool_call", "mcp_call search_repositories")
+        turn.add("tool_result", "bchhabra2490/computer-use-agent stars=0")
+        turn.add("spoken", "It currently has 0 stars.")
+        blob = turn.as_text()
+        self.assertIn("How many stars", blob)
+        self.assertIn("llm_tool_call", blob)
+        self.assertIn("stars=0", blob)
+        self.assertIn("0 stars", blob)
+
+    def test_truncates_long_step(self) -> None:
+        turn = mem.TurnTrace("x")
+        turn.add("tool_result", "n" * 50, max_len=10)
+        self.assertIn("truncated", turn.as_text())
+
+
+class ExtractMemoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_parse_items_and_skip_secrets(self) -> None:
+        payload = {
+            "items": [
+                {
+                    "kind": "app",
+                    "name": "github",
+                    "text": "- Owns bchhabra2490/computer-use-agent (0 stars)",
+                },
+                {
+                    "kind": "app",
+                    "name": "github",
+                    "text": "token: ghp_abcdefghijklmnopqrstuvwxyz",
+                },
+                {"kind": "screen", "name": "x", "text": "nope"},
+            ]
+        }
+        items = mem.parse_extracted_memory_items(payload)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "github")
+
+    def test_apply_writes_app_memory(self) -> None:
+        written = mem.apply_extracted_memory_items(
+            [
+                {
+                    "kind": "app",
+                    "name": "youtube",
+                    "text": "- Played Highway to Hell by AC/DC",
+                }
+            ],
+            memory_dir=self.root,
+        )
+        self.assertEqual(written, ["apps/youtube.md"])
+        body = mem.read_memory("app", "youtube", memory_dir=self.root)
+        self.assertIn("Highway to Hell", body)
+
+    def test_extract_from_run_transcript(self) -> None:
+        class _Resp:
+            output_text = json.dumps(
+                {
+                    "items": [
+                        {
+                            "kind": "app",
+                            "name": "github",
+                            "text": "- Repo bchhabra2490/computer-use-agent has 0 stars",
+                            "reason": "user asked about their repo",
+                        }
+                    ]
+                }
+            )
+            output = []
+
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+                self.prompts: list[str] = []
+
+            def create(self, **kwargs):
+                self.prompts.append(str(kwargs.get("input") or ""))
+                return _Resp()
+
+        client = _Client()
+        transcript = (
+            "User input:\nFind stars on the computer usage agent I own\n\n"
+            "Step 1 [llm_tool_call]:\nmcp_call get_me / search_repositories\n\n"
+            "Step 2 [tool_result]:\nbchhabra2490/computer-use-agent stargazers_count=0\n\n"
+            "Step 3 [spoken]:\nYour computer-use agent repo has 0 stars."
+        )
+        written = mem.maybe_extract_run_memories(
+            client,
+            user_input="Find stars on the computer usage agent I own",
+            transcript=transcript,
+            memory_dir=self.root,
+            background=False,
+        )
+        self.assertEqual(written, ["apps/github.md"])
+        self.assertTrue(any("stargazers_count=0" in p for p in client.prompts))
+        body = mem.read_memory("app", "github", memory_dir=self.root)
+        self.assertIn("computer-use-agent", body)
+
+    def test_extract_disabled(self) -> None:
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+                self.called = False
+
+            def create(self, **_kwargs):
+                self.called = True
+                raise AssertionError("should not call the model")
+
+        with patch.dict("os.environ", {"MEMORY_EXTRACT": "0"}):
+            written = mem.maybe_extract_run_memories(
+                _Client(),
+                user_input="play a song",
+                transcript="played Thunderstruck",
+                memory_dir=self.root,
+            )
+        self.assertEqual(written, [])
+
+    def test_background_does_not_block(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_impl(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return ["apps/youtube.md"]
+
+        with (
+            patch.object(mem, "_extract_run_memories_impl", side_effect=slow_impl),
+            patch.object(mem, "_new_extract_client", return_value=object()),
+        ):
+            t0 = time.monotonic()
+            written = mem.maybe_extract_run_memories(
+                user_input="play a song",
+                transcript="played Thunderstruck",
+                memory_dir=self.root,
+            )
+            elapsed = time.monotonic() - t0
+            self.assertEqual(written, [])
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(started.wait(timeout=1.0))
+            release.set()
 
 
 if __name__ == "__main__":

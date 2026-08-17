@@ -37,14 +37,13 @@ import uuid
 
 from openai import OpenAI
 
-from actions import DesktopController, format_display_context, list_monitors
+from actions import DesktopController, list_monitors
 from accessibility import read_ui_text
 from app_status import (
     consume_mark_done,
     is_mark_done_utterance,
     register_agent_process,
     remove_agent,
-    set_and_log,
     unregister_agent_process,
     upsert_agent,
 )
@@ -55,14 +54,10 @@ from evaluator import (
     resolve_agent_model,
     screenshot_b64_from_computer_output,
 )
-from memory import MEMORY_TOOLS, format_memory_catalog, maybe_extract_run_memories, run_memory_tool
-from mcp_client import (
-    format_mcp_catalog,
-    mcp_openai_tools,
-    run_mcp_tool,
-    start_mcp,
-    stop_mcp,
-)
+from context import assemble_context
+from memory import maybe_extract_run_memories
+from mcp_client import start_mcp, stop_mcp
+from session import Session, bind_session, get_session
 from skills import (
     discover_skills,
     format_skill_catalog,
@@ -75,201 +70,14 @@ from status_tray import ensure_tray_running
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
+from tools_registry import SHARED_TOOL_NAMES, agent_tools, run_shared_tool
 from traces import maybe_save_trace, try_replay
 from tts import speak, speak_later
-from whoami import WHO_AM_I_TOOL, run_whoami_tool
-from displays import remember_monitor_layout
 
 # Manual override only — leave unset to let the difficulty router choose.
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
 # Used when routing is disabled / skill review fallback.
 MODEL = MODEL_OVERRIDE or os.environ.get("AGENT_MODEL_HARD", "gpt-5.6")
-
-ASK_USER_TOOL = {
-    "type": "function",
-    "name": "ask_user",
-    "description": (
-        "Ask the human operator a clarifying question aloud (text-to-speech) and "
-        "receive their spoken answer. When running under the voice orchestrator, "
-        "the question is spoken and answered on the orchestrator main thread "
-        "(do not compete for the mic). Use this when you need a preference, "
-        "credential the user must provide, a choice between options, confirmation "
-        "before a risky step, or any information not visible on screen."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": (
-                    "The question to speak. Sound like a person talking: short, "
-                    "natural sentences. Use page or video titles, not raw URLs."
-                ),
-            },
-        },
-        "required": ["question"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-LIST_SKILLS_TOOL = {
-    "type": "function",
-    "name": "list_skills",
-    "description": (
-        "List available project skills (name + description). Call this if you "
-        "need to refresh the catalog; prefer matching the task to a skill, then "
-        "call read_skill before acting."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "unused": {
-                "type": "boolean",
-                "description": "Unused. Always pass false.",
-            },
-        },
-        "required": ["unused"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-READ_SKILL_TOOL = {
-    "type": "function",
-    "name": "read_skill",
-    "description": (
-        "Load the full instructions for a skill by name (from skills/<name>/SKILL.md). "
-        "Always read a relevant skill before performing that kind of task. Optionally "
-        "read a companion file inside the skill folder."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Skill name (e.g. open-app, web-search).",
-            },
-            "file": {
-                "type": ["string", "null"],
-                "description": (
-                    "Optional relative path inside the skill folder to read instead "
-                    "of SKILL.md (e.g. reference.md). Pass null to load the main skill."
-                ),
-            },
-        },
-        "required": ["name", "file"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-READ_UI_TEXT_TOOL = {
-    "type": "function",
-    "name": "read_ui_text",
-    "description": (
-        "Read visible UI text via the macOS Accessibility API (no screenshot). "
-        "Prefer this over screenshots when you need labels, field values, menu "
-        "items, or window titles. Returns a compact AX tree with optional click "
-        "centers in screen points. Many Electron/WebGL/CAD apps expose little AX "
-        "data — if the result says no nodes were found, use the computer tool "
-        "screenshot instead."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "app": {
-                "type": ["string", "null"],
-                "description": ("App name or bundle id to inspect. Pass null for the " "frontmost application."),
-            },
-        },
-        "required": ["app"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-RUN_TERMINAL_TOOL = {
-    "type": "function",
-    "name": "run_terminal",
-    "description": (
-        "Run a shell command on this Mac and return stdout, stderr, and exit code. "
-        "Prefer this for file/git/CLI work, checking paths, installing packages, or "
-        "anything faster than driving the Terminal GUI. Do not use for interactive "
-        "programs that need a TTY (vim, ssh password prompts, etc.). Avoid "
-        "destructive commands (rm -rf, diskutil erase, etc.) unless the user "
-        "explicitly asked."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "Shell command to execute.",
-            },
-            "cwd": {
-                "type": ["string", "null"],
-                "description": (
-                    "Working directory for the command. Pass null to use the " "agent process current directory."
-                ),
-            },
-            "timeout_seconds": {
-                "type": ["number", "null"],
-                "description": (
-                    "Seconds before the process is killed. Pass null for the " "default (60, or TERMINAL_TIMEOUT)."
-                ),
-            },
-        },
-        "required": ["command", "cwd", "timeout_seconds"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-MARK_DONE_TOOL = {
-    "type": "function",
-    "name": "mark_done",
-    "description": (
-        "End this computer-use run. Call when the user's request is fully "
-        "satisfied and no other UI or tool action is required — do not keep "
-        "clicking or taking screenshots. Also call if the user says to mark "
-        "the task done."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": (
-                    "One or two spoken sentences on what was completed. Write as "
-                    "if talking to the user: natural wording, names and titles "
-                    "(the Hacker News post, the YouTube video), never raw URLs, "
-                    "markdown, or https links that are painful to hear."
-                ),
-            },
-        },
-        "required": ["summary"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-BASE_TOOLS = [
-    {"type": "computer"},
-    ASK_USER_TOOL,
-    LIST_SKILLS_TOOL,
-    READ_SKILL_TOOL,
-    READ_UI_TEXT_TOOL,
-    RUN_TERMINAL_TOOL,
-    MARK_DONE_TOOL,
-    *MEMORY_TOOLS,
-    WHO_AM_I_TOOL,
-]
-
-
-def agent_tools() -> list:
-    return [*BASE_TOOLS, *mcp_openai_tools(for_agent=True)]
-
 
 class TaskMarkedDone(Exception):
     """Raised when the model or user ends the computer-use run."""
@@ -362,19 +170,6 @@ def _handle_ask_user(client: OpenAI, call, log: TaskLog, ask_user_bridge=None) -
         "type": "function_call_output",
         "call_id": call.call_id,
         "output": answer,
-    }
-
-
-def _handle_memory(call, log: TaskLog, client: OpenAI | None = None) -> dict:
-    args = json.loads(call.arguments or "{}")
-    output = run_memory_tool(call.name, args, client=client)
-    preview = output.replace("\n", " ")[:160]
-    print(f"[memory] {call.name} → {preview}")
-    log.record(call.name, preview, {"args": args, "output": output[:2000]})
-    return {
-        "type": "function_call_output",
-        "call_id": call.call_id,
-        "output": output,
     }
 
 
@@ -574,29 +369,12 @@ def _handle_function_call(
         return _handle_read_ui_text(call, log)
     if call.name == "run_terminal":
         return _handle_run_terminal(call, log, auto=auto, client=client, voice=voice)
-    if call.name in {
-        "list_memories",
-        "read_memory",
-        "save_memory",
-        "save_screen_memory",
-    }:
-        return _handle_memory(call, log, client=client)
-    if call.name == "mcp_call":
+    if call.name in SHARED_TOOL_NAMES:
         args = json.loads(call.arguments or "{}")
-        output = run_mcp_tool(call.name, args)
+        output = run_shared_tool(call.name, args, client=client)
         preview = output.replace("\n", " ")[:160]
-        print(f"[mcp] {preview}")
-        log.record("mcp_call", preview, {"args": args, "output": output[:2000]})
-        return {
-            "type": "function_call_output",
-            "call_id": call.call_id,
-            "output": output,
-        }
-    if call.name == "who_am_i":
-        output = run_whoami_tool(call.name, json.loads(call.arguments or "{}"))
-        preview = output.replace("\n", " ")[:160]
-        print(f"[who_am_i] {preview}")
-        log.record("who_am_i", preview, {"chars": len(output)})
+        print(f"[{call.name}] {preview}")
+        log.record(call.name, preview, {"args": args, "output": output[:2000]})
         return {
             "type": "function_call_output",
             "call_id": call.call_id,
@@ -801,9 +579,12 @@ def run(
     client = OpenAI()
     ensure_tray_running()
     standalone = ask_user_bridge is None and message_inbox is None
+    own_session = False
     if standalone:
         register_agent_process()
         start_mcp()
+        bind_session(Session())
+        own_session = True
 
     desktop = DesktopController()
     log = TaskLog(task)
@@ -815,7 +596,7 @@ def run(
         status="running",
         log_dir=str(log.dir),
     )
-    set_and_log("agent", f"Starting: {task[:120]}", task=task, log_dir=str(log.dir))
+    get_session().enter_and_log("agent", f"Starting: {task[:120]}", task=task, log_dir=str(log.dir))
 
     monitors = list_monitors()
     primary = next((m for m in monitors if m["main"]), monitors[0])
@@ -825,13 +606,16 @@ def run(
         shot_w = desktop.screenshot_max_width
         shot_h = round(shot_h * ratio)
 
-    display_ctx = format_display_context(monitors, screenshot_size=(shot_w, shot_h))
-    occupancy = remember_monitor_layout(monitors=monitors)
-    display_ctx = f"{display_ctx}\n\n{occupancy}"
+    bundle = assemble_context(
+        monitors=monitors,
+        screenshot_size=(shot_w, shot_h),
+        include_geometry=True,
+    )
+    display_ctx = bundle.desktop_block()
     skills = discover_skills()
-    skill_catalog = format_skill_catalog(skills)
-    memory_catalog = format_memory_catalog()
-    mcp_catalog = format_mcp_catalog()
+    skill_catalog = bundle.skills
+    memory_catalog = bundle.memories
+    mcp_catalog = bundle.mcp
 
     print(f"\nTask: {task}")
     print(display_ctx)
@@ -1067,6 +851,8 @@ def run(
         remove_agent(agent_id)
         if standalone:
             unregister_agent_process()
+            if own_session:
+                bind_session(None)
             try:
                 stop_mcp()
             except Exception:

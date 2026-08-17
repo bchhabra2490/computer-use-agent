@@ -140,18 +140,15 @@ class OccupancyFormatTests(unittest.TestCase):
         self.assertIn("(no regular windows)", text)
         self.assertNotIn("primary display only", text)
 
-    def test_remember_writes_apps_displays(self) -> None:
+    def test_remember_does_not_write_durable_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             text = disp.remember_monitor_layout(
                 memory_dir=root,
                 occupancy_text="Open windows by display (2 attached):\n  [0] Built-in",
             )
-            saved = mem.read_memory("app", "displays", memory_dir=root)
-            self.assertIn("Open windows by display", saved)
-            self.assertIn(text, saved)
-            catalog = mem.format_memory_catalog(memory_dir=root)
-            self.assertNotIn("displays", catalog)
+            self.assertIn("Open windows by display", text)
+            self.assertFalse((root / "apps" / "displays.md").exists())
 
 
 class LiveLayoutMemorySkipTests(unittest.TestCase):

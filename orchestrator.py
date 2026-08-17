@@ -56,8 +56,6 @@ from app_status import (
     remove_agent,
     request_mark_done,
     request_quit,
-    set_and_log,
-    set_state,
     unregister_orchestrator,
     upsert_agent,
 )
@@ -67,36 +65,25 @@ from bus import (
     AskUserBridge,
     strip_wake_prefix,
 )
+from audio import AudioSession, bind_audio, get_audio
+from context import assemble_context
 from memory import (
-    MEMORY_TOOLS,
     TurnTrace,
     capture_and_save_screen,
-    format_memory_catalog,
     is_save_screen_utterance,
     maybe_extract_run_memories,
-    run_memory_tool,
 )
 from mcp_client import (
-    format_mcp_catalog,
     mcp_openai_tools,
-    run_mcp_tool,
     start_mcp,
     stop_mcp,
 )
-from skills import format_skill_catalog
+from session import Session, bind_session, get_session
 from status_tray import ensure_tray_running
-from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance, listen_once
-from tts import speak, speak_later
-from whoami import WHO_AM_I_TOOL, run_whoami_tool
-from displays import remember_monitor_layout
+from stt import POST_TTS_COOLDOWN, ask_user, listen_once
+from tools_registry import orchestrator_tools, run_shared_tool
 from wake import (
-    WAKE_PHRASE,
-    ensure_persistent_wake,
     format_wake_phrases,
-    get_last_wake,
-    get_wake_remainder,
-    stop_persistent_wake,
-    wait_for_wake,
 )
 
 try:
@@ -113,105 +100,6 @@ TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "no",
     "off",
 }
-
-START_TASK_TOOL = {
-    "type": "function",
-    "name": "start_task",
-    "description": (
-        "Start the computer-use agent to control the real desktop (mouse, "
-        "keyboard, screenshots) for a concrete UI task. Use when the user wants "
-        "something done on screen that you cannot answer with speech alone. "
-        "The agent runs in the background; say the wake word then an instruction "
-        "to send mid-task updates."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task": {
-                "type": "string",
-                "description": (
-                    "Clear natural-language instructions for the computer agent. "
-                    "If continuing after a prior task, state only the remaining work "
-                    "and do not redo completed steps."
-                ),
-            },
-        },
-        "required": ["task"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-ASK_USER_TOOL = {
-    "type": "function",
-    "name": "ask_user",
-    "description": (
-        "Ask the user a clarifying question aloud and capture their spoken answer "
-        "immediately (no wake word). Required whenever you need a reply — never put "
-        "questions in a plain assistant message or in give_response_to_user. Ask one "
-        "short spoken question, not a numbered list."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": (
-                    "One short question to speak. Natural wording; titles " "instead of raw URLs. Not a numbered list."
-                ),
-            },
-        },
-        "required": ["question"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-GIVE_RESPONSE_TOOL = {
-    "type": "function",
-    "name": "give_response_to_user",
-    "description": (
-        "Speak the answer once, in one or two short sentences, then stop. "
-        "Do not ask questions here (use ask_user). Do not say you will wait, "
-        "that you are ready, or recap the same result a second time. "
-        "Set end_session=true ONLY when the user says goodbye / quit."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "message": {
-                "type": "string",
-                "description": (
-                    "What to say aloud. Speak like a person: short natural "
-                    "sentences. Use titles and names, not raw URLs or https "
-                    "links (painful to hear). No markdown."
-                ),
-            },
-            "end_session": {
-                "type": "boolean",
-                "description": (
-                    "True only for goodbye/quit. False after answering a task so "
-                    "listening continues for the next request."
-                ),
-            },
-        },
-        "required": ["message", "end_session"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-
-def orchestrator_tools() -> list:
-    return [
-        WHO_AM_I_TOOL,
-        START_TASK_TOOL,
-        ASK_USER_TOOL,
-        GIVE_RESPONSE_TOOL,
-        *MEMORY_TOOLS,
-        *mcp_openai_tools(for_agent=False),
-    ]
-
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
@@ -393,6 +281,9 @@ def _give_response_closes_turn(call, out: dict | None) -> bool:
 
 def _listen_for_answer(client: OpenAI) -> str:
     """Capture a spoken reply without requiring the wake word."""
+    audio = get_audio()
+    if audio is not None:
+        return audio.listen("Listening for your answer…")
     return listen_once(
         client,
         mode="freeform",
@@ -598,6 +489,11 @@ def _listen_after_barge(
     prompt: str = "Listening…",
 ) -> str | None:
     """Capture a command after TTS barge-in (wake or keyboard; no second wake)."""
+    audio = get_audio()
+    if audio is not None:
+        return audio.listen_after_barge(prompt=prompt)
+    from stt import listen_for_utterance
+
     time.sleep(0.15)
     try:
         utterance = listen_for_utterance(client, prompt=prompt)
@@ -621,7 +517,7 @@ def _listen_after_barge(
 
 def _save_screen_now(client: OpenAI, hint: str) -> str:
     """Capture + describe the display immediately (don't wait for start_task)."""
-    set_and_log("thinking", "Saving screen as memory")
+    get_session().enter_and_log("thinking", "Saving screen as memory")
     try:
         result = capture_and_save_screen(client, hint=hint)
         print(f"[orchestrator] {result}", flush=True)
@@ -640,10 +536,15 @@ def _speak(client: OpenAI, text: str) -> str | None:
     """
     if not text:
         return None
-    set_state("speaking", text[:100])
     status_log(f"[tts] {text[:160]}")
+    audio = get_audio()
+    if audio is not None:
+        return audio.speak(text)
+    from tts import speak
+
+    get_session().enter("speaking", text[:100])
     if speak(client, text):
-        set_state("listening", "barge-in")
+        get_session().enter("listening", "barge-in")
         return _listen_after_barge(client)
     return None
 
@@ -652,8 +553,14 @@ def _speak_later(client: OpenAI, text: str) -> None:
     """Start TTS without blocking the agent / tool loop."""
     if not text:
         return
-    set_state("speaking", text[:100])
     status_log(f"[tts] {text[:160]}")
+    audio = get_audio()
+    if audio is not None:
+        audio.speak_later(text)
+        return
+    from tts import speak_later
+
+    get_session().enter("speaking", text[:100])
     speak_later(client, text)
 
 
@@ -703,9 +610,13 @@ def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     qid = req["id"]
     question = req["question"]
     print(f"\n[orchestrator] agent ask_user: {question}")
-    set_and_log("ask", f"Agent asks: {question[:160]}")
+    audio = get_audio()
     try:
-        answer = ask_user(client, question)
+        if audio is not None:
+            answer = audio.ask(question)
+        else:
+            get_session().enter_and_log("ask", f"Agent asks: {question[:160]}")
+            answer = ask_user(client, question)
     except Exception as e:
         answer = f"Error capturing answer: {e}"
         print(f"[orchestrator] ask_user failed: {e}")
@@ -722,7 +633,18 @@ def _listen_command(
     listen_prompt: str | None = None,
 ) -> str | None:
     """Wake word → one cloud STT utterance. Returns None if stopped or empty."""
-    set_state("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
+    audio = get_audio()
+    if audio is not None:
+        return audio.listen_command(
+            should_stop=should_stop,
+            wake_prompt=wake_prompt,
+            listen_prompt=listen_prompt,
+            quit_check=quit_requested,
+        )
+    from stt import listen_for_utterance
+    from wake import get_last_wake, get_wake_remainder, wait_for_wake
+
+    get_session().enter("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
 
     def _stop() -> bool:
         if quit_requested():
@@ -740,7 +662,7 @@ def _listen_command(
         return None
     hit = get_last_wake()
     heard = hit.label if hit else "Wake word"
-    set_and_log("listening", f"{heard} heard — listening")
+    get_session().enter_and_log("listening", f"{heard} heard — listening")
     remainder = get_wake_remainder()
     if remainder:
         return strip_wake_prefix(remainder).strip() or remainder
@@ -754,7 +676,6 @@ def _listen_command(
         return None
     command = strip_wake_prefix(utterance).strip()
     if not command:
-        # STT may have only captured the wake phrase itself.
         print("[orchestrator] wake heard but no command — listening again…")
         try:
             utterance = listen_for_utterance(
@@ -782,7 +703,7 @@ def _supervise_agent(
         f"[orchestrator] agent running — say {format_wake_phrases()} then an update; "
         "agent questions are spoken here automatically."
     )
-    set_and_log("agent", f"Computer agent running: {job.task[:120]}", task=job.task)
+    get_session().enter_and_log("agent", f"Computer agent running: {job.task[:120]}", task=job.task)
     notified_done = False
 
     def _stop_for_done() -> bool:
@@ -898,7 +819,7 @@ def _supervise_agent(
 
     if job.thread is not None:
         job.thread.join(timeout=5.0)
-    set_and_log("ready", "Computer agent finished")
+    get_session().enter_and_log("ready", "Computer agent finished")
     return job.result or "failed\nError: no result from agent"
 
 
@@ -947,14 +868,14 @@ def _handle_tool(
                 "[orchestrator] give_response already streaming via low-latency TTS " "(not waiting)",
                 flush=True,
             )
-            set_state("speaking", message[:100])
+            get_session().enter("speaking", message[:100])
             if _looks_like_question(message) and not end_session:
                 interrupted = bool(llm_tts.wait_call(call.call_id))
                 llm_tts.acknowledge_call(call.call_id)
                 if interrupted:
                     handled_barge = True
                     end_session = False
-                    set_state("listening", "barge-in")
+                    get_session().enter("listening", "barge-in")
                     barge = _listen_after_barge(client)
                     if barge:
                         output = (
@@ -1020,7 +941,7 @@ def _handle_tool(
             output = "Error: empty task"
         else:
             print(f"\n[orchestrator] start_task: {task}")
-            set_and_log("agent", f"Starting task: {task[:120]}", task=task)
+            get_session().enter_and_log("agent", f"Starting task: {task[:120]}", task=task)
             job = AgentJob(task=task, call_id=call.call_id)
             _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
             _speak_later(client, "Starting that now.")
@@ -1032,17 +953,11 @@ def _handle_tool(
         "read_memory",
         "save_memory",
         "save_screen_memory",
+        "who_am_i",
+        "mcp_call",
     }:
-        output = run_memory_tool(call.name, args, client=client)
+        output = run_shared_tool(call.name, args, client=client)
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
-
-    elif call.name == "who_am_i":
-        output = run_whoami_tool(call.name, args)
-        print(f"[orchestrator] who_am_i: {output[:120].replace(chr(10), ' ')}")
-
-    elif call.name == "mcp_call":
-        output = run_mcp_tool(call.name, args)
-        print(f"[orchestrator] mcp_call: {output[:160].replace(chr(10), ' ')}")
 
     else:
         output = f"Unsupported tool: {call.name}"
@@ -1211,6 +1126,8 @@ def _process_response(
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     ensure_tray_running()
     register_orchestrator()
+    sess = Session()
+    bind_session(sess)
 
     def _on_term(_signum=None, _frame=None) -> None:
         request_quit()
@@ -1223,6 +1140,8 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pass
 
     client = OpenAI()
+    audio = AudioSession(client, session=sess)
+    bind_audio(audio)
     llm_tts = None
     if TTS_STREAM and LowLatencyTTS is not None:
         try:
@@ -1242,44 +1161,44 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         )
 
     def _system_prompt() -> str:
-        occupancy = remember_monitor_layout()
+        bundle = assemble_context()
         # Occupancy text can contain `{` from window titles; inject after format.
         return (
             SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
             .format(
-                skills=format_skill_catalog(),
-                memories=format_memory_catalog(),
-                mcp=format_mcp_catalog(),
+                skills=bundle.skills,
+                memories=bundle.memories,
+                mcp=bundle.mcp,
                 mcp_rule=mcp_rule,
             )
-            .replace("__DISPLAYS__", occupancy)
+            .replace("__DISPLAYS__", bundle.displays)
         )
 
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
 
-    set_and_log("ready", "Orchestrator starting")
-    print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
-    # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
-    if ensure_persistent_wake() is not None:
-        print("[orchestrator] persistent wake barge-in armed", flush=True)
-    # Do not speak the literal wake phrase — speaker echo false-triggers openWakeWord.
-    pending = _speak(
-        client,
-        "Ready. Say the wake word, then tell me what you need.",
-    )
-    if pending is None:
-        time.sleep(POST_TTS_COOLDOWN)
-
-    previous_id: str | None = None
-    task_history: list[dict[str, str]] = []
-    pending_fn_outputs: list[dict] = []
-
     try:
+        sess.enter_and_log("ready", "Orchestrator starting")
+        print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
+        # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
+        if audio.arm_wake() is not None:
+            print("[orchestrator] persistent wake barge-in armed", flush=True)
+        # Do not speak the literal wake phrase — speaker echo false-triggers openWakeWord.
+        pending = _speak(
+            client,
+            "Ready. Say the wake word, then tell me what you need.",
+        )
+        if pending is None:
+            audio.cooldown()
+
+        previous_id: str | None = None
+        task_history: list[dict[str, str]] = []
+        pending_fn_outputs: list[dict] = []
+
         while True:
             if quit_requested():
                 print("[orchestrator] quit requested from menu bar.")
-                set_and_log("done", "Quit from menu bar")
+                sess.enter_and_log("done", "Quit from menu bar")
                 return
 
             if pending is not None:
@@ -1294,7 +1213,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 )
                 if quit_requested():
                     print("[orchestrator] quit requested from menu bar.")
-                    set_and_log("done", "Quit from menu bar")
+                    sess.enter_and_log("done", "Quit from menu bar")
                     return
                 if utterance is None:
                     continue
@@ -1328,10 +1247,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if barged:
                     pending = barged
                     continue
-                set_and_log("done", "Session ended")
+                sess.enter_and_log("done", "Session ended")
                 return
 
-            set_state("thinking", utterance[:100])
+            sess.enter("thinking", utterance[:100])
             history_note = (
                 f"User said: {utterance}\n\n" f"Computer task history so far:\n{_format_task_history(task_history)}"
             )
@@ -1385,17 +1304,17 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
 
             if quit_requested():
                 print("[orchestrator] quit requested from menu bar.")
-                set_and_log("done", "Quit from menu bar")
+                sess.enter_and_log("done", "Quit from menu bar")
                 return
 
             if end_session:
                 print("[orchestrator] session ended.")
-                set_and_log("done", "Session ended")
+                sess.enter_and_log("done", "Session ended")
                 return
 
             print("[orchestrator] ready for next task.")
-            set_state("ready", "Waiting for next request")
-            time.sleep(POST_TTS_COOLDOWN)
+            sess.enter("ready", "Waiting for next request")
+            audio.cooldown()
     finally:
         if llm_tts is not None:
             try:
@@ -1403,7 +1322,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             except Exception as e:
                 print(f"[orchestrator] TTS shutdown error: {e}", flush=True)
         try:
-            stop_persistent_wake()
+            audio.stop()
         except Exception:
             pass
         try:
@@ -1412,7 +1331,9 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()
-        set_state("idle", "Orchestrator stopped")
+        sess.enter("idle", "Orchestrator stopped")
+        bind_audio(None)
+        bind_session(None)
 
 
 def main(argv: list[str] | None = None) -> None:

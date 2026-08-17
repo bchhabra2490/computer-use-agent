@@ -1,8 +1,8 @@
 """Live per-monitor window occupancy for agent context.
 
 On macOS, Quartz window bounds are matched to ``list_monitors()`` geometry so
-the computer-use agent knows what is already open on each display. The same
-snapshot is stored under ``memory/apps/displays.md``.
+the computer-use agent knows what is already open on each display. The snapshot
+is ephemeral (prompt + ``.runtime/desktop.txt``), not durable memory.
 """
 
 from __future__ import annotations
@@ -272,13 +272,8 @@ def remember_monitor_layout(
     occupancy_text: str | None = None,
     monitors: list[dict] | None = None,
 ) -> str:
-    """Snapshot occupancy, persist to memory/apps/displays.md, return the text."""
-    text = occupancy_text if occupancy_text is not None else format_monitor_occupancy(monitors=monitors)
-    try:
-        from memory import write_condensed_memory
-
-        body = "# app / displays\n\n" "Last seen desktop layout (updated automatically):\n\n" f"{text}\n"
-        write_condensed_memory("app", "displays", body, memory_dir=memory_dir)
-    except Exception as e:
-        print(f"[displays] could not save layout memory: {e}", flush=True)
-    return text
+    """Return live occupancy. Does not write durable memory (see context.py)."""
+    del memory_dir  # previously wrote memory/apps/displays.md
+    if occupancy_text is not None:
+        return occupancy_text
+    return format_monitor_occupancy(monitors=monitors)

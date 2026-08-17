@@ -294,6 +294,10 @@ songs played, usernames, preferences, and similar. Extraction runs in a
 background thread so it does not block listening or the computer agent.
 A second background pass then condenses those files (drops repeated
 bullets, keeps the latest preference) so later prompts stay short.
+With more than one display attached, each voice turn and computer-use
+run snapshots which apps/windows are on which monitor and injects that
+into the model prompt (also stored as `memory/apps/displays.md`).
+Screenshots and click coordinates stay on the primary display.
 Say “remember that…” to store a fact yourself, or “save the screen as
 memory” to snapshot the display. Set `MEMORY_EXTRACT=0` or
 `MEMORY_CONDENSE=0` to disable. Those folders are gitignored.

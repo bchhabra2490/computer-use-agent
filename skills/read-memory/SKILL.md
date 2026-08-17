@@ -20,7 +20,9 @@ do not drive Finder or `cat` unless those tools fail.
   `memory/personal/<name>.md` (usually `profile`).
 - **app** — how to use a specific application: usernames, typical workflows,
   UI quirks, last-used settings. Files: `memory/apps/<app>.md` (e.g. `hn`,
-  `chrome`, `drawio`).
+  `chrome`, `drawio`). `memory/apps/displays.md` is written automatically
+  with the last seen per-monitor window list — do not overwrite it with
+  `save_memory`.
 - **screen** — a desktop snapshot: PNG + LLM description. Files:
   `memory/screens/<slug>.md` and `memory/screens/<slug>.png`.
 

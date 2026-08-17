@@ -112,6 +112,14 @@ def ensure_memory_dirs(memory_dir: Path | None = None) -> Path:
     return root
 
 
+def _is_live_layout_memory(kind: str, name: str) -> bool:
+    """True for the auto-written per-monitor occupancy note (not user facts)."""
+    try:
+        return _canonical_kind(kind) == "app" and sanitize_memory_name(name) == "displays"
+    except ValueError:
+        return False
+
+
 def _preview(text: str) -> str:
     for line in (text or "").splitlines():
         stripped = line.strip()
@@ -209,7 +217,11 @@ def save_memory(
 
 def format_memory_catalog(*, memory_dir: Path | None = None) -> str:
     """Compact index for prompts (names + one-line preview, not full text)."""
-    notes = list_memories("all", memory_dir=memory_dir)
+    notes = [
+        n
+        for n in list_memories("all", memory_dir=memory_dir)
+        if not _is_live_layout_memory(n.kind, n.name)
+    ]
     if not notes:
         return "No memories saved yet. Use save_memory for facts, or " "save_screen_memory to snapshot the display."
     lines = ["Saved memories (call read_memory for full text; save_memory / " "save_screen_memory to update):"]
@@ -297,6 +309,8 @@ def parse_extracted_memory_items(payload: Any) -> list[dict[str, str]]:
         text = str(row.get("text") or "").strip()
         if kind not in {"personal", "app"} or not name or not text:
             continue
+        if _is_live_layout_memory(kind, name):
+            continue
         if _text_looks_secret(text):
             continue
         items.append({"kind": kind, "name": name, "text": text})
@@ -328,6 +342,8 @@ def apply_extracted_memory_items(
     """Append extracted facts. Returns relative paths that were written."""
     written: list[str] = []
     for item in items:
+        if _is_live_layout_memory(item.get("kind", ""), item.get("name", "")):
+            continue
         try:
             path = save_memory(
                 item["kind"],
@@ -362,6 +378,7 @@ Save facts the assistant should recall on later tasks, for example:
 Do NOT save:
 - Passwords, API keys, OTPs, tokens, or payment details
 - One-off clicks, "opened Chrome", raw tool dumps, or the task itself with no fact
+- Live window/monitor occupancy (that is stored automatically as app/displays)
 - Anything already in existing memories unless this run has a new or updated value
 
 Existing memories (do not repeat unless updated):
@@ -480,7 +497,7 @@ def _dated_heading_count(text: str) -> int:
 def notes_need_condense(notes: list[MemoryNote]) -> bool:
     """True when personal/app notes have stacked dated sections or are long."""
     for note in notes:
-        if note.kind == "screen":
+        if note.kind == "screen" or _is_live_layout_memory(note.kind, note.name):
             continue
         if _dated_heading_count(note.text) >= 2:
             return True
@@ -504,6 +521,8 @@ def parse_condensed_memory_files(payload: Any) -> list[dict[str, str]]:
         name = str(row.get("name") or "").strip()
         text = str(row.get("text") or "").strip()
         if kind not in {"personal", "app"} or not name or not text:
+            continue
+        if _is_live_layout_memory(kind, name):
             continue
         if _text_looks_secret(text):
             continue
@@ -563,7 +582,7 @@ def _format_notes_for_condense(notes: list[MemoryNote], *, max_chars: int = 24_0
     parts: list[str] = []
     used = 0
     for note in notes:
-        if note.kind == "screen":
+        if note.kind == "screen" or _is_live_layout_memory(note.kind, note.name):
             continue
         chunk = f"### {note.rel}\n{note.text.strip()}\n"
         if len(chunk) > 8000:
@@ -587,7 +606,7 @@ Rules:
 - Rewrite each file as compact markdown: one title line, then bullets.
   No dated ## timestamps.
 - Omit a file from the result if it is already compact.
-- Only personal and app notes (never screens).
+- Only personal and app notes (never screens or the auto-written displays layout).
 
 Current files:
 <<<FILES>>>
@@ -603,7 +622,11 @@ def _condense_memories_impl(
     *,
     memory_dir: Path | None = None,
 ) -> list[str]:
-    notes = [n for n in list_memories("all", memory_dir=memory_dir) if n.kind in {"personal", "app"}]
+    notes = [
+        n
+        for n in list_memories("all", memory_dir=memory_dir)
+        if n.kind in {"personal", "app"} and not _is_live_layout_memory(n.kind, n.name)
+    ]
     if not notes_need_condense(notes):
         print("[memory] condense skipped (already compact)", flush=True)
         return []

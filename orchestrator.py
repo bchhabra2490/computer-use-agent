@@ -88,6 +88,7 @@ from status_tray import ensure_tray_running
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance, listen_once
 from tts import speak, speak_later
 from whoami import WHO_AM_I_TOOL, run_whoami_tool
+from displays import remember_monitor_layout
 from wake import (
     WAKE_PHRASE,
     ensure_persistent_wake,
@@ -262,11 +263,15 @@ Rules:
 - If they say "mark it done", "that's done", or "no other action is required"
   while a computer task is running, the runtime stops that task — do not
   start_task again for the same work.
+- When multiple displays are listed below, use that layout in start_task
+  (which screen already has Chrome, Slack, etc.). Screenshots are primary-only.
 
 Available desktop skills the computer agent can load:
 {skills}
 
 {memories}
+
+{displays}
 
 {mcp}
 """
@@ -1237,11 +1242,17 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         )
 
     def _system_prompt() -> str:
-        return SYSTEM_PROMPT.format(
-            skills=format_skill_catalog(),
-            memories=format_memory_catalog(),
-            mcp=format_mcp_catalog(),
-            mcp_rule=mcp_rule,
+        occupancy = remember_monitor_layout()
+        # Occupancy text can contain `{` from window titles; inject after format.
+        return (
+            SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
+            .format(
+                skills=format_skill_catalog(),
+                memories=format_memory_catalog(),
+                mcp=format_mcp_catalog(),
+                mcp_rule=mcp_rule,
+            )
+            .replace("__DISPLAYS__", occupancy)
         )
 
     publisher = AgentMessagePublisher()

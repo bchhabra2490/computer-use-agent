@@ -78,6 +78,7 @@ from terminal import run_command
 from traces import maybe_save_trace, try_replay
 from tts import speak, speak_later
 from whoami import WHO_AM_I_TOOL, run_whoami_tool
+from displays import remember_monitor_layout
 
 # Manual override only — leave unset to let the difficulty router choose.
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
@@ -825,6 +826,8 @@ def run(
         shot_h = round(shot_h * ratio)
 
     display_ctx = format_display_context(monitors, screenshot_size=(shot_w, shot_h))
+    occupancy = remember_monitor_layout(monitors=monitors)
+    display_ctx = f"{display_ctx}\n\n{occupancy}"
     skills = discover_skills()
     skill_catalog = format_skill_catalog(skills)
     memory_catalog = format_memory_catalog()
@@ -919,13 +922,16 @@ def run(
                 "4. Follow the skill’s steps; adapt to what you see on screen.\n"
                 "5. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI.\n"
-                "6. Use the computer tool for UI actions on this real desktop.\n"
+                "6. Use the computer tool for UI actions on this real desktop. "
+                "If Open windows by display lists the target app on another monitor, "
+                "activate or move to that screen — do not hunt only in the primary "
+                "screenshot.\n"
                 "7. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
                 "8. Anything the user will hear (mark_done summary, ask_user, on-screen "
                 "status) should sound like a person speaking, not a written report. "
                 "Say titles and names (“the Linear checkout issue”, “the AC/DC video”) "
-                "instead of raw URLs, slugs, or https links."
+                "instead of raw URLs, slugs, or https links.\n"
                 "9. When you need clarification or information only the human knows, "
                 "call ask_user instead of guessing — unless read_memory already has it. "
                 "save_memory when they state a durable fact. "

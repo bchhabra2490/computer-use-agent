@@ -21,8 +21,11 @@ class MemoryStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self._condense = patch.dict("os.environ", {"MEMORY_CONDENSE": "0"})
+        self._condense.start()
 
     def tearDown(self) -> None:
+        self._condense.stop()
         self.tmp.cleanup()
 
     def test_save_read_personal_and_app(self) -> None:
@@ -126,8 +129,11 @@ class ExtractMemoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self._condense = patch.dict("os.environ", {"MEMORY_CONDENSE": "0"})
+        self._condense.start()
 
     def tearDown(self) -> None:
+        self._condense.stop()
         self.tmp.cleanup()
 
     def test_parse_items_and_skip_secrets(self) -> None:
@@ -252,6 +258,128 @@ class ExtractMemoryTests(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
             self.assertTrue(started.wait(timeout=1.0))
             release.set()
+
+
+class CondenseMemoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        mem._condense_running = False
+        mem._condense_pending = False
+        self._env = patch.dict("os.environ", {"MEMORY_CONDENSE": "1"})
+        self._env.start()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        mem._condense_running = False
+        mem._condense_pending = False
+        self.tmp.cleanup()
+
+    def test_needs_condense_on_stacked_sections(self) -> None:
+        mem.save_memory(
+            "app", "youtube", "Played A", memory_dir=self.root, condense=False
+        )
+        notes = mem.list_memories("app", memory_dir=self.root)
+        self.assertFalse(mem.notes_need_condense(notes))
+        mem.save_memory(
+            "app", "youtube", "Played A again", memory_dir=self.root, condense=False
+        )
+        notes = mem.list_memories("app", memory_dir=self.root)
+        self.assertTrue(mem.notes_need_condense(notes))
+
+    def test_parse_and_write_compact_file(self) -> None:
+        mem.save_memory(
+            "app", "youtube", "Played A", memory_dir=self.root, condense=False
+        )
+        mem.save_memory(
+            "app", "youtube", "Played A", memory_dir=self.root, condense=False
+        )
+        payload = {
+            "files": [
+                {
+                    "kind": "app",
+                    "name": "youtube",
+                    "text": "# app / youtube\n\n- Played A",
+                    "reason": "duplicate play lines",
+                }
+            ]
+        }
+        files = mem.parse_condensed_memory_files(payload)
+        written = mem.apply_condensed_memory_files(files, memory_dir=self.root)
+        self.assertEqual(written, ["apps/youtube.md"])
+        body = mem.read_memory("app", "youtube", memory_dir=self.root)
+        self.assertIn("Played A", body)
+        self.assertEqual(mem._dated_heading_count(body), 0)
+
+    def test_impl_rewrites_duplicates(self) -> None:
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Prefers volume 40%",
+            memory_dir=self.root,
+            condense=False,
+        )
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Prefers volume 50%",
+            memory_dir=self.root,
+            condense=False,
+        )
+
+        class _Resp:
+            output_text = json.dumps(
+                {
+                    "files": [
+                        {
+                            "kind": "personal",
+                            "name": "profile",
+                            "text": "# personal / profile\n\n- Prefers volume 50%",
+                        }
+                    ]
+                }
+            )
+            output = []
+
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+
+            def create(self, **_kwargs):
+                return _Resp()
+
+        written = mem._condense_memories_impl(_Client(), memory_dir=self.root)
+        self.assertEqual(written, ["personal/profile.md"])
+        body = mem.read_memory("personal", "profile", memory_dir=self.root)
+        self.assertIn("50%", body)
+        self.assertNotIn("40%", body)
+        self.assertEqual(body.count("Prefers volume"), 1)
+
+    def test_schedule_does_not_block(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_impl(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return []
+
+        with (
+            patch.object(mem, "_condense_memories_impl", side_effect=slow_impl),
+            patch.object(mem, "_new_extract_client", return_value=object()),
+        ):
+            t0 = time.monotonic()
+            mem.schedule_memory_condense(memory_dir=self.root)
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(started.wait(timeout=1.0))
+            release.set()
+
+    def test_disabled(self) -> None:
+        with patch.dict("os.environ", {"MEMORY_CONDENSE": "0"}):
+            with patch.object(mem, "_condense_worker") as worker:
+                mem.schedule_memory_condense(memory_dir=self.root)
+                worker.assert_not_called()
 
 
 if __name__ == "__main__":

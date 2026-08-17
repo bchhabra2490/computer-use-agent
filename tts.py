@@ -19,8 +19,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
+from collections import deque
 from pathlib import Path
 
 from openai import OpenAI
@@ -43,9 +45,7 @@ TTS_INSTRUCTIONS = (
 
 if TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}:
     TTS_VOICE = (
-        os.environ.get("TTS_VOICE")
-        or os.environ.get("SARVAM_TTS_VOICE")
-        or "shubh"
+        os.environ.get("TTS_VOICE") or os.environ.get("SARVAM_TTS_VOICE") or "shubh"
     ).strip().lower() or "shubh"
 else:
     TTS_VOICE = (os.environ.get("TTS_VOICE") or "onyx").strip() or "onyx"
@@ -64,6 +64,10 @@ _TTS_PLAYER = (
     (os.environ.get("TTS_PLAYER") or ("afplay" if sys.platform == "darwin" else "sounddevice")).strip().lower()
 )
 _FADE_MS = float(os.environ.get("TTS_FADE_MS", "8"))
+_PLAYBACK_LOCK = threading.Lock()
+_SPEAK_LATER_Q: deque[tuple] = deque()
+_SPEAK_LATER_CV = threading.Condition()
+_SPEAK_LATER_THREAD: threading.Thread | None = None
 
 
 def _use_sarvam() -> bool:
@@ -92,14 +96,10 @@ def active_tts_voice() -> str:
     blob = _wake_blob()
     if _use_sarvam():
         rekha = (
-            os.environ.get("TTS_VOICE_REKHA")
-            or os.environ.get("SARVAM_TTS_VOICE_REKHA")
-            or "priya"
+            os.environ.get("TTS_VOICE_REKHA") or os.environ.get("SARVAM_TTS_VOICE_REKHA") or "priya"
         ).strip().lower() or "priya"
         jarvis = (
-            os.environ.get("TTS_VOICE_JARVIS")
-            or os.environ.get("SARVAM_TTS_VOICE_JARVIS")
-            or "shubh"
+            os.environ.get("TTS_VOICE_JARVIS") or os.environ.get("SARVAM_TTS_VOICE_JARVIS") or "shubh"
         ).strip().lower() or "shubh"
         if "rekha" in blob:
             return rekha
@@ -303,9 +303,10 @@ def play_wav(
     Returns True if interrupted via interrupt_event.
     """
     del force_rate  # afplay plays native WAV rate; kept for call-site compat
-    if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
-        return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
-    return _play_sounddevice(wav_bytes, interrupt_event=interrupt_event)
+    with _PLAYBACK_LOCK:
+        if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
+            return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
+        return _play_sounddevice(wav_bytes, interrupt_event=interrupt_event)
 
 
 def speak(
@@ -378,3 +379,38 @@ def speak(
         return False
     finally:
         release()
+
+
+def _speak_later_worker() -> None:
+    while True:
+        with _SPEAK_LATER_CV:
+            while not _SPEAK_LATER_Q:
+                _SPEAK_LATER_CV.wait()
+            item = _SPEAK_LATER_Q.popleft()
+        client, text, voice = item
+        try:
+            speak(client, text, voice=voice)
+        except Exception as e:
+            print(f"[tts] background speak failed: {e}", flush=True)
+
+
+def speak_later(
+    client: OpenAI,
+    text: str,
+    voice: str | None = None,
+) -> None:
+    """Queue TTS and return immediately so the agent can keep working."""
+    line = (text or "").strip()
+    if not line:
+        return
+    global _SPEAK_LATER_THREAD
+    with _SPEAK_LATER_CV:
+        _SPEAK_LATER_Q.append((client, line, voice))
+        if _SPEAK_LATER_THREAD is None or not _SPEAK_LATER_THREAD.is_alive():
+            _SPEAK_LATER_THREAD = threading.Thread(
+                target=_speak_later_worker,
+                name="tts-speak-later",
+                daemon=True,
+            )
+            _SPEAK_LATER_THREAD.start()
+        _SPEAK_LATER_CV.notify()

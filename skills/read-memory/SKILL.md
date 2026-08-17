@@ -46,7 +46,8 @@ reveals something you will need again:
 - A preference you had to ask for (OLED is I2C, default volume, etc.)
 
 The runtime also extracts memories automatically after each voice turn and
-computer-use run (user request + model replies + tool context). You still
+computer-use run (user request + model replies + tool context). A follow-on
+background pass condenses those files so duplicates do not pile up. You still
 save immediately when they say remember/save this — do not wait for the
 post-run pass.
 

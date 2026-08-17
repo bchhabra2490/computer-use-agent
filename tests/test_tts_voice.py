@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,6 +43,27 @@ class ActiveTtsVoiceTests(unittest.TestCase):
         from tts import TTS_VOICE
 
         self.assertEqual(active_tts_voice(), TTS_VOICE)
+
+
+class SpeakLaterTests(unittest.TestCase):
+    def test_returns_before_playback_finishes(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_speak(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return False
+
+        import tts as tts_mod
+
+        with patch.object(tts_mod, "speak", side_effect=fake_speak):
+            t0 = time.monotonic()
+            tts_mod.speak_later(object(), "Starting that now.")
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(started.wait(timeout=1.0))
+            release.set()
 
 
 if __name__ == "__main__":

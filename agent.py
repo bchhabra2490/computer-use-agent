@@ -76,6 +76,8 @@ from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
 from traces import maybe_save_trace, try_replay
+from tts import speak, speak_later
+from whoami import WHO_AM_I_TOOL, run_whoami_tool
 
 # Manual override only — leave unset to let the difficulty router choose.
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
@@ -260,6 +262,7 @@ BASE_TOOLS = [
     RUN_TERMINAL_TOOL,
     MARK_DONE_TOOL,
     *MEMORY_TOOLS,
+    WHO_AM_I_TOOL,
 ]
 
 
@@ -588,6 +591,16 @@ def _handle_function_call(
             "call_id": call.call_id,
             "output": output,
         }
+    if call.name == "who_am_i":
+        output = run_whoami_tool(call.name, json.loads(call.arguments or "{}"))
+        preview = output.replace("\n", " ")[:160]
+        print(f"[who_am_i] {preview}")
+        log.record("who_am_i", preview, {"chars": len(output)})
+        return {
+            "type": "function_call_output",
+            "call_id": call.call_id,
+            "output": output,
+        }
     if call.name == "mark_done":
         args = json.loads(call.arguments or "{}")
         summary = (args.get("summary") or "Task complete.").strip()
@@ -754,7 +767,7 @@ Respond with JSON only (no markdown fences):
 
     print(f"[skills] wrote {path}")
     if voice:
-        speak(client, f"Saved skill {name}.")
+        speak_later(client, f"Saved skill {name}.")
     log.record("skill_create", f"wrote {name}", {"path": str(path)})
 
 
@@ -875,7 +888,7 @@ def run(
             log.record("trace_replay", replayed.split("\n", 1)[0], {"result": replayed})
             log.finish("completed", "Replayed saved action trace.")
             if voice:
-                speak(client, "Done.")
+                speak_later(client, "Done.")
             return replayed
 
         model = resolve_agent_model(client, task, log)
@@ -897,29 +910,32 @@ def run(
                 "companion files you need) before using the computer tool. For "
                 "accounts, names, or app preferences, call read_memory first "
                 "(skill read-memory).\n"
-                "2. If an MCP server can search, fetch, or change the data, call "
+                "2. If they ask who you are, what you can do, or about this agent, "
+                "call who_am_i then mark_done with a short spoken summary from the "
+                "README (do not drive the desktop or read the README aloud).\n"
+                "3. If an MCP server can search, fetch, or change the data, call "
                 "mcp_call before using the computer tool or scraping with "
                 "run_terminal.\n"
-                "3. Follow the skill’s steps; adapt to what you see on screen.\n"
-                "4. Use run_terminal for shell/CLI work (files, git, scripts, "
+                "4. Follow the skill’s steps; adapt to what you see on screen.\n"
+                "5. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI.\n"
-                "5. Use the computer tool for UI actions on this real desktop.\n"
-                "6. Prefer read_ui_text (Accessibility) to read labels/values/menus "
+                "6. Use the computer tool for UI actions on this real desktop.\n"
+                "7. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
-                "7. Anything the user will hear (mark_done summary, ask_user, on-screen "
+                "8. Anything the user will hear (mark_done summary, ask_user, on-screen "
                 "status) should sound like a person speaking, not a written report. "
                 "Say titles and names (“the Linear checkout issue”, “the AC/DC video”) "
                 "instead of raw URLs, slugs, or https links."
-                "8. When you need clarification or information only the human knows, "
+                "9. When you need clarification or information only the human knows, "
                 "call ask_user instead of guessing — unless read_memory already has it. "
                 "save_memory when they state a durable fact. "
                 "If they want the current display remembered, call save_screen_memory "
                 "(screenshot + description) — do not use the computer tool for that.\n"
-                "9. Before each turn, you may receive new user messages that arrived "
+                "10. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
-                "10. You may periodically receive evaluator coaching — treat it as "
+                "11. You may periodically receive evaluator coaching — treat it as "
                 "advisory guidance and adapt.\n"
-                "11. When the request is complete and no other action is required, "
+                "12. When the request is complete and no other action is required, "
                 "call mark_done (do not keep using the computer tool)."
             ),
         )
@@ -952,7 +968,7 @@ def run(
 
                 print("\nDone — no further actions.")
                 if voice:
-                    speak(client, "Done.")
+                    speak_later(client, "Done.")
                 log.finish("completed")
                 maybe_create_skill(client, log, voice=voice)
                 maybe_save_trace(log, task)
@@ -1029,7 +1045,7 @@ def run(
     except TaskMarkedDone as e:
         print(f"\nDone — {e.summary}")
         if voice:
-            speak(client, "Done.")
+            speak_later(client, "Done.")
         log.finish("completed", e.summary)
         maybe_create_skill(client, log, voice=voice)
         maybe_save_trace(log, task)

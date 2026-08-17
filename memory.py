@@ -8,7 +8,8 @@ Kinds:
 
 After each orchestrator turn and computer-use run, user input plus LLM
 steps are reviewed and durable facts (repos, songs, preferences) are
-appended here automatically.
+appended here automatically. A second background thread then condenses
+those files to drop repetition.
 
 Files: ``memory/personal/<slug>.md``, ``memory/apps/<slug>.md``,
 ``memory/screens/<slug>.md`` (+ matching ``.png`` for screen captures).
@@ -28,13 +29,21 @@ from typing import Any
 
 MEMORY_DIR = Path(__file__).resolve().parent / "memory"
 _MEMORY_WRITE_LOCK = threading.Lock()
+_CONDENSE_STATE_LOCK = threading.Lock()
+_condense_running = False
+_condense_pending = False
 MEMORY_VISION_MODEL = (
-    os.environ.get("MEMORY_VISION_MODEL")
-    or os.environ.get("ORCHESTRATOR_MODEL")
-    or "gpt-4o-mini"
+    os.environ.get("MEMORY_VISION_MODEL") or os.environ.get("ORCHESTRATOR_MODEL") or "gpt-4o-mini"
 ).strip() or "gpt-4o-mini"
 MEMORY_EXTRACT_MODEL = (
     os.environ.get("MEMORY_EXTRACT_MODEL")
+    or os.environ.get("EVAL_MODEL")
+    or os.environ.get("ORCHESTRATOR_MODEL")
+    or "gpt-5-mini"
+).strip() or "gpt-5-mini"
+MEMORY_CONDENSE_MODEL = (
+    os.environ.get("MEMORY_CONDENSE_MODEL")
+    or os.environ.get("MEMORY_EXTRACT_MODEL")
     or os.environ.get("EVAL_MODEL")
     or os.environ.get("ORCHESTRATOR_MODEL")
     or "gpt-5-mini"
@@ -130,9 +139,7 @@ def list_memories(
         folder = _subdir(k, memory_dir)
         for path in sorted(folder.glob("*.md")):
             text = path.read_text(encoding="utf-8")
-            notes.append(
-                MemoryNote(kind=k, name=path.stem, path=path, text=text)
-            )
+            notes.append(MemoryNote(kind=k, name=path.stem, path=path, text=text))
     return notes
 
 
@@ -159,9 +166,7 @@ def read_memory(
     path = _subdir(canon, memory_dir) / f"{slug}.md"
     if not path.is_file():
         available = ", ".join(n.name for n in list_memories(canon, memory_dir=memory_dir)) or "(none)"
-        raise FileNotFoundError(
-            f"No {canon} memory named {slug!r}. Available: {available}"
-        )
+        raise FileNotFoundError(f"No {canon} memory named {slug!r}. Available: {available}")
     return path.read_text(encoding="utf-8")
 
 
@@ -172,6 +177,7 @@ def save_memory(
     *,
     mode: str = "append",
     memory_dir: Path | None = None,
+    condense: bool = True,
 ) -> Path:
     """Create or update a memory file. ``mode`` is append (default) or replace."""
     ensure_memory_dirs(memory_dir)
@@ -196,6 +202,8 @@ def save_memory(
         else:
             existing = path.read_text(encoding="utf-8").rstrip() + "\n\n"
             path.write_text(existing + block, encoding="utf-8")
+    if condense:
+        schedule_memory_condense(memory_dir=memory_dir)
     return path
 
 
@@ -203,14 +211,8 @@ def format_memory_catalog(*, memory_dir: Path | None = None) -> str:
     """Compact index for prompts (names + one-line preview, not full text)."""
     notes = list_memories("all", memory_dir=memory_dir)
     if not notes:
-        return (
-            "No memories saved yet. Use save_memory for facts, or "
-            "save_screen_memory to snapshot the display."
-        )
-    lines = [
-        "Saved memories (call read_memory for full text; save_memory / "
-        "save_screen_memory to update):"
-    ]
+        return "No memories saved yet. Use save_memory for facts, or " "save_screen_memory to snapshot the display."
+    lines = ["Saved memories (call read_memory for full text; save_memory / " "save_screen_memory to update):"]
     for note in notes:
         lines.append(f"  - {note.rel}: {_preview(note.text)}")
     return "\n".join(lines)
@@ -333,6 +335,7 @@ def apply_extracted_memory_items(
                 item["text"],
                 mode="append",
                 memory_dir=memory_dir,
+                condense=False,
             )
         except (ValueError, OSError) as e:
             print(f"[memory] skip {item.get('kind')}/{item.get('name')}: {e}", flush=True)
@@ -343,6 +346,8 @@ def apply_extracted_memory_items(
             shown = path.name
         written.append(shown)
         print(f"[memory] extracted → {shown}", flush=True)
+    if written:
+        schedule_memory_condense(memory_dir=memory_dir)
     return written
 
 
@@ -388,9 +393,7 @@ def _extract_run_memories_impl(
     memory_dir: Path | None = None,
 ) -> list[str]:
     catalog = format_memory_catalog(memory_dir=memory_dir)
-    prompt = _EXTRACT_PROMPT.replace("<<<CATALOG>>>", catalog).replace(
-        "<<<TRANSCRIPT>>>", transcript
-    )
+    prompt = _EXTRACT_PROMPT.replace("<<<CATALOG>>>", catalog).replace("<<<TRANSCRIPT>>>", transcript)
     print("[memory] extracting facts from this run…", flush=True)
     try:
         response = client.responses.create(
@@ -459,6 +462,221 @@ def maybe_extract_run_memories(
     threading.Thread(target=_work, name="memory-extract", daemon=True).start()
     print("[memory] extracting facts in background…", flush=True)
     return []
+
+
+def memory_condense_enabled() -> bool:
+    return os.environ.get("MEMORY_CONDENSE", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _dated_heading_count(text: str) -> int:
+    return sum(1 for line in (text or "").splitlines() if line.startswith("## "))
+
+
+def notes_need_condense(notes: list[MemoryNote]) -> bool:
+    """True when personal/app notes have stacked dated sections or are long."""
+    for note in notes:
+        if note.kind == "screen":
+            continue
+        if _dated_heading_count(note.text) >= 2:
+            return True
+        if len(note.text) > 2500:
+            return True
+    return False
+
+
+def parse_condensed_memory_files(payload: Any) -> list[dict[str, str]]:
+    """Normalize condense JSON into ``{kind, name, text}`` rows."""
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("files") or payload.get("items") or []
+    if not isinstance(raw, list):
+        return []
+    files: list[dict[str, str]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "").strip().lower()
+        name = str(row.get("name") or "").strip()
+        text = str(row.get("text") or "").strip()
+        if kind not in {"personal", "app"} or not name or not text:
+            continue
+        if _text_looks_secret(text):
+            continue
+        files.append({"kind": kind, "name": name, "text": text})
+    return files
+
+
+def write_condensed_memory(
+    kind: str,
+    name: str,
+    text: str,
+    *,
+    memory_dir: Path | None = None,
+) -> Path:
+    """Overwrite a note with compact markdown (no extra dated section)."""
+    ensure_memory_dirs(memory_dir)
+    canon = _canonical_kind(kind)
+    slug = sanitize_memory_name(name)
+    body = (text or "").strip()
+    if not body:
+        raise ValueError("Memory text is empty.")
+    if not body.lstrip().startswith("#"):
+        body = f"# {canon} / {slug}\n\n{body}"
+    path = _subdir(canon, memory_dir) / f"{slug}.md"
+    with _MEMORY_WRITE_LOCK:
+        path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def apply_condensed_memory_files(
+    files: list[dict[str, str]],
+    *,
+    memory_dir: Path | None = None,
+) -> list[str]:
+    written: list[str] = []
+    for item in files:
+        try:
+            path = write_condensed_memory(
+                item["kind"],
+                item["name"],
+                item["text"],
+                memory_dir=memory_dir,
+            )
+        except (ValueError, OSError) as e:
+            print(f"[memory] condense skip {item.get('kind')}/{item.get('name')}: {e}", flush=True)
+            continue
+        try:
+            shown = str(path.relative_to(_root(memory_dir)))
+        except ValueError:
+            shown = path.name
+        written.append(shown)
+        print(f"[memory] condensed → {shown}", flush=True)
+    return written
+
+
+def _format_notes_for_condense(notes: list[MemoryNote], *, max_chars: int = 24_000) -> str:
+    parts: list[str] = []
+    used = 0
+    for note in notes:
+        if note.kind == "screen":
+            continue
+        chunk = f"### {note.rel}\n{note.text.strip()}\n"
+        if len(chunk) > 8000:
+            chunk = chunk[:8000] + "\n… (truncated)\n"
+        if used + len(chunk) > max_chars:
+            parts.append("… (further files omitted)")
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    return "\n".join(parts).strip() or "(none)"
+
+
+_CONDENSE_PROMPT = """You condense voice-assistant memory files to save tokens.
+
+Rules:
+- Keep every distinct durable fact (prefs, usernames, repos, songs, issue/PR ids).
+- Drop repeated bullets and restated dated sections.
+- If preferences conflict (volume 40% vs 50%), keep the latest.
+- Unique events stay once (do not list the same song or branch delete twice).
+- Do not invent facts. Do not include passwords, API keys, or tokens.
+- Rewrite each file as compact markdown: one title line, then bullets.
+  No dated ## timestamps.
+- Omit a file from the result if it is already compact.
+- Only personal and app notes (never screens).
+
+Current files:
+<<<FILES>>>
+
+Respond with JSON only (no markdown fences):
+{"files": [{"kind": "personal" or "app", "name": "slug", "text": "# kind / slug\\n\\n- fact", "reason": "why"}]}
+If nothing needs rewriting, return {"files": []}.
+"""
+
+
+def _condense_memories_impl(
+    client: Any,
+    *,
+    memory_dir: Path | None = None,
+) -> list[str]:
+    notes = [n for n in list_memories("all", memory_dir=memory_dir) if n.kind in {"personal", "app"}]
+    if not notes_need_condense(notes):
+        print("[memory] condense skipped (already compact)", flush=True)
+        return []
+    blob = _format_notes_for_condense(notes)
+    prompt = _CONDENSE_PROMPT.replace("<<<FILES>>>", blob)
+    print("[memory] condensing memories…", flush=True)
+    try:
+        response = client.responses.create(
+            model=MEMORY_CONDENSE_MODEL,
+            input=prompt,
+        )
+        raw = _response_output_text(response)
+        payload = _parse_json_object(raw)
+        files = parse_condensed_memory_files(payload)
+        if not files:
+            print("[memory] condense left files unchanged", flush=True)
+            return []
+        return apply_condensed_memory_files(files, memory_dir=memory_dir)
+    except Exception as e:
+        print(f"[memory] condense failed: {e}", flush=True)
+        return []
+
+
+def _condense_worker(*, memory_dir: Path | None) -> None:
+    global _condense_running, _condense_pending
+    try:
+        while True:
+            try:
+                client = _new_extract_client()
+                _condense_memories_impl(client, memory_dir=memory_dir)
+            except Exception as e:
+                print(f"[memory] condense failed: {e}", flush=True)
+            with _CONDENSE_STATE_LOCK:
+                if not _condense_pending:
+                    _condense_running = False
+                    return
+                _condense_pending = False
+    except Exception:
+        with _CONDENSE_STATE_LOCK:
+            _condense_running = False
+            _condense_pending = False
+        raise
+
+
+def schedule_memory_condense(
+    *,
+    memory_dir: Path | None = None,
+    background: bool = True,
+) -> None:
+    """
+    Deduplicate personal/app memory files on a daemon thread.
+
+    Coalesces overlapping requests so extract + save_memory do not stack
+    parallel LLM calls. No-op when MEMORY_CONDENSE=0.
+    """
+    if not memory_condense_enabled():
+        return
+    global _condense_running, _condense_pending
+    with _CONDENSE_STATE_LOCK:
+        if _condense_running:
+            _condense_pending = True
+            return
+        _condense_running = True
+    if not background:
+        _condense_worker(memory_dir=memory_dir)
+        return
+    threading.Thread(
+        target=_condense_worker,
+        kwargs={"memory_dir": memory_dir},
+        name="memory-condense",
+        daemon=True,
+    ).start()
+    print("[memory] condensing in background…", flush=True)
 
 
 _SAVE_SCREEN_RE = re.compile(

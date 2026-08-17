@@ -2,6 +2,7 @@
 Voice orchestrator: waits for a Jarvis wake word, then listens and routes via an LLM.
 
 Tools:
+  - who_am_i — read README.md and answer questions about this agent
   - start_task — hand off to the computer-use agent (background thread)
   - ask_user — speak a question and capture a spoken reply
   - give_response_to_user — speak a reply (optionally end the session)
@@ -85,7 +86,8 @@ from mcp_client import (
 from skills import format_skill_catalog
 from status_tray import ensure_tray_running
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance, listen_once
-from tts import speak
+from tts import speak, speak_later
+from whoami import WHO_AM_I_TOOL, run_whoami_tool
 from wake import (
     WAKE_PHRASE,
     ensure_persistent_wake,
@@ -154,8 +156,7 @@ ASK_USER_TOOL = {
             "question": {
                 "type": "string",
                 "description": (
-                    "One short question to speak. Natural wording; titles "
-                    "instead of raw URLs. Not a numbered list."
+                    "One short question to speak. Natural wording; titles " "instead of raw URLs. Not a numbered list."
                 ),
             },
         },
@@ -199,8 +200,10 @@ GIVE_RESPONSE_TOOL = {
     "strict": True,
 }
 
+
 def orchestrator_tools() -> list:
     return [
+        WHO_AM_I_TOOL,
         START_TASK_TOOL,
         ASK_USER_TOOL,
         GIVE_RESPONSE_TOOL,
@@ -215,6 +218,7 @@ You receive transcribed speech from the user. Decide the next action with tools 
 — never reply with a plain assistant message (the user will not hear it, and the mic
 will not open):
 - give_response_to_user — speak an answer or acknowledgment that does not need a reply
+- who_am_i — read README.md when they ask who you are, what you can do, or about this agent
 - ask_user — ask one short clarifying question aloud, then listen for their answer
   (no wake word). Use this for any question, confirmation, or choice.
 - start_task — run the computer-use agent for real mouse/keyboard/UI work
@@ -226,6 +230,9 @@ will not open):
 {mcp_rule}
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
+- If they ask who you are, what you do, how you work, or about this agent / Jarvis /
+  Rekha / computer-use-agent, call who_am_i first, then give_response_to_user with a
+  short spoken summary from the README (do not read it verbatim, no markdown).
 - Prefer mcp_call over start_task when a connected MCP server can search, fetch, or
   change the data (issues, docs, analytics, APIs). Use start_task only for real
   mouse/keyboard/UI work (open an app, click play, fill a form on screen).
@@ -457,11 +464,7 @@ def _create_response(
                         "call_id": getattr(item, "call_id", "") or "",
                         "arguments": getattr(item, "arguments", None) or "",
                     }
-                    if (
-                        response_id
-                        and items[item.id]["name"] == "give_response_to_user"
-                        and items[item.id]["call_id"]
-                    ):
+                    if response_id and items[item.id]["name"] == "give_response_to_user" and items[item.id]["call_id"]:
                         llm_tts.bind_call(response_id, items[item.id]["call_id"])
             elif etype == "response.function_call_arguments.delta":
                 meta = items.get(event.item_id)
@@ -640,6 +643,15 @@ def _speak(client: OpenAI, text: str) -> str | None:
     return None
 
 
+def _speak_later(client: OpenAI, text: str) -> None:
+    """Start TTS without blocking the agent / tool loop."""
+    if not text:
+        return
+    set_state("speaking", text[:100])
+    status_log(f"[tts] {text[:160]}")
+    speak_later(client, text)
+
+
 def _confirm_heard_enabled() -> bool:
     return os.environ.get("TTS_CONFIRM_HEARD", "1").strip().lower() not in {
         "0",
@@ -769,9 +781,7 @@ def _supervise_agent(
     notified_done = False
 
     def _stop_for_done() -> bool:
-        return job.done.is_set() or ask_bridge.has_pending() or quit_requested() or mark_done_pending(
-            job.call_id
-        )
+        return job.done.is_set() or ask_bridge.has_pending() or quit_requested() or mark_done_pending(job.call_id)
 
     def _signal_agent_done(*, spoken: bool) -> None:
         nonlocal notified_done
@@ -779,8 +789,7 @@ def _supervise_agent(
         if not notified_done:
             try:
                 publisher.send(
-                    "The user marked this task done. Stop all UI actions. "
-                    "Call mark_done and do not continue."
+                    "The user marked this task done. Stop all UI actions. " "Call mark_done and do not continue."
                 )
             except Exception as e:
                 print(f"[orchestrator] bus send failed: {e}")
@@ -855,8 +864,7 @@ def _supervise_agent(
         if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
             barged = _speak(
                 client,
-                "The computer task is still running. Say the wake word, then stop, "
-                "if you want it to adapt.",
+                "The computer task is still running. Say the wake word, then stop, " "if you want it to adapt.",
             )
             if barged:
                 print(f'\n[user] "{barged}" (barge-in)')
@@ -929,55 +937,58 @@ def _handle_tool(
         )
         handled_barge = False
         if message and already_streamed:
-            # Playback may still be draining — wait, do not speak again.
-            print("[orchestrator] give_response already streaming via low-latency TTS", flush=True)
+            # Playback continues on the TTS worker — do not block the agent.
+            print(
+                "[orchestrator] give_response already streaming via low-latency TTS " "(not waiting)",
+                flush=True,
+            )
             set_state("speaking", message[:100])
-            interrupted = bool(llm_tts.wait_call(call.call_id))
-            llm_tts.acknowledge_call(call.call_id)
-            if interrupted:
-                handled_barge = True
-                end_session = False
-                set_state("listening", "barge-in")
-                barge = _listen_after_barge(client)
+            if _looks_like_question(message) and not end_session:
+                interrupted = bool(llm_tts.wait_call(call.call_id))
+                llm_tts.acknowledge_call(call.call_id)
+                if interrupted:
+                    handled_barge = True
+                    end_session = False
+                    set_state("listening", "barge-in")
+                    barge = _listen_after_barge(client)
+                    if barge:
+                        output = (
+                            f"Speech interrupted. User then said: {barge}. "
+                            "Act on that instruction next (do not assume the spoken reply finished)."
+                        )
+                    else:
+                        output = (
+                            "Speech interrupted but no follow-up command was heard. "
+                            "Ask briefly what they need, or wait for the next wake."
+                        )
+                else:
+                    output = f"Spoke to user. end_session={end_session}"
+            else:
+                llm_tts.acknowledge_call(call.call_id)
+                output = f"Spoke to user. end_session={end_session}"
+        elif message:
+            if _looks_like_question(message) and not end_session:
+                barge = _speak(client, message)
                 if barge:
+                    handled_barge = True
+                    end_session = False
                     output = (
                         f"Speech interrupted. User then said: {barge}. "
                         "Act on that instruction next (do not assume the spoken reply finished)."
                     )
                 else:
-                    output = (
-                        "Speech interrupted but no follow-up command was heard. "
-                        "Ask briefly what they need, or wait for the next wake."
-                    )
+                    output = f"Spoke to user. end_session={end_session}"
             else:
-                time.sleep(0.15)
-                output = f"Spoke to user. end_session={end_session}"
-        elif message:
-            barge = _speak(client, message)
-            if barge:
-                handled_barge = True
-                end_session = False
-                output = (
-                    f"Speech interrupted. User then said: {barge}. "
-                    "Act on that instruction next (do not assume the spoken reply finished)."
-                )
-            else:
-                time.sleep(0.2)
+                _speak_later(client, message)
                 output = f"Spoke to user. end_session={end_session}"
         else:
             output = f"Spoke to user. end_session={end_session}"
 
         # give_response does not open the mic. If the model asked a question
         # here anyway, listen without a wake word so the user can answer.
-        if (
-            not handled_barge
-            and not end_session
-            and message
-            and _looks_like_question(message)
-        ):
+        if not handled_barge and not end_session and message and _looks_like_question(message):
             print(
-                "[orchestrator] give_response asked a question — "
-                "listening without wake word",
+                "[orchestrator] give_response asked a question — " "listening without wake word",
                 flush=True,
             )
             answer = _listen_for_answer(client)
@@ -1003,22 +1014,13 @@ def _handle_tool(
         if not task:
             output = "Error: empty task"
         else:
-            barge = _speak(client, "Starting that now.")
-            if barge:
-                print(f'\n[user] "{barge}" (barge-in before start_task)')
-                output = (
-                    "User interrupted before the computer agent started. "
-                    f"They said: {barge}. Do not assume the task ran. "
-                    "Decide next from their new instruction."
-                )
-            else:
-                time.sleep(POST_TTS_COOLDOWN)
-                print(f"\n[orchestrator] start_task: {task}")
-                set_and_log("agent", f"Starting task: {task[:120]}", task=task)
-                job = AgentJob(task=task, call_id=call.call_id)
-                _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
-                # Defer function_call_output until the agent thread finishes.
-                return None, False, job
+            print(f"\n[orchestrator] start_task: {task}")
+            set_and_log("agent", f"Starting task: {task[:120]}", task=task)
+            job = AgentJob(task=task, call_id=call.call_id)
+            _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
+            _speak_later(client, "Starting that now.")
+            # Defer function_call_output until the agent thread finishes.
+            return None, False, job
 
     elif call.name in {
         "list_memories",
@@ -1028,6 +1030,10 @@ def _handle_tool(
     }:
         output = run_memory_tool(call.name, args, client=client)
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
+
+    elif call.name == "who_am_i":
+        output = run_whoami_tool(call.name, args)
+        print(f"[orchestrator] who_am_i: {output[:120].replace(chr(10), ' ')}")
 
     elif call.name == "mcp_call":
         output = run_mcp_tool(call.name, args)
@@ -1101,29 +1107,13 @@ def _process_response(
             if leftover and not already_spoke:
                 print(
                     "[orchestrator] model replied with a message instead of "
-                    "give_response_to_user — speaking it",
+                    "give_response_to_user — speaking it in the background",
                     flush=True,
                 )
-                barge = _speak(client, leftover)
-                if barge:
-                    if turn is not None:
-                        turn.add("barge_in", barge)
-                    response = _create_response(
-                        client,
-                        llm_tts=llm_tts,
-                        model=MODEL,
-                        tools=orchestrator_tools(),
-                        previous_response_id=response.id,
-                        input=(
-                            f"Speech interrupted. User then said: {barge}. "
-                            "Act on that instruction next."
-                        ),
-                    )
-                    continue
+                _speak_later(client, leftover)
             elif leftover and already_spoke:
                 print(
-                    "[orchestrator] skipping leftover message "
-                    "(already spoke this turn)",
+                    "[orchestrator] skipping leftover message " "(already spoke this turn)",
                     flush=True,
                 )
             return response, end_session, []

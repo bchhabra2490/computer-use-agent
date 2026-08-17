@@ -69,6 +69,7 @@ then transcribes your request and lets an LLM choose tools:
 
 | Tool | Role |
 |------|------|
+| `who_am_i` | Read `README.md` and answer who this agent is / what it can do |
 | `start_task` | Run the computer-use agent on a concrete UI task |
 
 Easy tasks that succeed are saved as **action traces** under `traces/`. The next matching request (e.g. “open Chrome, go to …”) replays those keypresses/types with no screenshot loop. Wake word during replay falls back to the vision agent. Set `TRACE_REPLAY=0` / `TRACE_RECORD=0` to disable.
@@ -96,9 +97,11 @@ Agent `ask_user` prompts skip the wake word (answer directly).
 **Low-latency TTS** (default on): the orchestrator streams Responses API
 partial `give_response_to_user` arguments into `low_latency_tts.py`, which
 chunks text and overlaps synthesis with playback (afplay on macOS — not
-PortAudio). Markers go to `tts_latency.log` (`response_ready`,
-`first_audio_play`, and their delta). Tune with `TTS_STREAM`,
-`TTS_CHUNK_MIN_CHARS`, `TTS_CHUNK_MAX_CHARS`, `TTS_WARMUP`. Set `TTS_STREAM=0`
+PortAudio). Status lines and `start_task` do not wait for playback — the
+computer agent starts immediately while speech continues. Markers go to
+`tts_latency.log` (`response_ready`, `first_audio_play`, and their delta).
+Tune with `TTS_STREAM`, `TTS_CHUNK_MIN_CHARS`, `TTS_CHUNK_MAX_CHARS`,
+`TTS_WARMUP`. Set `TTS_STREAM=0`
 for the older synchronous `speak()` path (still used as fallback and for
 barge-in-capable lines).
 
@@ -288,10 +291,12 @@ computer agent use `read_memory` / `save_memory` / `save_screen_memory`
 full user request plus each LLM step (replies, tool calls, results) is
 reviewed and durable facts are appended automatically — GitHub repos,
 songs played, usernames, preferences, and similar. Extraction runs in a
-background thread so it does not block listening or the computer agent. Say “remember that…”
-to store a fact yourself, or “save the screen as memory” to snapshot the
-display. Set `MEMORY_EXTRACT=0` to disable auto-extract. Those folders
-are gitignored.
+background thread so it does not block listening or the computer agent.
+A second background pass then condenses those files (drops repeated
+bullets, keeps the latest preference) so later prompts stay short.
+Say “remember that…” to store a fact yourself, or “save the screen as
+memory” to snapshot the display. Set `MEMORY_EXTRACT=0` or
+`MEMORY_CONDENSE=0` to disable. Those folders are gitignored.
 
 ### MCP servers
 
@@ -353,7 +358,8 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks.
 - `traces/` + `traces.py` — saved easy-task action sequences (replay without vision).
-- `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`); auto-extract after each run.
+- `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`); auto-extract then condense after each run.
+- `whoami.py` — `who_am_i` reads `README.md` when the user asks about this agent.
 - `mcp.json` + `mcp_client.py` + `mcp_auth.py` — MCP servers (`cua mcp login linear`).
 - `task_log.py` — per-run logs under `logs/`.
 - `stt.py` / `sarvam_stt.py` / `tts.py` / `sarvam_tts.py` — speech in/out

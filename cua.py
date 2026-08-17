@@ -9,6 +9,13 @@ MCP apps (Linear, GitHub, …) connect with browser login::
     cua mcp login linear
     cua mcp status
     cua mcp logout linear
+
+Rewrite verbose skill playbooks::
+
+    cua skills condense
+    cua skills condense --name open-app --dry-run
+    cua skills merge --dry-run
+    cua skills merge
 """
 
 from __future__ import annotations
@@ -352,6 +359,54 @@ def main(argv: list[str] | None = None) -> int:
     mcp_sub.add_parser("status", help="Show which MCP apps are logged in")
     mcp_sub.add_parser("apps", help="List known apps you can log in to")
 
+    skills_p = sub.add_parser("skills", help="Manage skills/ playbooks")
+    skills_sub = skills_p.add_subparsers(dest="skills_command", required=True)
+    condense_p = skills_sub.add_parser(
+        "condense",
+        help="Rewrite verbose SKILL.md files to use fewer tokens",
+    )
+    condense_p.add_argument(
+        "--name",
+        action="append",
+        dest="names",
+        metavar="SKILL",
+        default=None,
+        help="Only this skill (repeatable). Implies rewrite even if already short.",
+    )
+    condense_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Condense every skill, including short ones",
+    )
+    condense_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Call the model and print what would change; do not write",
+    )
+    condense_p.add_argument(
+        "--min-chars",
+        type=int,
+        default=None,
+        help="Length threshold (description + body). Default: 1800 or SKILL_CONDENSE_MIN_CHARS",
+    )
+    merge_p = skills_sub.add_parser(
+        "merge",
+        help="Fold duplicate playbooks into one and delete the extras",
+    )
+    merge_p.add_argument(
+        "--name",
+        action="append",
+        dest="names",
+        metavar="SKILL",
+        default=None,
+        help="Only consider these skills (repeatable). Need at least two.",
+    )
+    merge_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Propose merges; do not write or delete",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
@@ -381,6 +436,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.mcp_command == "apps":
             print(format_apps_help())
             return 0
+        return 2
+    if args.command == "skills":
+        from skills import cmd_condense_skills, cmd_merge_skills
+
+        if args.skills_command == "condense":
+            return cmd_condense_skills(
+                names=args.names,
+                force=args.force,
+                dry_run=args.dry_run,
+                min_chars=args.min_chars,
+            )
+        if args.skills_command == "merge":
+            return cmd_merge_skills(names=args.names, dry_run=args.dry_run)
         return 2
     parser.print_help()
     return 2

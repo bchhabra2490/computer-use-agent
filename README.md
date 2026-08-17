@@ -44,6 +44,10 @@ cua start          # background orchestrator (--auto); installs `cua` on PATH
 cua stop           # SIGTERM, then SIGKILL if needed
 cua status
 cua restart
+cua skills condense            # rewrite verbose skills/*/SKILL.md (LLM)
+cua skills condense --dry-run  # show what would change; do not write
+cua skills merge --dry-run     # propose duplicate merges; do not delete
+cua skills merge               # merge duplicates and remove the extras
 ```
 
 `cua start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
@@ -279,7 +283,24 @@ Say **Hey Jarvis**, then something like:
 Reusable playbooks live under `skills/<name>/SKILL.md` (YAML frontmatter with
 `name` + `description`, then markdown steps). The computer agent sees the
 catalog and loads full instructions with `read_skill`. Starter skills:
-`open-app`, `web-search`, `hn-comments`, `read-memory`.
+`open-app`, `web-search`, `hn-comments`, `read-memory`. Auto-saved skills from
+completed runs can get long; rewrite them on demand (does not run in the
+voice loop):
+
+```bash
+cua skills condense                 # skills over ~1800 chars (description + body)
+cua skills condense --name open-app
+cua skills condense --force         # every skill
+cua skills condense --dry-run       # model only; no writes
+cua skills merge --dry-run          # propose duplicate groups; nothing deleted
+cua skills merge                    # write the survivor, delete the duplicates
+```
+
+Set `SKILL_CONDENSE_MODEL` / `SKILL_CONDENSE_MIN_CHARS` in `.env` if needed.
+Merge only folds skills that are the same workflow (same app and outcome).
+Related-but-different playbooks (Amazon search vs checkout, HN comments vs
+submit) stay separate. Companion files in a dropped folder are moved into the
+kept skill.
 
 ### Memories
 
@@ -352,7 +373,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 
 ## Extending it
 
-- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop`).
+- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua skills condense` / `cua skills merge`).
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
@@ -361,7 +382,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `evaluator.py` — difficulty router + periodic coaching for the computer agent.
 - `accessibility.py` — macOS AX tree → text for `read_ui_text`.
 - `actions.py` — mouse/keyboard executor.
-- `skills/` + `skills.py` — task playbooks.
+- `skills/` + `skills.py` — task playbooks (`cua skills condense` / `cua skills merge`).
 - `traces/` + `traces.py` — saved easy-task action sequences (replay without vision).
 - `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`); auto-extract then condense after each run.
 - `whoami.py` — `who_am_i` reads `README.md` when the user asks about this agent.

@@ -18,6 +18,11 @@ import pyautogui
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
 
+
+class ActionStopped(Exception):
+    """Raised when should_stop() fires mid-batch (wake word / quit)."""
+
+
 KEY_MAP = {
     "ENTER": "enter",
     "RETURN": "enter",
@@ -94,18 +99,10 @@ def _mac_scroll_pixels(dx: int, dy: int) -> None:
             wy,
             wx,
         )
-        Quartz.CGEventSetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventIsContinuous, 1
-        )
-        Quartz.CGEventSetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventScrollPhase, phase
-        )
-        Quartz.CGEventSetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventPointDeltaAxis1, wy
-        )
-        Quartz.CGEventSetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventPointDeltaAxis2, wx
-        )
+        Quartz.CGEventSetIntegerValueField(event, Quartz.kCGScrollWheelEventIsContinuous, 1)
+        Quartz.CGEventSetIntegerValueField(event, Quartz.kCGScrollWheelEventScrollPhase, phase)
+        Quartz.CGEventSetIntegerValueField(event, Quartz.kCGScrollWheelEventPointDeltaAxis1, wy)
+        Quartz.CGEventSetIntegerValueField(event, Quartz.kCGScrollWheelEventPointDeltaAxis2, wx)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
     remaining_x, remaining_y = dx, dy
@@ -115,9 +112,7 @@ def _mac_scroll_pixels(dx: int, dy: int) -> None:
         step_y = max(-max_step, min(max_step, remaining_y))
         remaining_x -= step_x
         remaining_y -= step_y
-        phase = (
-            Quartz.kCGScrollPhaseBegan if first else Quartz.kCGScrollPhaseChanged
-        )
+        phase = Quartz.kCGScrollPhaseBegan if first else Quartz.kCGScrollPhaseChanged
         first = False
         _emit(step_x, step_y, phase)
         time.sleep(0.008)
@@ -258,7 +253,7 @@ class DesktopController:
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    def run_actions(self, actions: list) -> None:
+    def run_actions(self, actions: list, *, should_stop=None) -> None:
         # Synthetic Ctrl+C from the model still delivers SIGINT to this process
         # (the terminal's foreground group). Ignore it for the duration of the
         # batch; user abort remains available via the mouse-corner fail-safe.
@@ -270,12 +265,14 @@ class DesktopController:
             prev_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             for action in actions:
-                self._run_one(action)
+                if should_stop is not None and should_stop():
+                    raise ActionStopped("stopped before action")
+                self._run_one(action, should_stop=should_stop)
         finally:
             if on_main and prev_sigint is not None:
                 signal.signal(signal.SIGINT, prev_sigint)
 
-    def _run_one(self, action) -> None:
+    def _run_one(self, action, *, should_stop=None) -> None:
         # SDK returns Pydantic models (Click, Screenshot, …); accept plain dicts too.
         if not isinstance(action, dict):
             action = action.model_dump() if hasattr(action, "model_dump") else dict(action)
@@ -348,7 +345,13 @@ class DesktopController:
             pyautogui.mouseUp()
 
         elif atype == "wait":
-            time.sleep(2)
+            ms = action.get("ms")
+            seconds = 2.0 if ms is None else max(0.0, float(ms) / 1000.0)
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if should_stop is not None and should_stop():
+                    raise ActionStopped("stopped during wait")
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
         elif atype == "screenshot":
             pass  # handled by the caller, which always screenshots after a batch

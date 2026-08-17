@@ -6,6 +6,7 @@ Tools:
   - ask_user — speak a question and capture a spoken reply
   - give_response_to_user — speak a reply (optionally end the session)
   - list_memories / read_memory / save_memory / save_screen_memory — notes + screen snapshots
+  - mcp_call — tools from servers in mcp.json (when configured)
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
 Cloud STT only runs after the wake word. While Jarvis is speaking, say
@@ -69,6 +70,13 @@ from memory import (
     format_memory_catalog,
     is_save_screen_utterance,
     run_memory_tool,
+)
+from mcp_client import (
+    format_mcp_catalog,
+    mcp_openai_tools,
+    run_mcp_tool,
+    start_mcp,
+    stop_mcp,
 )
 from skills import format_skill_catalog
 from status_tray import ensure_tray_running
@@ -177,7 +185,15 @@ GIVE_RESPONSE_TOOL = {
     "strict": True,
 }
 
-TOOLS = [START_TASK_TOOL, ASK_USER_TOOL, GIVE_RESPONSE_TOOL, *MEMORY_TOOLS]
+def orchestrator_tools() -> list:
+    return [
+        START_TASK_TOOL,
+        ASK_USER_TOOL,
+        GIVE_RESPONSE_TOOL,
+        *MEMORY_TOOLS,
+        *mcp_openai_tools(for_agent=False),
+    ]
+
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
@@ -190,9 +206,12 @@ You receive transcribed speech from the user. Decide the next action with tools 
   save when the user says remember/save this.
 - save_screen_memory — screenshot the desktop, describe it, store under
   memory/screens/. Use when they say "save the screen as memory" (do not start_task).
-
+{mcp_rule}
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
+- Prefer mcp_call over start_task when a connected MCP server can search, fetch, or
+  change the data (issues, docs, analytics, APIs). Use start_task only for real
+  mouse/keyboard/UI work (open an app, click play, fill a form on screen).
 - Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
 - Call read_memory before ask_user when the missing detail may already be stored
   (name, usernames, usual apps, what was on screen). save_memory for durable
@@ -218,6 +237,8 @@ Available desktop skills the computer agent can load:
 {skills}
 
 {memories}
+
+{mcp}
 """
 
 
@@ -867,6 +888,10 @@ def _handle_tool(
         output = run_memory_tool(call.name, args, client=client)
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
 
+    elif call.name == "mcp_call":
+        output = run_mcp_tool(call.name, args)
+        print(f"[orchestrator] mcp_call: {output[:160].replace(chr(10), ' ')}")
+
     else:
         output = f"Unsupported tool: {call.name}"
 
@@ -958,7 +983,7 @@ def _process_response(
             client,
             llm_tts=llm_tts,
             model=MODEL,
-            tools=TOOLS,
+            tools=orchestrator_tools(),
             previous_response_id=response.id,
             input=outputs,
         )
@@ -991,9 +1016,23 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             print(f"[orchestrator] low-latency TTS init failed ({e}); sync TTS only", flush=True)
             llm_tts = None
 
+    start_mcp()
     skills = format_skill_catalog()
     memories = format_memory_catalog()
-    system = SYSTEM_PROMPT.format(skills=skills, memories=memories)
+    mcp_catalog = format_mcp_catalog()
+    mcp_rule = ""
+    if mcp_openai_tools(for_agent=False):
+        mcp_rule = (
+            "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
+            "Linear, docs, APIs). Prefer this over start_task when it can complete "
+            "the request.\n"
+        )
+    system = SYSTEM_PROMPT.format(
+        skills=skills,
+        memories=memories,
+        mcp=mcp_catalog,
+        mcp_rule=mcp_rule,
+    )
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
 
@@ -1079,7 +1118,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     client,
                     llm_tts=llm_tts,
                     model=MODEL,
-                    tools=TOOLS,
+                    tools=orchestrator_tools(),
                     instructions=system,
                     input=history_note,
                 )
@@ -1088,7 +1127,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     client,
                     llm_tts=llm_tts,
                     model=MODEL,
-                    tools=TOOLS,
+                    tools=orchestrator_tools(),
                     instructions=system,
                     previous_response_id=previous_id,
                     input=history_note,
@@ -1129,6 +1168,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             stop_persistent_wake()
         except Exception:
             pass
+        try:
+            stop_mcp()
+        except Exception as e:
+            print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()
         set_state("idle", "Orchestrator stopped")

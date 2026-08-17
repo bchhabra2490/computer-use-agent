@@ -56,6 +56,13 @@ from evaluator import (
     screenshot_b64_from_computer_output,
 )
 from memory import MEMORY_TOOLS, format_memory_catalog, run_memory_tool
+from mcp_client import (
+    format_mcp_catalog,
+    mcp_openai_tools,
+    run_mcp_tool,
+    start_mcp,
+    stop_mcp,
+)
 from skills import (
     discover_skills,
     format_skill_catalog,
@@ -68,7 +75,7 @@ from status_tray import ensure_tray_running
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
-from tts import speak
+from traces import maybe_save_trace, try_replay
 
 # Manual override only — leave unset to let the difficulty router choose.
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
@@ -236,7 +243,7 @@ MARK_DONE_TOOL = {
     "strict": True,
 }
 
-TOOLS = [
+BASE_TOOLS = [
     {"type": "computer"},
     ASK_USER_TOOL,
     LIST_SKILLS_TOOL,
@@ -246,6 +253,10 @@ TOOLS = [
     MARK_DONE_TOOL,
     *MEMORY_TOOLS,
 ]
+
+
+def agent_tools() -> list:
+    return [*BASE_TOOLS, *mcp_openai_tools(for_agent=True)]
 
 
 class TaskMarkedDone(Exception):
@@ -550,9 +561,7 @@ def _handle_function_call(
     if call.name == "read_ui_text":
         return _handle_read_ui_text(call, log)
     if call.name == "run_terminal":
-        return _handle_run_terminal(
-            call, log, auto=auto, client=client, voice=voice
-        )
+        return _handle_run_terminal(call, log, auto=auto, client=client, voice=voice)
     if call.name in {
         "list_memories",
         "read_memory",
@@ -560,6 +569,17 @@ def _handle_function_call(
         "save_screen_memory",
     }:
         return _handle_memory(call, log, client=client)
+    if call.name == "mcp_call":
+        args = json.loads(call.arguments or "{}")
+        output = run_mcp_tool(call.name, args)
+        preview = output.replace("\n", " ")[:160]
+        print(f"[mcp] {preview}")
+        log.record("mcp_call", preview, {"args": args, "output": output[:2000]})
+        return {
+            "type": "function_call_output",
+            "call_id": call.call_id,
+            "output": output,
+        }
     if call.name == "mark_done":
         args = json.loads(call.arguments or "{}")
         summary = (args.get("summary") or "Task complete.").strip()
@@ -705,8 +725,7 @@ Respond with JSON only (no markdown fences):
         if voice:
             speak(
                 client,
-                f"I can save a new skill called {name}. {description} "
-                "Say yes to save it, or no to skip.",
+                f"I can save a new skill called {name}. {description} " "Say yes to save it, or no to skip.",
             )
             decision = voice_confirm(client, "Save this skill?")
             approved = decision == "yes"
@@ -754,6 +773,7 @@ def run(
     standalone = ask_user_bridge is None and message_inbox is None
     if standalone:
         register_agent_process()
+        start_mcp()
 
     desktop = DesktopController()
     log = TaskLog(task)
@@ -779,11 +799,14 @@ def run(
     skills = discover_skills()
     skill_catalog = format_skill_catalog(skills)
     memory_catalog = format_memory_catalog()
+    mcp_catalog = format_mcp_catalog()
 
     print(f"\nTask: {task}")
     print(display_ctx)
     print(skill_catalog)
     print(memory_catalog)
+    if mcp_catalog:
+        print(mcp_catalog)
     log.record(
         "start",
         task,
@@ -831,6 +854,14 @@ def run(
         }
 
     try:
+        replayed = try_replay(task, desktop=desktop)
+        if replayed:
+            log.record("trace_replay", replayed.split("\n", 1)[0], {"result": replayed})
+            log.finish("completed", "Replayed saved action trace.")
+            if voice:
+                speak(client, "Done.")
+            return replayed
+
         model = resolve_agent_model(client, task, log)
         print(f"[agent] model={model} eval_every={EVAL_EVERY}")
         if message_inbox is not None:
@@ -838,33 +869,37 @@ def run(
 
         response = client.responses.create(
             model=model,
-            tools=TOOLS,
+            tools=agent_tools(),
             input=(
                 f"{task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
                 f"{memory_catalog}\n\n"
+                f"{mcp_catalog}\n\n"
                 "Workflow:\n"
                 "1. If a skill matches this task, call read_skill for it (and any "
                 "companion files you need) before using the computer tool. For "
                 "accounts, names, or app preferences, call read_memory first "
                 "(skill read-memory).\n"
-                "2. Follow the skill’s steps; adapt to what you see on screen.\n"
-                "3. Use run_terminal for shell/CLI work (files, git, scripts, "
+                "2. If an MCP server can search, fetch, or change the data, call "
+                "mcp_call before using the computer tool or scraping with "
+                "run_terminal.\n"
+                "3. Follow the skill’s steps; adapt to what you see on screen.\n"
+                "4. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI.\n"
-                "4. Use the computer tool for UI actions on this real desktop.\n"
-                "5. Prefer read_ui_text (Accessibility) to read labels/values/menus "
+                "5. Use the computer tool for UI actions on this real desktop.\n"
+                "6. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
-                "6. When you need clarification or information only the human knows, "
+                "7. When you need clarification or information only the human knows, "
                 "call ask_user instead of guessing — unless read_memory already has it. "
                 "save_memory when they state a durable fact. "
                 "If they want the current display remembered, call save_screen_memory "
                 "(screenshot + description) — do not use the computer tool for that.\n"
-                "7. Before each turn, you may receive new user messages that arrived "
+                "8. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
-                "8. You may periodically receive evaluator coaching — treat it as "
+                "9. You may periodically receive evaluator coaching — treat it as "
                 "advisory guidance and adapt.\n"
-                "9. When the request is complete and no other action is required, "
+                "10. When the request is complete and no other action is required, "
                 "call mark_done (do not keep using the computer tool)."
             ),
         )
@@ -889,7 +924,7 @@ def run(
                     )
                     response = client.responses.create(
                         model=model,
-                        tools=TOOLS,
+                        tools=agent_tools(),
                         previous_response_id=response.id,
                         input=[_user_input_item(leftover)],
                     )
@@ -900,6 +935,7 @@ def run(
                     speak(client, "Done.")
                 log.finish("completed")
                 maybe_create_skill(client, log, voice=voice)
+                maybe_save_trace(log, task)
                 summary = "\n".join(last_messages).strip()
                 if summary:
                     return f"completed\nResult:\n{summary}"
@@ -957,7 +993,7 @@ def run(
 
             response = client.responses.create(
                 model=model,
-                tools=TOOLS,
+                tools=agent_tools(),
                 previous_response_id=response.id,
                 input=next_input,
             )
@@ -974,6 +1010,7 @@ def run(
             speak(client, "Done.")
         log.finish("completed", e.summary)
         maybe_create_skill(client, log, voice=voice)
+        maybe_save_trace(log, task)
         return f"completed\nResult:\n{e.summary}"
     except KeyboardInterrupt:
         log.finish("interrupted", "KeyboardInterrupt")
@@ -985,6 +1022,10 @@ def run(
         remove_agent(agent_id)
         if standalone:
             unregister_agent_process()
+            try:
+                stop_mcp()
+            except Exception:
+                pass
         if message_inbox is not None:
             try:
                 message_inbox.close()

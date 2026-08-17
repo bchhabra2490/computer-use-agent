@@ -70,8 +70,11 @@ then transcribes your request and lets an LLM choose tools:
 | Tool | Role |
 |------|------|
 | `start_task` | Run the computer-use agent on a concrete UI task |
+
+Easy tasks that succeed are saved as **action traces** under `traces/`. The next matching request (e.g. “open Chrome, go to …”) replays those keypresses/types with no screenshot loop. Wake word during replay falls back to the vision agent. Set `TRACE_REPLAY=0` / `TRACE_RECORD=0` to disable.
 | `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
 | `give_response_to_user` | Speak a reply (set `end_session` to stop) |
+| `mcp_call` | Tools from servers in `mcp.json` (search, GitHub, Linear, …) when configured |
 
 Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: wake word,
 then the instruction. While Jarvis is speaking, say the wake word again to
@@ -284,6 +287,37 @@ computer agent use `read_memory` / `save_memory` / `save_screen_memory`
 (skill `read-memory`). Say “remember that…” to store a fact, or “save the
 screen as memory” to snapshot the display. Those folders are gitignored.
 
+### MCP servers
+
+Connect apps by **logging in** in the browser (OAuth). No API key required for
+Linear / GitHub / Notion:
+
+```bash
+cua mcp login linear     # opens Linear OAuth
+cua mcp login github     # GitHub CLI browser login (`gh auth login`)
+cua mcp login notion
+cua mcp status
+```
+
+GitHub’s hosted MCP server does **not** support automatic OAuth registration.
+`cua mcp login github` uses the GitHub CLI instead (install with `brew install gh`).
+Already signed in to `gh`? The command reuses that session. Or pass a PAT:
+`cua mcp login github --token ghp_…`.
+
+Restart the orchestrator after login. Tokens live in `.runtime/mcp-auth/`
+(not git). `cua mcp logout linear` forgets them.
+
+Custom remote MCP:
+
+```bash
+cua mcp login acme --url https://mcp.example.com/mcp
+```
+
+API keys still work if you put `Authorization: Bearer …` in `mcp.json` instead
+of `"auth": "oauth"`. On startup CUA lists each server’s tools and exposes
+**`mcp_call`**. Voice questions that an MCP tool can answer skip `start_task`.
+Writes are allowed unless `MCP_READ_ONLY=1`. `mcp.json` is gitignored.
+
 Every computer-agent run writes a step log under `logs/<timestamp>_<task>/`.
 When a task **completes**, reusable workflows are saved automatically as skills
 (`SKILL_AUTO_SAVE=0` to require confirmation again).
@@ -312,7 +346,9 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `accessibility.py` — macOS AX tree → text for `read_ui_text`.
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks.
+- `traces/` + `traces.py` — saved easy-task action sequences (replay without vision).
 - `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`).
+- `mcp.json` + `mcp_client.py` + `mcp_auth.py` — MCP servers (`cua mcp login linear`).
 - `task_log.py` — per-run logs under `logs/`.
 - `stt.py` / `sarvam_stt.py` / `tts.py` / `sarvam_tts.py` — speech in/out
   (OpenAI or Sarvam).

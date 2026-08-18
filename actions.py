@@ -9,7 +9,9 @@ relative to the (possibly downscaled) screenshot we send it, so we track two sca
 factors and compose them before ever moving the mouse.
 """
 
+import os
 import signal
+import sys
 import threading
 import time
 import pyautogui
@@ -63,6 +65,75 @@ _BLOCKED_CHORDS = {
     frozenset({"ctrl", "\\"}),
     frozenset({"ctrl", "d"}),
 }
+
+# Globe / Fn triggers dictation and emoji UI on modern Mac keyboards.
+_BLOCKED_KEYS = frozenset({"fn", "function"})
+
+_MAC_MODIFIER_KEYS = ("command", "shift", "option", "ctrl", "fn")
+
+
+def _type_mode() -> str:
+    """How to inject text for computer-use ``type`` actions."""
+    raw = (os.environ.get("CUA_TYPE_MODE") or "").strip().lower()
+    if raw in {"unicode", "keys", "paste"}:
+        return raw
+    return "unicode" if sys.platform == "darwin" else "keys"
+
+
+def release_stuck_modifiers() -> None:
+    """Release common modifiers so the next keys go to the focused field, not shortcuts."""
+    for key in _MAC_MODIFIER_KEYS:
+        try:
+            pyautogui.keyUp(key)
+        except Exception:
+            pass
+
+
+def _mac_type_unicode(text: str, *, interval: float = 0.0) -> None:
+    """Type via Unicode events — avoids virtual-key shortcuts (dictation, emoji picker)."""
+    import Quartz
+
+    for ch in text:
+        if ch == "\r":
+            continue
+        if ch == "\n":
+            pyautogui.press("enter")
+            if interval:
+                time.sleep(interval)
+            continue
+        if ch == "\t":
+            pyautogui.press("tab")
+            if interval:
+                time.sleep(interval)
+            continue
+        for key_down in (True, False):
+            event = Quartz.CGEventCreateKeyboardEvent(None, 0, key_down)
+            Quartz.CGEventKeyboardSetUnicodeString(event, len(ch), ch)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        if interval:
+            time.sleep(interval)
+
+
+def _mac_type_paste(text: str) -> None:
+    """Paste via clipboard — fallback when Unicode injection fails in a field."""
+    import subprocess
+
+    subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+    release_stuck_modifiers()
+    pyautogui.hotkey("command", "v")
+
+
+def type_text(text: str, *, interval: float = 0.01) -> None:
+    """Inject text into the focused control."""
+    mode = _type_mode()
+    if mode == "paste" and sys.platform == "darwin":
+        _mac_type_paste(text)
+        return
+    if mode == "unicode" and sys.platform == "darwin":
+        release_stuck_modifiers()
+        _mac_type_unicode(text, interval=interval)
+        return
+    pyautogui.typewrite(text, interval=interval)
 
 
 def normalize_key(key: str) -> str:
@@ -283,11 +354,13 @@ class DesktopController:
             x, y = self._to_screen_coords(action["x"], action["y"])
             button = action.get("button", "left")
             keys = [normalize_key(k) for k in action.get("keys") or []]
-            for k in keys:
-                pyautogui.keyDown(k)
-            pyautogui.click(x, y, button="right" if button == "right" else "left")
-            for k in reversed(keys):
-                pyautogui.keyUp(k)
+            try:
+                for k in keys:
+                    pyautogui.keyDown(k)
+                pyautogui.click(x, y, button="right" if button == "right" else "left")
+            finally:
+                for k in reversed(keys):
+                    pyautogui.keyUp(k)
 
         elif atype == "double_click":
             x, y = self._to_screen_coords(action["x"], action["y"])
@@ -313,16 +386,21 @@ class DesktopController:
 
         elif atype == "keypress":
             keys = [normalize_key(k) for k in action["keys"]]
+            if any(k in _BLOCKED_KEYS for k in keys):
+                print(f"[skip] blocked keypress {keys} — would trigger system UI")
+                return
             if _is_blocked_chord(keys):
                 print(f"[skip] blocked keypress {keys} — would interrupt this agent")
                 return
+            release_stuck_modifiers()
             if len(keys) > 1:
                 pyautogui.hotkey(*keys)
             else:
                 pyautogui.press(keys[0])
 
         elif atype == "type":
-            pyautogui.typewrite(action["text"], interval=0.01)
+            release_stuck_modifiers()
+            type_text(action["text"], interval=0.01)
 
         elif atype == "drag":
             path = action["path"]

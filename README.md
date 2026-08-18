@@ -236,7 +236,7 @@ STATUS_TRAY=0 python orchestrator.py   # disable auto-start
 - STT: `STT_PROVIDER=openai` (default) uses Realtime `gpt-live-transcribe`
   (`STT_MODEL`); ends after `STT_IDLE_SECONDS` with no new words.
   `STT_PROVIDER=sarvam` records until silence then Sarvam Saaras
-  (`SARVAM_STT_MODEL=saaras:v3`, needs `SARVAM_API_KEY`)
+  (`SARVAM_STT_MODEL=saaras:v3`, needs `SARVAM_API_KEY`).
 - Wake models download once into `models/wake/` (`WAKE_MODEL`, `WAKE_PHRASE`,
   `WAKE_MODE=model|phrase`, `WAKE_THRESHOLD`)
 

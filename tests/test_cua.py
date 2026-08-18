@@ -108,6 +108,16 @@ class MainTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cua.main(["nope"])
 
+    def test_observe_list_dispatches(self) -> None:
+        with patch("observe.cmd_list", return_value=0) as cmd:
+            self.assertEqual(cua.main(["observe", "list"]), 0)
+            cmd.assert_called_once()
+
+    def test_observe_accept_all_dispatches(self) -> None:
+        with patch("observe.cmd_accept", return_value=0) as cmd:
+            self.assertEqual(cua.main(["observe", "accept", "--all"]), 0)
+            cmd.assert_called_once_with(name=None, all_drafts=True)
+
 
 if __name__ == "__main__":
     unittest.main()

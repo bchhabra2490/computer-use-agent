@@ -50,6 +50,10 @@ cua skills condense            # rewrite verbose skills/*/SKILL.md (LLM)
 cua skills condense --dry-run  # show what would change; do not write
 cua skills merge --dry-run     # propose duplicate merges; do not delete
 cua skills merge               # merge duplicates and remove the extras
+cua observe start              # separate daemon: log your clicks, draft memories/skills
+cua observe list               # pending drafts under .runtime/observe/proposed/
+cua observe accept --all       # write accepted drafts into memory/ and skills/
+cua observe stop
 ```
 
 `cua start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
@@ -57,6 +61,17 @@ and appends logs to `logs/cua.log`. The first start also installs a `cua` shim
 to `~/.local/bin` (and Homebrew `bin` if writable) so the command works from any
 directory. If `cua` is not found, run `./cua start` from this repo, then add
 `~/.local/bin` to your PATH.
+
+`cua observe` is a **separate** process (not started by `cua start`). It watches
+your own mouse activity, logs cheap metadata (app, window, URL), and takes a
+screenshot when you switch context or sit idle for 3 seconds (the display
+that currently holds the focused window, not only the primary). Those captures
+accumulate for **10 minutes** (`OBSERVE_DRAFT_SECONDS=600`) before an extract
+is written to `.runtime/observe/proposed/` — nothing is written to `memory/` or
+`skills/` until `cua observe accept`. Stopping earlier than 10 minutes does not
+create a draft. Grant Accessibility to the terminal that runs the observer so
+the listen-only event tap can see clicks; password managers are skipped. The
+observer pauses while a computer-use job is driving the pointer.
 
 Keyboard barge-in (Space / Esc / Enter) needs a focused terminal — use the wake
 word to interrupt TTS when running as a daemon.
@@ -378,7 +393,8 @@ When a task **completes**, reusable workflows are saved automatically as skills
 
 ## Extending it
 
-- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua skills condense` / `cua skills merge`).
+- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua observe` / `cua skills condense` / `cua skills merge`).
+- `observe.py` — passive click/scroll observer; drafts under `.runtime/observe/proposed/`.
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).

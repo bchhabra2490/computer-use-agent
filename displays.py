@@ -159,6 +159,54 @@ def _keep_window(info: dict[str, Any]) -> bool:
     return w >= _MIN_WINDOW_PX and h >= _MIN_WINDOW_PX
 
 
+def frontmost_window_info(
+    app: str,
+    *,
+    windows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """First on-screen layer-0 window for ``app`` (CG list is front-to-back)."""
+    needle = (app or "").strip().lower()
+    if not needle:
+        return None
+    raw = windows if windows is not None else _cg_window_list()
+    for info in raw:
+        if not _keep_window(info):
+            continue
+        if _window_owner(info).lower() == needle:
+            return info
+    return None
+
+
+def monitor_for_window(
+    info: dict[str, Any],
+    monitors: list[dict],
+) -> dict | None:
+    bounds = _window_bounds(info)
+    if bounds is None:
+        return None
+    center = window_center_in_desktop(bounds, monitors)
+    if center is None:
+        return None
+    return monitor_containing_point(center[0], center[1], monitors)
+
+
+def monitor_for_app_window(
+    app: str,
+    *,
+    windows: list[dict[str, Any]] | None = None,
+    monitors: list[dict] | None = None,
+) -> dict | None:
+    """Display that currently holds ``app``'s frontmost window."""
+    info = frontmost_window_info(app, windows=windows)
+    if info is None:
+        return None
+    if monitors is None:
+        from actions import list_monitors
+
+        monitors = list_monitors()
+    return monitor_for_window(info, monitors)
+
+
 def assign_windows_to_monitors(
     windows: list[dict[str, Any]],
     monitors: list[dict],

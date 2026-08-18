@@ -4,6 +4,12 @@ Runs the voice orchestrator in the background (detached session, logs to
 ``logs/cua.log``). ``cua start`` also installs a ``cua`` shim on PATH when
 possible so the command works from any directory.
 
+Passive desktop observer (separate process, drafts only)::
+
+    cua observe start
+    cua observe list
+    cua observe accept --all
+
 MCP apps (Linear, GitHub, …) connect with browser login::
 
     cua mcp login linear
@@ -407,6 +413,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Propose merges; do not write or delete",
     )
 
+    obs_p = sub.add_parser(
+        "observe",
+        help="Passive desktop observer (draft memories/skills from your own clicks)",
+    )
+    obs_sub = obs_p.add_subparsers(dest="observe_command", required=True)
+    obs_sub.add_parser("start", help="Start the observer daemon (does not start with cua start)")
+    obs_sub.add_parser("stop", help="Stop the observer daemon")
+    obs_sub.add_parser("status", help="Show observer pid and pending draft count")
+    obs_sub.add_parser("list", help="List proposed drafts")
+    accept_p = obs_sub.add_parser(
+        "accept",
+        help="Write a proposed draft into memory/ and skills/",
+    )
+    accept_p.add_argument(
+        "id",
+        nargs="?",
+        default=None,
+        help="Draft folder name (from cua observe list)",
+    )
+    accept_p.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_drafts",
+        help="Accept every proposed draft",
+    )
+    reject_p = obs_sub.add_parser("reject", help="Discard a proposed draft")
+    reject_p.add_argument("id", help="Draft folder name (from cua observe list)")
+
     args = parser.parse_args(argv)
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
@@ -449,6 +483,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.skills_command == "merge":
             return cmd_merge_skills(names=args.names, dry_run=args.dry_run)
+        return 2
+    if args.command == "observe":
+        import observe as observe_mod
+
+        if args.observe_command == "start":
+            return observe_mod.cmd_start()
+        if args.observe_command == "stop":
+            return observe_mod.cmd_stop()
+        if args.observe_command == "status":
+            return observe_mod.cmd_status()
+        if args.observe_command == "list":
+            return observe_mod.cmd_list()
+        if args.observe_command == "accept":
+            return observe_mod.cmd_accept(name=args.id, all_drafts=args.all_drafts)
+        if args.observe_command == "reject":
+            return observe_mod.cmd_reject(name=args.id)
         return 2
     parser.print_help()
     return 2

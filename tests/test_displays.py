@@ -98,6 +98,24 @@ class WindowGeometryTests(unittest.TestCase):
         apps = {(r["app"], r["monitor_index"]) for r in rows}
         self.assertEqual(apps, {("Google Chrome", 1), ("Slack", 0)})
 
+    def test_frontmost_window_is_first_in_z_order_not_largest(self) -> None:
+        windows = [
+            _cg_window("Code", "observe.py", x=200, y=80, w=400, h=300),
+            _cg_window("Code", "huge", x=-1400, y=0, w=1400, h=900),
+        ]
+        info = disp.frontmost_window_info("Code", windows=windows)
+        self.assertIsNotNone(info)
+        self.assertEqual(disp._window_title(info), "observe.py")
+
+    def test_monitor_for_app_window_is_the_focused_display(self) -> None:
+        windows = [
+            _cg_window("Safari", "Mail", x=-1400, y=100, w=800, h=600),
+        ]
+        mon = disp.monitor_for_app_window("Safari", windows=windows, monitors=DUAL)
+        self.assertIsNotNone(mon)
+        self.assertEqual(mon["index"], 0)
+        self.assertFalse(mon["main"])
+
 
 class OccupancyFormatTests(unittest.TestCase):
     def test_lists_windows_per_display(self) -> None:

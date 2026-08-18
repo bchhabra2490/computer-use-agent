@@ -267,9 +267,21 @@ def list_monitors() -> list[dict]:
                 "scale": scale,
                 "native_width": int(round(w * scale)),
                 "native_height": int(round(h * scale)),
+                "display_id": _ns_display_id(s),
             }
         )
     return monitors
+
+
+def _ns_display_id(screen) -> int | None:
+    """CGDirectDisplayID from an NSScreen, if available."""
+    try:
+        raw = screen.deviceDescription().objectForKey_("NSScreenNumber")
+        if raw is None:
+            return None
+        return int(raw)
+    except Exception:
+        return None
 
 
 def format_display_context(

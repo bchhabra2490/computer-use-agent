@@ -89,5 +89,33 @@ class KeypressBlockTests(unittest.TestCase):
         press.assert_not_called()
 
 
+class BrowserOverlayDismissTests(unittest.TestCase):
+    def test_type_sends_esc_before_typing(self) -> None:
+        ctrl = act.DesktopController()
+        with (
+            patch.object(act.pyautogui, "press") as press,
+            patch.object(act, "release_stuck_modifiers"),
+            patch.object(act, "type_text") as type_text,
+            patch.object(act.time, "sleep"),
+        ):
+            ctrl._run_one({"type": "type", "text": "hello"})
+
+        press.assert_called_once_with("esc")
+        type_text.assert_called_once()
+
+    def test_keypress_tab_dismisses_overlay_then_presses_tab(self) -> None:
+        ctrl = act.DesktopController()
+        with (
+            patch.object(act.pyautogui, "press") as press,
+            patch.object(act, "release_stuck_modifiers"),
+            patch.object(act.time, "sleep"),
+        ):
+            ctrl._run_one({"type": "keypress", "keys": ["TAB"]})
+
+        self.assertGreaterEqual(press.call_count, 2)
+        self.assertEqual(press.call_args_list[0].args[0], "esc")
+        self.assertEqual(press.call_args_list[1].args[0], "tab")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1099,22 +1099,25 @@ def _capture_primary_png() -> bytes | None:
 
 def _capture_focused_display(app: str) -> tuple[bytes | None, dict | None]:
     """Screenshot the monitor that holds ``app``'s focused window."""
-    monitor = None
-    try:
-        from displays import monitor_for_app_window
+    from log_overlay import pause_overlay_for_capture
 
-        monitor = monitor_for_app_window(app)
-    except Exception:
+    with pause_overlay_for_capture():
         monitor = None
-    png = None
-    display_id = (monitor or {}).get("display_id")
-    if display_id:
-        png = _capture_cg_display(int(display_id))
-    if not png:
-        png = _capture_primary_png()
-    if png:
-        png = _downscale_png(png)
-    return png, monitor
+        try:
+            from displays import monitor_for_app_window
+
+            monitor = monitor_for_app_window(app)
+        except Exception:
+            monitor = None
+        png = None
+        display_id = (monitor or {}).get("display_id")
+        if display_id:
+            png = _capture_cg_display(int(display_id))
+        if not png:
+            png = _capture_primary_png()
+        if png:
+            png = _downscale_png(png)
+        return png, monitor
 
 
 def _capture_png_bytes(app: str = "") -> bytes | None:

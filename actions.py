@@ -334,7 +334,10 @@ class DesktopController:
         """Capture the real screen, downscale for the API, return PNG bytes.
         Records the resulting image size so future action coordinates (which are
         relative to this image) can be remapped correctly."""
-        img = pyautogui.screenshot()  # native pixel resolution
+        from log_overlay import pause_overlay_for_capture
+
+        with pause_overlay_for_capture():
+            img = pyautogui.screenshot()  # native pixel resolution
         if img.width > self.screenshot_max_width:
             ratio = self.screenshot_max_width / img.width
             img = img.resize((self.screenshot_max_width, round(img.height * ratio)))

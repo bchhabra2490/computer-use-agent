@@ -233,6 +233,9 @@ WAKE_MODEL=hey_bob.onnx WAKE_PHRASE="Hey Bob" python orchestrator.py
 A small **menu-bar icon** starts with the orchestrator or agent:
 
 - **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
+- **On-screen overlay** — the same logs on a transparent, click-through panel
+  (prefers a second display so computer-use screenshots stay clean). On a
+  single display it hides for the screenshot, then comes back. `STATUS_OVERLAY=0` to hide.
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
   **Add Memory** (screenshot + description), in-progress agents,

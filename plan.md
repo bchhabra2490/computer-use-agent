@@ -1,6 +1,6 @@
 # Plan
 
-Seven follow-on tracks. The voice loop (wake → STT → orchestrator → computer agent) stays as it is; these sit beside it or behind the same interfaces.
+Eight follow-on tracks. The voice loop (wake → STT → orchestrator → computer agent) stays as it is; these sit beside it or behind the same interfaces.
 
 ## 1. Passive activity tracker (skills + memories)
 
@@ -214,3 +214,41 @@ Skills should say “use the GitHub MCP” (or search MCP) instead of “open th
 **Later (optional).** Expose CUA itself as an MCP **server** (`start_task`, `ask_user`, memories, traces) so Cursor or another agent can hand a desktop job to this process. Client-in-the-voice-loop is the latency win; server-out is for IDE integration.
 
 **Done when.** With a search (or Linear) server in `mcp.json`, “Hey Rekha, what’s in Linear for checkout?” answers from MCP without taking the mouse, and a CU run that needs a URL/issue id calls the same client instead of scraping Google in `run_terminal`. Minimi (§4) is just another server on this client.
+
+## 8. Point-at overlay + all-display screenshots (from Clicky)
+
+Steal three ideas from [Clicky](https://github.com/farzaa/clicky): a **teacher overlay that points** without stealing the pointer, **every monitor in the vision prompt** with an index, and a **non-activating overlay** that can sit on any display while CU runs elsewhere. Clicky is a companion that explains; we stay a doer that can also *show*. Do not replace `start_task` with overlay-only.
+
+### 8a. Point-at flow
+
+Add a cheap orchestrator action (e.g. `point_at`) beside `start_task` / `ask_user` / `give_response_to_user`.
+
+**Loop.** Screenshot the relevant display(s) → model names a target → overlay flies there → optional one-sentence TTS. No `pyautogui` click. Window behavior is §8c. Parse tags like Clicky’s `[POINT:x,y:label:screenN]`, map `screenN` to `list_monitors()` geometry, animate on a bezier, then fade out after TTS (transient presence — not a permanent buddy cursor).
+
+**When to use it.** “Where is that button?”, mid-task coaching, confirm a target before `--auto` clicks. CU remains the hands; point-at is the teacher. Overlay xy is ephemeral UI, **not** durable skills/traces (those stay menus/hotkeys/AX).
+
+**Done when.** “Hey Jarvis, point at the Displays pane” speaks a short hint and the overlay lands on the right control on the correct monitor, while the user’s real pointer does not jump.
+
+### 8b. Screenshots from all displays, index-marked
+
+Today occupancy text lists which app sits on which monitor, but computer-use screenshots are **primary only**. Clicky sends every display, labeled, so `screenN` in `POINT` (and any click/point decision) is unambiguous.
+
+**Capture.** On each CU turn (and on `point_at`), grab every attached display (Quartz / ScreenCaptureKit / per-`display_id` capture already used by observe). Downscale like today’s CU cap. Attach images as `screen 0 (Built-in, secondary)`, `screen 1 (Studio Display, main / primary)` — same indexes as `list_monitors()` / occupancy.
+
+**Prompt.** Geometry + occupancy already exist in `format_display_context` / `format_monitor_occupancy`. Add: “Image N is monitor index N. Coordinates in POINT or computer actions are relative to that image, not a stitched virtual desktop.” If token cost hurts, send all displays on the first turn of a task (and on `point_at`), then only the display that holds the target app until focus changes.
+
+**Done when.** A window on the Studio Display is visible to the model as `screen 1`, `point_at` can land there, and CU is no longer guessing from a primary-only PNG plus a text hint that Slack is on another monitor.
+
+### 8c. Non-activating overlay (not the tray)
+
+The macOS **tray is status** (idle / listening / agent running). It does not teach. Clicky’s overlay is a transparent `NSPanel` that **joins all Spaces** and **does not become key** (`nonactivatingPanel`): the user keeps typing in Chrome while the buddy cursor moves. That is the right shape here.
+
+**First slice (logs).** A click-through, non-activating panel in the tray process shows live `app_status` logs. Prefers a **secondary** display so today’s primary-only CU screenshots do not include it. `ignoresMouseEvents` so clicks/scrolls pass through. `sharingType = none` so window-list captures skip it. On a **single** display, screenshots hide the panel for the capture and show it again after. `STATUS_OVERLAY=0` disables it. Point-at cursor comes later on this same window class.
+
+**Window.** Borderless, ignore-mouse except the drawn cursor/label if we want hover later (default: click-through so it never fights CU or the user). `canJoinAllSpaces` + `fullScreenAuxiliary` so it survives Space switches and fullscreen apps. Never `makeKeyAndOrderFront`. Never dock icon for this window.
+
+**Which display.** The overlay can sit on the **Studio Display** (or whichever `screenN` the tag names) while computer-use still injects clicks on **primary**, or the reverse. Do not assume one fullscreen panel covering the virtual desktop; one panel per target monitor (or move a single panel’s frame to that display’s `list_monitors()` rect). Pointing on monitor 1 must not require the real pointer to leave monitor 0.
+
+**Lifetime.** Fade in for the turn (wake / `point_at` / mid-CU coach), fade out after TTS + a short idle. Optional: keep a tiny cursor while a CU job is running so the user can see where the *agent* is about to click, still without becoming key.
+
+**Done when.** You can type in a focused window on one display while the overlay points at a control on another, Spaces/fullscreen do not hide it, and clicking through the overlay does not steal focus or interrupt `DesktopController`.

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from app_status import (
     STATUS_PATH,
+    ack_overlay_hidden,
     active_agents,
     format_tooltip,
     log as status_log,
@@ -172,7 +173,7 @@ def main() -> None:
         NSVariableStatusItemLength,
         NSWorkspace,
     )
-    from Foundation import NSTimer  # type: ignore
+    from Foundation import NSDistributedNotificationCenter, NSTimer  # type: ignore
 
     def _make_template_icon():
         try:
@@ -192,6 +193,7 @@ def main() -> None:
         statusItem = objc.ivar()
         menu = objc.ivar()
         lastSig = objc.ivar()
+        overlay = objc.ivar()
 
         def init(self):
             self = objc.super(TrayController, self).init()
@@ -213,6 +215,27 @@ def main() -> None:
             self.menu = NSMenu.alloc().init()
             self.statusItem.setMenu_(self.menu)
             self.lastSig = None
+            self.overlay = None
+            try:
+                from log_overlay import LogOverlay, overlay_enabled
+
+                if overlay_enabled():
+                    self.overlay = LogOverlay()
+                    print("[tray] log overlay on (click-through, non-activating)", flush=True)
+            except Exception as e:
+                print(f"[tray] log overlay unavailable: {e}", flush=True)
+            try:
+                from log_overlay import OVERLAY_HIDE_NOTE, OVERLAY_SHOW_NOTE
+
+                center = NSDistributedNotificationCenter.defaultCenter()
+                center.addObserver_selector_name_object_(
+                    self, "hideLogOverlay:", OVERLAY_HIDE_NOTE, None
+                )
+                center.addObserver_selector_name_object_(
+                    self, "showLogOverlay:", OVERLAY_SHOW_NOTE, None
+                )
+            except Exception as e:
+                print(f"[tray] overlay hide/show notes unavailable: {e}", flush=True)
             self.applyStatus(read_status())
 
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -224,6 +247,24 @@ def main() -> None:
             )
             return self
 
+        def hideLogOverlay_(self, _note) -> None:
+            overlay = getattr(self, "overlay", None)
+            if overlay is not None:
+                try:
+                    overlay.hide()
+                except Exception:
+                    pass
+            ack_overlay_hidden(True)
+
+        def showLogOverlay_(self, _note) -> None:
+            overlay = getattr(self, "overlay", None)
+            if overlay is not None:
+                try:
+                    overlay.show()
+                except Exception:
+                    pass
+            ack_overlay_hidden(False)
+
         def tick_(self, _timer) -> None:
             data = read_status()
             agents = active_agents(data)
@@ -231,7 +272,7 @@ def main() -> None:
                 f"{data.get('state')}|{data.get('detail')}|{data.get('updated_at')}|"
                 f"{len(data.get('logs') or [])}|{len(agents)}|"
                 f"{data.get('done_requested')}|{data.get('stt_active')}|"
-                f"{data.get('send_requested')}"
+                f"{data.get('send_requested')}|{data.get('overlay_hidden')}"
             )
             if sig == self.lastSig:
                 return
@@ -247,6 +288,12 @@ def main() -> None:
                     button.setTitle_(glyph)
                 button.setToolTip_(format_tooltip(data))
             self.rebuildMenu(data)
+            overlay = getattr(self, "overlay", None)
+            if overlay is not None:
+                try:
+                    overlay.apply_status(data)
+                except Exception:
+                    pass
 
         @objc.python_method
         def rebuildMenu(self, data: dict) -> None:

@@ -45,6 +45,8 @@ def _default_state() -> dict[str, Any]:
         "send_requested": False,
         "stt_active": False,
         "agents": [],  # active subagents / computer-agent jobs
+        "overlay_hidden": False,
+        "overlay_ack_hidden": False,
     }
 
 
@@ -129,6 +131,23 @@ def clear_logs() -> None:
     with _lock:
         data = _read()
         data["logs"] = []
+        _write(data)
+
+
+def set_overlay_hidden(hidden: bool) -> None:
+    """Ask the tray overlay to hide (True) or show (False) for a screenshot."""
+    with _lock:
+        data = _read()
+        data["overlay_hidden"] = bool(hidden)
+        data["overlay_ack_hidden"] = False
+        _write(data)
+
+
+def ack_overlay_hidden(hidden: bool) -> None:
+    """Tray confirms the panel is actually off-screen (or back)."""
+    with _lock:
+        data = _read()
+        data["overlay_ack_hidden"] = bool(hidden)
         _write(data)
 
 

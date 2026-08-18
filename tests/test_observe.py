@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -439,6 +440,7 @@ class FocusedDisplayCaptureTests(unittest.TestCase):
             patch.object(observe, "_capture_cg_display", return_value=b"PNG") as cg,
             patch.object(observe, "_capture_primary_png") as primary,
             patch.object(observe, "_downscale_png", side_effect=lambda data: data),
+            patch("log_overlay.pause_overlay_for_capture", lambda *_a, **_k: nullcontext()),
         ):
             png, monitor = observe._capture_focused_display("Google Chrome")
         self.assertEqual(png, b"PNG")
@@ -453,6 +455,7 @@ class FocusedDisplayCaptureTests(unittest.TestCase):
             patch.object(observe, "_capture_cg_display") as cg,
             patch.object(observe, "_capture_primary_png", return_value=b"PRI"),
             patch.object(observe, "_downscale_png", side_effect=lambda data: data),
+            patch("log_overlay.pause_overlay_for_capture", lambda *_a, **_k: nullcontext()),
         ):
             png, monitor = observe._capture_focused_display("Code")
         self.assertEqual(png, b"PRI")

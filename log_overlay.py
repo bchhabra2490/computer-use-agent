@@ -66,6 +66,22 @@ def format_overlay_text(data: dict[str, Any] | None = None) -> str:
     return format_tooltip(data, max_log_lines=OVERLAY_LOG_LINES)
 
 
+def overlay_owner_alive(data: dict[str, Any] | None = None) -> bool:
+    """True while the orchestrator or a standalone agent process is running."""
+    snap = data if data is not None else read_status()
+    return pid_alive(snap.get("orchestrator_pid")) or pid_alive(snap.get("agent_pid"))
+
+
+def overlay_should_show(data: dict[str, Any] | None = None) -> bool:
+    """Panel is visible only while an owner process is alive and not mid-capture."""
+    if not overlay_enabled():
+        return False
+    snap = data if data is not None else read_status()
+    if snap.get("overlay_hidden"):
+        return False
+    return overlay_owner_alive(snap)
+
+
 def should_hide_overlay_for_capture(monitors: list[dict[str, Any]] | None = None) -> bool:
     """True when a full-display screenshot would include the overlay."""
     if not overlay_enabled():
@@ -224,8 +240,31 @@ class LogOverlay:
         if self.panel is not None:
             self.panel.orderFrontRegardless()
 
+    def destroy(self) -> None:
+        """Take the panel off screen and release it (call on tray quit)."""
+        panel = self.panel
+        self.panel = None
+        self.text_view = None
+        if panel is None:
+            return
+        try:
+            panel.orderOut_(None)
+        except Exception:
+            pass
+        try:
+            panel.setReleasedWhenClosed_(True)
+        except Exception:
+            pass
+        try:
+            panel.close()
+        except Exception:
+            pass
+
     def apply_status(self, data: dict[str, Any]) -> None:
         if self.panel is None or self.text_view is None:
+            return
+        if not overlay_should_show(data):
+            self.hide()
             return
         text = format_overlay_text(data)
         if text != self._last_text:
@@ -235,7 +274,4 @@ class LogOverlay:
                 self.panel.setFrame_display_(self._cocoa_frame(), False)
             except Exception:
                 pass
-        if data.get("overlay_hidden"):
-            self.hide()
-        else:
-            self.show()
+        self.show()

@@ -213,9 +213,10 @@ RUN_TERMINAL_TOOL = {
         "Run a shell command on this Mac and return stdout, stderr, and exit code. "
         "Prefer this for file/git/CLI work, checking paths, installing packages, or "
         "anything faster than driving the Terminal GUI. Do not use for interactive "
-        "programs that need a TTY (vim, ssh password prompts, etc.). Avoid "
-        "destructive commands (rm -rf, diskutil erase, etc.) unless the user "
-        "explicitly asked."
+        "programs that need a TTY (vim, ssh password prompts, etc.). Do not sleep "
+        "to wait out a song or video, and do not use macOS `say` for user-facing "
+        "speech (use mark_done / ask_user). Avoid destructive commands (rm -rf, "
+        "diskutil erase, etc.) unless the user explicitly asked."
     ),
     "parameters": {
         "type": "object",

@@ -43,6 +43,11 @@ class ToolRegistryTests(unittest.TestCase):
             out = tr.run_shared_tool("list_open_apps", {"unused": False})
         self.assertIn("Running apps", out)
 
+    def test_run_terminal_forbids_media_sleep(self) -> None:
+        desc = tr.RUN_TERMINAL_TOOL["description"].lower()
+        self.assertIn("sleep", desc)
+        self.assertIn("say", desc)
+
     def test_unknown_shared_raises(self) -> None:
         with self.assertRaises(KeyError):
             tr.run_shared_tool("start_task", {"task": "x"})

@@ -49,6 +49,7 @@ class ContextBundleTests(unittest.TestCase):
             self.assertIn("… (truncated)", bundle.displays)
             self.assertEqual(bundle.skills, "skills")
             self.assertEqual(bundle.mcp, "mcp")
+            self.assertIn("sleep", bundle.not_to_do.lower())
 
     def test_desktop_block_joins_geometry(self) -> None:
         bundle = ctx.ContextBundle(
@@ -60,6 +61,19 @@ class ContextBundleTests(unittest.TestCase):
         )
         self.assertIn("geometry", bundle.desktop_block())
         self.assertIn("occupancy", bundle.desktop_block())
+
+
+class NotToDoTests(unittest.TestCase):
+    def test_loads_repo_not_to_do_list(self) -> None:
+        text = ctx.format_not_to_do()
+        self.assertIn("Not to do", text)
+        self.assertIn("sleep", text.lower())
+        self.assertIn("say", text.lower())
+        self.assertNotIn("sleep 272", text)
+
+    def test_missing_file_is_empty(self) -> None:
+        missing = Path("/tmp/does-not-exist-not-to-do.md")
+        self.assertEqual(ctx.format_not_to_do(path=missing), "")
 
 
 if __name__ == "__main__":

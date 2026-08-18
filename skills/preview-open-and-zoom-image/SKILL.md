@@ -15,8 +15,7 @@ description: >-
    - Press Command + 0 (⌘0) to set Actual Size.
 4. If the text/details are still small, increase magnification until readable:
    - Press Command + Plus (⌘+) repeatedly until details are clear from a normal viewing distance.
-5. Announce completion and wait for further instruction:
-   - Use the macOS speech command (or speak) to say a short confirmation such as: say 'Diagram is open and zoomed'.
+5. Call mark_done with a short spoken confirmation such as “The diagram is open and zoomed.” Do not use macOS `say`.
 
 Alternative for draw.io (.drawio) files:
 - Open the .drawio file in the draw.io web app (app.diagrams.net) in Chrome.
@@ -28,5 +27,5 @@ Alternative for draw.io (.drawio) files:
 - If Preview opens multiple images in one window, use the sidebar to select the correct image before fullscreening.
 - If full-screen keyboard shortcut is different (custom shortcuts), use View → Enter Full Screen from Preview's menu.
 - Use Command + 0 to return to Actual Size if you changed zoom and need to reset.
-- When using speech to confirm, ensure system audio is unmuted so the spoken confirmation is audible.
+- When using speech to confirm, call mark_done so Jarvis speaks. Do not use macOS `say`.
 - For very large images, it may be faster to set Actual Size and then use a trackpad pinch-to-zoom or Command + Plus to reach a comfortable readability level.

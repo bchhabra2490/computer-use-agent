@@ -283,6 +283,7 @@ Rules:
 - Keep the same `name`. Tighten the third-person description (what + when).
 - Body: markdown with ## Steps (numbered) and optional ## Tips. No YAML frontmatter in body.
 - Do not add capabilities, new tools, or extra apps.
+- Do not add sleep-for-duration, macOS `say`, or waiting in the shell until media finishes.
 - Do not remove confirmation gates, ask_user pauses, or "do not checkout / do not store passwords".
 - If the skill is already compact, set changed to false and omit description/body.
 

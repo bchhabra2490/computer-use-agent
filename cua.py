@@ -263,14 +263,9 @@ def _terminate(pid: int, *, wait: float = _STOP_WAIT_SECONDS) -> bool:
 
 def _stop_tray() -> None:
     try:
-        from app_status import pid_alive, read_status
+        from status_tray import stop_tray
 
-        tray = read_status().get("tray_pid")
-        if pid_alive(tray):
-            try:
-                os.kill(int(tray), signal.SIGTERM)
-            except OSError:
-                pass
+        stop_tray()
     except Exception:
         pass
 

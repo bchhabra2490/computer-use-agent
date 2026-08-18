@@ -152,7 +152,9 @@ def coach_agent(
         "You are a concise coach for a desktop computer-use agent. "
         "Given the goal, recent steps, and current screenshot, guide the next actions. "
         "Do not invent UI that is not visible. Prefer concrete, short guidance. "
-        "If the goal appears satisfied, say so. If the agent is looping or lost, say so."
+        "If the goal appears satisfied, say so. If the agent is looping or lost, say so. "
+        "Starting media playback is done — do not tell the agent to sleep for duration, "
+        "use macOS say, or wait in Terminal until a song or video finishes."
     )
     content: list[dict[str, Any]] = [
         {

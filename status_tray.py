@@ -14,6 +14,7 @@ Requires a GUI session (not pure SSH). AppKit must own the main thread.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -93,6 +94,37 @@ def ensure_tray_running() -> subprocess.Popen | None:
     except Exception as e:
         print(f"[tray] failed to start: {e}", file=sys.stderr)
         return None
+
+
+def stop_tray(*, wait: float = 1.5) -> None:
+    """Ask the menu-bar process to close its NSPanel and exit."""
+    if os.environ.get("STATUS_TRAY_CHILD", "").strip() == "1":
+        return
+    try:
+        pid = read_status().get("tray_pid")
+    except Exception:
+        return
+    if not pid_alive(pid):
+        return
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if pid == os.getpid():
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + max(0.0, wait)
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            try:
+                set_tray_pid(None)
+            except Exception:
+                pass
+            return
+        time.sleep(0.05)
 
 
 def _add_memory_from_tray() -> None:
@@ -247,6 +279,23 @@ def main() -> None:
             )
             return self
 
+        def teardownOverlay(self) -> None:
+            overlay = getattr(self, "overlay", None)
+            self.overlay = None
+            if overlay is None:
+                return
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
+
+        def applicationWillTerminate_(self, _notif) -> None:
+            self.teardownOverlay()
+            try:
+                set_tray_pid(None)
+            except Exception:
+                pass
+
         def hideLogOverlay_(self, _note) -> None:
             overlay = getattr(self, "overlay", None)
             if overlay is not None:
@@ -260,7 +309,12 @@ def main() -> None:
             overlay = getattr(self, "overlay", None)
             if overlay is not None:
                 try:
-                    overlay.show()
+                    from log_overlay import overlay_should_show
+
+                    if overlay_should_show(read_status()):
+                        overlay.show()
+                    else:
+                        overlay.hide()
                 except Exception:
                     pass
             ack_overlay_hidden(False)
@@ -272,7 +326,8 @@ def main() -> None:
                 f"{data.get('state')}|{data.get('detail')}|{data.get('updated_at')}|"
                 f"{len(data.get('logs') or [])}|{len(agents)}|"
                 f"{data.get('done_requested')}|{data.get('stt_active')}|"
-                f"{data.get('send_requested')}|{data.get('overlay_hidden')}"
+                f"{data.get('send_requested')}|{data.get('overlay_hidden')}|"
+                f"{data.get('orchestrator_pid')}|{data.get('agent_pid')}"
             )
             if sig == self.lastSig:
                 return
@@ -522,6 +577,7 @@ def main() -> None:
             signal_quit_orchestrator()
 
         def quitTray_(self, _sender) -> None:
+            self.teardownOverlay()
             try:
                 set_tray_pid(None)
             except Exception:
@@ -534,6 +590,22 @@ def main() -> None:
     # Keep a strong Python reference so the controller isn't GC'd.
     global _TRAY_CONTROLLER  # noqa: PLW0603
     _TRAY_CONTROLLER = TrayController.alloc().init()
+    app.setDelegate_(_TRAY_CONTROLLER)
+
+    def _signal_quit(_signum=None, _frame=None) -> None:
+        # Close the panel on the AppKit thread, then terminate.
+        NSApplication.sharedApplication().performSelectorOnMainThread_withObject_waitUntilDone_(
+            "terminate:",
+            None,
+            False,
+        )
+
+    try:
+        signal.signal(signal.SIGTERM, _signal_quit)
+        signal.signal(signal.SIGINT, _signal_quit)
+    except Exception:
+        pass
+
     print(f"[tray] menu bar ready — hover for status (watching {STATUS_PATH})", flush=True)
     app.run()
 

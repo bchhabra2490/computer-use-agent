@@ -80,7 +80,7 @@ from mcp_client import (
     stop_mcp,
 )
 from session import Session, bind_session, get_session
-from status_tray import ensure_tray_running
+from status_tray import ensure_tray_running, stop_tray
 from stt import POST_TTS_COOLDOWN, ask_user, listen_once
 from tools_registry import orchestrator_tools, run_shared_tool
 from wake import (
@@ -170,6 +170,8 @@ Available desktop skills the computer agent can load:
 {displays}
 
 {mcp}
+
+{not_to_do}
 """
 
 
@@ -1177,6 +1179,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         # Occupancy text can contain `{` from window titles; inject after format.
         return (
             SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
+            .replace("{not_to_do}", "__NOT_TO_DO__")
             .format(
                 skills=bundle.skills,
                 memories=bundle.memories,
@@ -1184,6 +1187,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 mcp_rule=mcp_rule,
             )
             .replace("__DISPLAYS__", bundle.displays)
+            .replace("__NOT_TO_DO__", bundle.not_to_do)
         )
 
     publisher = AgentMessagePublisher()
@@ -1343,6 +1347,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()
+        stop_tray()
         sess.enter("idle", "Orchestrator stopped")
         bind_audio(None)
         bind_session(None)
@@ -1362,6 +1367,7 @@ def main(argv: list[str] | None = None) -> None:
         run_orchestrator(auto=args.auto, max_steps=args.max_steps)
     except KeyboardInterrupt:
         print("\n[orchestrator] stopped.")
+        stop_tray()
         sys.exit(0)
 
 

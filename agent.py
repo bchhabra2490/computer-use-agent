@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import threading
 import uuid
 
 from openai import OpenAI
@@ -66,7 +67,7 @@ from skills import (
     read_skill_file,
     write_skill,
 )
-from status_tray import ensure_tray_running
+from status_tray import ensure_tray_running, stop_tray
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
@@ -445,7 +446,39 @@ def _extract_json_object(text: str) -> dict | None:
         return None
 
 
-def maybe_create_skill(client: OpenAI, log: TaskLog, *, voice: bool = False) -> None:
+def maybe_create_skill(
+    client: OpenAI,
+    log: TaskLog,
+    *,
+    voice: bool = False,
+    background: bool = True,
+) -> None:
+    """After a successful run, propose a reusable skill. Default: daemon thread.
+
+    Does not block the agent loop or the last TTS. Pass ``background=False``
+    to run inline (tests / non-voice). Interactive save prompts are skipped
+    in the background path.
+    """
+    if background:
+        def _work() -> None:
+            try:
+                _maybe_create_skill_impl(client, log, voice=voice, prompt_user=False)
+            except Exception as e:
+                print(f"[skills] review failed: {e}", flush=True)
+
+        threading.Thread(target=_work, name="skill-review", daemon=True).start()
+        print("[skills] reviewing run for a new skill in background…", flush=True)
+        return
+    _maybe_create_skill_impl(client, log, voice=voice, prompt_user=True)
+
+
+def _maybe_create_skill_impl(
+    client: OpenAI,
+    log: TaskLog,
+    *,
+    voice: bool = False,
+    prompt_user: bool = True,
+) -> None:
     """After a successful run, propose a reusable skill and save it automatically."""
     existing = format_skill_catalog()
     prompt = f"""You review a completed desktop computer-use task and decide whether to
@@ -458,6 +491,8 @@ Create a skill ONLY when:
 
 Do NOT create a skill for one-off tasks, trivial single clicks, or when an
 existing skill already covers it.
+Never write steps that sleep for a song/video duration, use macOS `say`,
+or wait in run_terminal until media finishes.
 
 Existing skills:
 {existing}
@@ -523,6 +558,10 @@ Respond with JSON only (no markdown fences):
     print(f"  {description}")
 
     if not auto_save:
+        if not prompt_user:
+            print("[skills] not saved (SKILL_AUTO_SAVE=0; background review cannot prompt).")
+            log.record("skill_create", "skipped_background_no_prompt", {"name": name})
+            return
         if voice:
             speak(
                 client,
@@ -620,6 +659,7 @@ def run(
     skill_catalog = bundle.skills
     memory_catalog = bundle.memories
     mcp_catalog = bundle.mcp
+    not_to_do = bundle.not_to_do
 
     print(f"\nTask: {task}")
     print(display_ctx)
@@ -627,6 +667,8 @@ def run(
     print(memory_catalog)
     if mcp_catalog:
         print(mcp_catalog)
+    if not_to_do:
+        print(not_to_do)
     log.record(
         "start",
         task,
@@ -696,6 +738,7 @@ def run(
                 f"{skill_catalog}\n\n"
                 f"{memory_catalog}\n\n"
                 f"{mcp_catalog}\n\n"
+                f"{not_to_do}\n\n"
                 "Workflow:\n"
                 "1. If a skill matches this task, call read_skill for it (and any "
                 "companion files you need) before using the computer tool. For "
@@ -715,7 +758,8 @@ def run(
                 "(do not scrape the tab bar with the computer tool).\n"
                 "4. Follow the skill’s steps; adapt to what you see on screen.\n"
                 "5. Use run_terminal for shell/CLI work (files, git, scripts, "
-                "path checks) when that is faster than the GUI.\n"
+                "path checks) when that is faster than the GUI. Never sleep for "
+                "media duration or use macOS say for spoken updates.\n"
                 "6. Use the computer tool for UI actions on this real desktop. "
                 "If Open windows by display lists the target app on another monitor, "
                 "activate or move to that screen — do not hunt only in the primary "
@@ -861,6 +905,7 @@ def run(
         remove_agent(agent_id)
         if standalone:
             unregister_agent_process()
+            stop_tray()
             if own_session:
                 bind_session(None)
             try:

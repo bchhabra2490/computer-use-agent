@@ -21,6 +21,10 @@ BUDGET_MEMORIES = int(os.environ.get("CONTEXT_BUDGET_MEMORIES", "2500"))
 BUDGET_MCP = int(os.environ.get("CONTEXT_BUDGET_MCP", "3500"))
 
 
+NOT_TO_DO_PATH = Path(__file__).resolve().parent / "not_to_do.md"
+BUDGET_NOT_TO_DO = int(os.environ.get("CONTEXT_BUDGET_NOT_TO_DO", "1200"))
+
+
 @dataclass
 class ContextBundle:
     displays: str
@@ -28,6 +32,7 @@ class ContextBundle:
     memories: str
     mcp: str
     geometry: str = ""
+    not_to_do: str = ""
 
     def desktop_block(self) -> str:
         parts = [p for p in (self.geometry, self.displays) if p.strip()]
@@ -40,6 +45,16 @@ def _clip(text: str, limit: int) -> str:
         return body
     keep = max(0, limit - 18)
     return body[:keep].rstrip() + "\n… (truncated)"
+
+
+def format_not_to_do(*, path: Path | None = None) -> str:
+    """Always-on don'ts for the agent and orchestrator."""
+    src = Path(path) if path is not None else NOT_TO_DO_PATH
+    try:
+        text = src.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return text
 
 
 def persist_ephemeral_desktop(
@@ -96,5 +111,6 @@ def assemble_context(
         memories=_clip(format_memory_catalog(), BUDGET_MEMORIES),
         mcp=_clip(format_mcp_catalog(), BUDGET_MCP),
         geometry=_clip(geometry, BUDGET_DISPLAYS) if geometry else "",
+        not_to_do=_clip(format_not_to_do(), BUDGET_NOT_TO_DO),
     )
     return bundle

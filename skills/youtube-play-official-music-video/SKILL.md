@@ -14,7 +14,8 @@ description: >-
    - Click the speaker icon at the bottom-left of the player so the slider is visible and not muted.
    - If the Chrome tab shows a muted icon, right-click the tab and choose "Unmute site."
    - Optionally ensure system volume is audible (use keyboard volume keys or system volume menu).
-7. No need to report anything back. Leave the video playing.
+7. No need to report anything back. Leave the video playing. Call mark_done once
+   playback is going — do not sleep for the video duration or wait for it to end.
 
 ## Tips
 - If multiple results look official, prefer the one uploaded by the verified/official artist channel or Vevo. Look for the channel name and upload date/quality.

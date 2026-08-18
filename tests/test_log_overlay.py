@@ -13,6 +13,8 @@ from log_overlay import (  # noqa: E402
     format_overlay_text,
     overlay_enabled,
     overlay_frame_top_left,
+    overlay_owner_alive,
+    overlay_should_show,
     overlay_target_monitor,
     pause_overlay_for_capture,
     should_hide_overlay_for_capture,
@@ -143,6 +145,39 @@ class OverlayHideForCaptureTests(unittest.TestCase):
             with pause_overlay_for_capture(monitors=[DUAL[1]]):
                 hidden.assert_called_with(True)
         hidden.assert_called_with(False)
+
+
+class OverlayLifetimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        env = patch.dict(os.environ, {"STATUS_OVERLAY": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_hidden_when_no_owner_process(self) -> None:
+        from unittest.mock import patch
+
+        data = {"orchestrator_pid": None, "agent_pid": None, "overlay_hidden": False}
+        with patch("log_overlay.pid_alive", return_value=False):
+            self.assertFalse(overlay_owner_alive(data))
+            self.assertFalse(overlay_should_show(data))
+
+    def test_shown_when_orchestrator_alive(self) -> None:
+        from unittest.mock import patch
+
+        data = {"orchestrator_pid": 42, "agent_pid": None, "overlay_hidden": False}
+        with patch("log_overlay.pid_alive", side_effect=lambda pid: pid == 42):
+            self.assertTrue(overlay_owner_alive(data))
+            self.assertTrue(overlay_should_show(data))
+
+    def test_stays_hidden_during_capture(self) -> None:
+        from unittest.mock import patch
+
+        data = {"orchestrator_pid": 42, "overlay_hidden": True}
+        with patch("log_overlay.pid_alive", return_value=True):
+            self.assertFalse(overlay_should_show(data))
 
 
 if __name__ == "__main__":

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -129,6 +131,8 @@ class OccupancyFormatTests(unittest.TestCase):
         self.assertIn("Google Chrome — YouTube - AC/DC", text)
         self.assertIn("Frontmost app: Google Chrome", text)
         self.assertIn("primary display only", text)
+        self.assertNotIn("Running apps:", text)
+        self.assertNotIn("Browser tabs:", text)
 
     def test_empty_monitor_and_single_display_omits_move_hint(self) -> None:
         single = [_monitor(0, "Built-in", main=True, x=0, y=0, width=1440, height=900)]
@@ -149,6 +153,85 @@ class OccupancyFormatTests(unittest.TestCase):
             )
             self.assertIn("Open windows by display", text)
             self.assertFalse((root / "apps" / "displays.md").exists())
+
+
+class RunningAppsAndTabsTests(unittest.TestCase):
+    def test_parse_browser_tabs_payload(self) -> None:
+        raw = json.dumps(
+            [
+                {
+                    "browser": "Google Chrome",
+                    "windows": [
+                        {
+                            "index": 1,
+                            "tab_count": 2,
+                            "tabs": [
+                                {
+                                    "title": "YouTube",
+                                    "url": "https://www.youtube.com/watch?v=abc",
+                                    "active": True,
+                                },
+                                {
+                                    "title": "GitHub",
+                                    "url": "https://github.com/bchhabra2490/computer-use-agent",
+                                    "active": False,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ]
+        )
+        browsers = disp.parse_browser_tabs_payload(raw)
+        self.assertEqual(len(browsers), 1)
+        tabs = browsers[0]["windows"][0]["tabs"]
+        self.assertEqual(tabs[0]["title"], "YouTube")
+        self.assertTrue(tabs[0]["active"])
+        self.assertEqual(len(tabs), 2)
+
+    def test_format_includes_apps_and_tabs_when_provided(self) -> None:
+        single = [_monitor(0, "Built-in", main=True, x=0, y=0, width=1440, height=900)]
+        tabs = [
+            {
+                "browser": "Google Chrome",
+                "windows": [
+                    {
+                        "index": 1,
+                        "tabs": [
+                            {
+                                "title": "YouTube - AC/DC",
+                                "url": "https://www.youtube.com/watch?v=l482T0yNkeo",
+                                "active": True,
+                            },
+                            {
+                                "title": "Linear",
+                                "url": "https://linear.app/team/issue/ABC-1",
+                                "active": False,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+        text = disp.format_monitor_occupancy(
+            monitors=single,
+            occupancy=[],
+            frontmost="Google Chrome",
+            apps=["Cursor", "Google Chrome", "Slack"],
+            tabs=tabs,
+        )
+        self.assertIn("Running apps:", text)
+        self.assertIn("Google Chrome (frontmost)", text)
+        self.assertIn("Browser tabs:", text)
+        self.assertIn("Google Chrome (2 tabs)", text)
+        self.assertIn("* YouTube - AC/DC", text)
+        self.assertIn("- Linear", text)
+        self.assertNotIn("primary display only", text)
+
+    def test_list_tabs_disabled(self) -> None:
+        with patch.dict("os.environ", {"DESKTOP_LIST_TABS": "0"}):
+            self.assertFalse(disp.list_tabs_enabled())
+            self.assertEqual(disp.list_browser_tabs(), [])
 
 
 class LiveLayoutMemorySkipTests(unittest.TestCase):

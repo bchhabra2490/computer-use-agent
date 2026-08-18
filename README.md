@@ -32,6 +32,8 @@ or your IDE's terminal):
 - **Screen Recording** — needed for `pyautogui.screenshot()`
 - **Accessibility** — needed for `read_ui_text` (and `pyautogui` keyboard/mouse)
 - **Microphone** — needed for voice input (`orchestrator.py`)
+- **Automation** — needed to list Chrome/Safari tabs (`list_open_apps`); grant
+  your terminal app control of those browsers when macOS prompts
 
 You'll need to restart the terminal app after granting these.
 
@@ -318,8 +320,11 @@ bullets, keeps the latest preference) so later prompts stay short.
 With more than one display attached, each voice turn and computer-use
 run snapshots which apps/windows are on which monitor and injects that
 into the model prompt (live context under `.runtime/desktop.txt`, not
-durable `memory/`). Screenshots and click coordinates stay on the primary
-display.
+durable `memory/`). The same snapshot includes **running apps** and
+**open browser tabs** (Chrome / Chromium / Brave / Edge / Safari titles and
+URLs via AppleScript; browsers are not launched). Call `list_open_apps` for
+a fresh list. Set `DESKTOP_LIST_TABS=0` to skip tab enumeration. Screenshots
+and click coordinates stay on the primary display.
 Say “remember that…” to store a fact yourself, or “save the screen as
 memory” to snapshot the display. Set `MEMORY_EXTRACT=0` or
 `MEMORY_CONDENSE=0` to disable. Those folders are gitignored.
@@ -381,6 +386,8 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).
 - `evaluator.py` — difficulty router + periodic coaching for the computer agent.
 - `accessibility.py` — macOS AX tree → text for `read_ui_text`.
+- `displays.py` — live windows, running apps, and browser tabs for prompt context
+  (`list_open_apps`).
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks (`cua skills condense` / `cua skills merge`).
 - `traces/` + `traces.py` — saved easy-task action sequences (replay without vision).

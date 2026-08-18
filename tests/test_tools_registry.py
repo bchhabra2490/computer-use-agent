@@ -21,6 +21,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("give_response_to_user", names)
         self.assertIn("who_am_i", names)
         self.assertIn("ask_user", names)
+        self.assertIn("list_open_apps", names)
         self.assertNotIn("computer", names)
         self.assertNotIn("mark_done", names)
 
@@ -30,12 +31,17 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("computer", names)
         self.assertIn("mark_done", names)
         self.assertIn("who_am_i", names)
+        self.assertIn("list_open_apps", names)
         self.assertNotIn("start_task", names)
         self.assertNotIn("give_response_to_user", names)
 
-    def test_shared_whoami(self) -> None:
-        out = tr.run_shared_tool("who_am_i", {"unused": False})
-        self.assertIn("README", out)
+    def test_shared_list_open_apps(self) -> None:
+        with patch(
+            "displays.format_monitor_occupancy",
+            return_value="Running apps:\n  - Notes",
+        ):
+            out = tr.run_shared_tool("list_open_apps", {"unused": False})
+        self.assertIn("Running apps", out)
 
     def test_unknown_shared_raises(self) -> None:
         with self.assertRaises(KeyError):

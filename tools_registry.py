@@ -158,6 +158,29 @@ READ_SKILL_TOOL = {
     "strict": True,
 }
 
+LIST_OPEN_APPS_TOOL = {
+    "type": "function",
+    "name": "list_open_apps",
+    "description": (
+        "Live snapshot of running Mac apps, visible windows by display, and "
+        "open browser tabs with titles/URLs (Chrome, Chromium, Brave, Edge, "
+        "Safari). Does not launch browsers. Use when the user asks what is open "
+        "or which tabs they have, or when you need a fresh occupancy list."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "unused": {
+                "type": "boolean",
+                "description": "Unused. Always pass false.",
+            },
+        },
+        "required": ["unused"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 READ_UI_TEXT_TOOL = {
     "type": "function",
     "name": "read_ui_text",
@@ -258,6 +281,7 @@ SHARED_TOOL_NAMES = frozenset(
         "save_memory",
         "save_screen_memory",
         "mcp_call",
+        "list_open_apps",
     }
 )
 
@@ -279,6 +303,7 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(ASK_USER_TOOL, ORCHESTRATOR, AGENT),
     _entry(GIVE_RESPONSE_TOOL, ORCHESTRATOR),
     *(_entry(tool, ORCHESTRATOR, AGENT) for tool in MEMORY_TOOLS),
+    _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_SKILLS_TOOL, AGENT),
     _entry(READ_SKILL_TOOL, AGENT),
     _entry(READ_UI_TEXT_TOOL, AGENT),
@@ -333,4 +358,8 @@ def run_shared_tool(
         from mcp_client import run_mcp_tool
 
         return run_mcp_tool(name, args)
+    if name == "list_open_apps":
+        from displays import format_monitor_occupancy
+
+        return format_monitor_occupancy()
     raise KeyError(f"Not a shared tool: {name}")

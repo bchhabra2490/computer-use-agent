@@ -1,12 +1,17 @@
 """Live per-monitor window occupancy for agent context.
 
 On macOS, Quartz window bounds are matched to ``list_monitors()`` geometry so
-the computer-use agent knows what is already open on each display. The snapshot
-is ephemeral (prompt + ``.runtime/desktop.txt``), not durable memory.
+the computer-use agent knows what is already open on each display. Running
+apps and browser tabs (AppleScript / JXA; browsers are not launched) are
+included in the same snapshot. Ephemeral (prompt + ``.runtime/desktop.txt``),
+not durable memory.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
 from typing import Any
 
@@ -29,7 +34,11 @@ _SKIP_OWNERS = {
 }
 
 _MAX_WINDOWS_PER_MONITOR = 8
+_MAX_APPS = 40
+_MAX_TABS = 40
+_MAX_TAB_URL = 90
 _MIN_WINDOW_PX = 80
+_BROWSER_SCRIPT_TIMEOUT = float(os.environ.get("DESKTOP_TAB_TIMEOUT", "8"))
 
 
 def _cg_window_list() -> list[dict[str, Any]]:
@@ -199,6 +208,291 @@ def list_windows_by_monitor(
     return assign_windows_to_monitors(raw, monitors)
 
 
+def list_tabs_enabled() -> bool:
+    return os.environ.get("DESKTOP_LIST_TABS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def list_open_apps() -> list[str]:
+    """User-facing running apps (regular activation policy), unique names."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        from AppKit import NSWorkspace
+    except ImportError:
+        return []
+    try:
+        apps = list(NSWorkspace.sharedWorkspace().runningApplications())
+    except Exception:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for app in apps:
+        try:
+            if int(app.activationPolicy()) != 0:
+                continue
+        except Exception:
+            continue
+        name = (app.localizedName() or "").strip()
+        if not name or name.lower() in _SKIP_OWNERS:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    names.sort(key=str.lower)
+    return names[:_MAX_APPS]
+
+
+_BROWSER_TABS_JXA = r"""
+function run() {
+  const chromeLike = ["Google Chrome", "Chromium", "Brave Browser", "Microsoft Edge"];
+  const MAX_DETAIL = 40;
+  let remaining = MAX_DETAIL;
+  const result = [];
+
+  function takeTab(title, url, active) {
+    if (remaining <= 0) return null;
+    remaining -= 1;
+    return { title: title, url: url, active: active };
+  }
+
+  function chromeFamily(name) {
+    try {
+      const app = Application(name);
+      if (!app.running()) return;
+      const windows = app.windows();
+      const wins = [];
+      for (let wi = 0; wi < windows.length; wi++) {
+        const w = windows[wi];
+        let tabs, activeIndex;
+        try {
+          tabs = w.tabs();
+          activeIndex = w.activeTabIndex();
+        } catch (e) {
+          continue;
+        }
+        const list = [];
+        const tabCount = tabs.length;
+        const limit = Math.min(tabCount, remaining);
+        for (let ti = 0; ti < limit; ti++) {
+          const t = tabs[ti];
+          let title = "";
+          let url = "";
+          try { title = String(t.title() || ""); } catch (e) {}
+          try { url = String(t.url() || ""); } catch (e) {}
+          const row = takeTab(title, url, (ti + 1) === activeIndex);
+          if (row) list.push(row);
+        }
+        wins.push({ index: wi + 1, tab_count: tabCount, tabs: list });
+      }
+      result.push({ browser: name, windows: wins });
+    } catch (e) {}
+  }
+
+  chromeLike.forEach(chromeFamily);
+
+  try {
+    const app = Application("Safari");
+    if (app.running()) {
+      const windows = app.windows();
+      const wins = [];
+      for (let wi = 0; wi < windows.length; wi++) {
+        const w = windows[wi];
+        let tabs;
+        try { tabs = w.tabs(); } catch (e) { continue; }
+        let currentId = null;
+        try { currentId = w.currentTab().id(); } catch (e) {}
+        const list = [];
+        const tabCount = tabs.length;
+        const limit = Math.min(tabCount, remaining);
+        for (let ti = 0; ti < limit; ti++) {
+          const t = tabs[ti];
+          let title = "";
+          let url = "";
+          let id = null;
+          try { title = String(t.name() || ""); } catch (e) {}
+          try { url = String(t.url() || ""); } catch (e) {}
+          try { id = t.id(); } catch (e) {}
+          const row = takeTab(
+            title,
+            url,
+            currentId !== null && id !== null && id === currentId
+          );
+          if (row) list.push(row);
+        }
+        wins.push({ index: wi + 1, tab_count: tabCount, tabs: list });
+      }
+      result.push({ browser: "Safari", windows: wins });
+    }
+  } catch (e) {}
+
+  return JSON.stringify(result);
+}
+"""
+
+
+def parse_browser_tabs_payload(payload: Any) -> list[dict[str, Any]]:
+    """Normalize JXA JSON into ``[{browser, windows:[{index, tabs:[...]}]}]``."""
+    if isinstance(payload, str):
+        blob = payload.strip()
+        if not blob:
+            return []
+        try:
+            payload = json.loads(blob)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, list):
+        return []
+    browsers: list[dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("browser") or "").strip()
+        windows_raw = row.get("windows") or []
+        if not name or not isinstance(windows_raw, list):
+            continue
+        windows: list[dict[str, Any]] = []
+        for win in windows_raw:
+            if not isinstance(win, dict):
+                continue
+            try:
+                index = int(win.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            try:
+                tab_count = int(win.get("tab_count") or 0)
+            except (TypeError, ValueError):
+                tab_count = 0
+            tabs_raw = win.get("tabs") or []
+            if not isinstance(tabs_raw, list):
+                continue
+            tabs: list[dict[str, Any]] = []
+            for tab in tabs_raw:
+                if not isinstance(tab, dict):
+                    continue
+                title = str(tab.get("title") or "").strip()
+                url = str(tab.get("url") or "").strip()
+                if not title and not url:
+                    continue
+                tabs.append(
+                    {
+                        "title": title,
+                        "url": url,
+                        "active": bool(tab.get("active")),
+                    }
+                )
+            windows.append(
+                {
+                    "index": index or (len(windows) + 1),
+                    "tab_count": tab_count or len(tabs),
+                    "tabs": tabs,
+                }
+            )
+        browsers.append({"browser": name, "windows": windows})
+    return browsers
+
+
+def list_browser_tabs() -> list[dict[str, Any]]:
+    """Open tabs for running Chrome-family browsers and Safari. Does not launch them."""
+    if sys.platform != "darwin" or not list_tabs_enabled():
+        return []
+    try:
+        proc = subprocess.run(
+            ["osascript", "-l", "JavaScript"],
+            input=_BROWSER_TABS_JXA,
+            capture_output=True,
+            text=True,
+            timeout=_BROWSER_SCRIPT_TIMEOUT,
+        )
+    except OSError:
+        return []
+    except subprocess.TimeoutExpired:
+        print("[desktop] browser tab listing timed out", flush=True)
+        return []
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().splitlines()
+        if err:
+            print(f"[desktop] browser tab listing failed: {err[-1][:160]}", flush=True)
+        return []
+    return parse_browser_tabs_payload(proc.stdout or "")
+
+
+def format_running_apps(apps: list[str], *, frontmost: str = "") -> str:
+    if not apps:
+        return "Running apps: (none)"
+    fm = (frontmost or "").strip().lower()
+    lines = ["Running apps:"]
+    extra = max(0, len(apps) - _MAX_APPS)
+    for name in apps[:_MAX_APPS]:
+        mark = " (frontmost)" if fm and name.lower() == fm else ""
+        lines.append(f"  - {name}{mark}")
+    if extra:
+        lines.append(f"  - … {extra} more")
+    return "\n".join(lines)
+
+
+def _clip_url(url: str) -> str:
+    url = (url or "").strip()
+    if len(url) <= _MAX_TAB_URL:
+        return url
+    return url[: _MAX_TAB_URL - 1] + "…"
+
+
+def format_browser_tabs(browsers: list[dict[str, Any]]) -> str:
+    if not browsers:
+        return "Browser tabs: (none listed — Chrome/Safari/Brave/Edge not running, or Automation permission missing)"
+    lines = ["Browser tabs:"]
+    shown = 0
+    truncated = False
+    for browser in browsers:
+        name = str(browser.get("browser") or "Browser")
+        windows = list(browser.get("windows") or [])
+        tab_total = 0
+        for win in windows:
+            try:
+                tab_total += int(win.get("tab_count") or 0)
+            except (TypeError, ValueError):
+                pass
+            if not win.get("tab_count"):
+                tab_total += len(win.get("tabs") or [])
+        if tab_total == 0:
+            lines.append(f"  {name}: (no tabs)")
+            continue
+        lines.append(f"  {name} ({tab_total} tab{'s' if tab_total != 1 else ''}):")
+        multi_win = len(windows) > 1
+        for win in windows:
+            if shown >= _MAX_TABS:
+                truncated = True
+                break
+            tabs = list(win.get("tabs") or [])
+            if multi_win:
+                lines.append(f"    window {win.get('index') or '?'}:")
+            indent = "      " if multi_win else "    "
+            for tab in tabs:
+                if shown >= _MAX_TABS:
+                    truncated = True
+                    break
+                title = str(tab.get("title") or "").strip() or "(untitled)"
+                if len(title) > 80:
+                    title = title[:77] + "…"
+                url = _clip_url(str(tab.get("url") or ""))
+                mark = "*" if tab.get("active") else "-"
+                extra = f" — {url}" if url else ""
+                lines.append(f"{indent}{mark} {title}{extra}")
+                shown += 1
+        if truncated:
+            break
+    if truncated:
+        lines.append(f"  - … more tabs (showing first {_MAX_TABS})")
+    return "\n".join(lines)
+
+
 def _frontmost_name() -> str:
     try:
         from accessibility import frontmost_app_name
@@ -213,8 +507,11 @@ def format_monitor_occupancy(
     monitors: list[dict] | None = None,
     occupancy: list[dict[str, Any]] | None = None,
     frontmost: str | None = None,
+    apps: list[str] | None = None,
+    tabs: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Compact per-display window list for the model prompt."""
+    """Compact per-display window list, running apps, and browser tabs."""
+    live = occupancy is None
     if monitors is None:
         from actions import list_monitors
 
@@ -223,6 +520,10 @@ def format_monitor_occupancy(
         occupancy = list_windows_by_monitor(monitors=monitors)
     if frontmost is None:
         frontmost = _frontmost_name()
+    if apps is None and live:
+        apps = list_open_apps()
+    if tabs is None and live and list_tabs_enabled():
+        tabs = list_browser_tabs()
 
     lines = [f"Open windows by display ({len(monitors)} attached):"]
     by_index: dict[int, list[dict[str, Any]]] = {m["index"]: [] for m in monitors}
@@ -257,6 +558,12 @@ def format_monitor_occupancy(
 
     if frontmost and frontmost.lower() not in _SKIP_OWNERS:
         lines.append(f"Frontmost app: {frontmost}")
+    if apps is not None:
+        lines.append("")
+        lines.append(format_running_apps(apps, frontmost=frontmost or ""))
+    if tabs is not None:
+        lines.append("")
+        lines.append(format_browser_tabs(tabs))
     if len(monitors) > 1:
         lines.append(
             "Screenshots and click coordinates are the primary display only. "

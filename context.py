@@ -15,7 +15,7 @@ from typing import Any
 from app_status import RUNTIME_DIR
 
 # Soft caps so the system prompt does not grow without bound.
-BUDGET_DISPLAYS = int(os.environ.get("CONTEXT_BUDGET_DISPLAYS", "2500"))
+BUDGET_DISPLAYS = int(os.environ.get("CONTEXT_BUDGET_DISPLAYS", "4500"))
 BUDGET_SKILLS = int(os.environ.get("CONTEXT_BUDGET_SKILLS", "2000"))
 BUDGET_MEMORIES = int(os.environ.get("CONTEXT_BUDGET_MEMORIES", "2500"))
 BUDGET_MCP = int(os.environ.get("CONTEXT_BUDGET_MCP", "3500"))

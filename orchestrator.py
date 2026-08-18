@@ -7,6 +7,7 @@ Tools:
   - ask_user — speak a question and capture a spoken reply
   - give_response_to_user — speak a reply (optionally end the session)
   - list_memories / read_memory / save_memory / save_screen_memory — notes + screen snapshots
+  - list_open_apps — running apps, windows by display, and open browser tabs
   - mcp_call — tools from servers in mcp.json (when configured)
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
@@ -116,6 +117,10 @@ will not open):
   save when the user says remember/save this.
 - save_screen_memory — screenshot the desktop, describe it, store under
   memory/screens/. Use when they say "save the screen as memory" (do not start_task).
+- list_open_apps — live running apps, windows by display, and open browser tabs
+  (titles + URLs). Occupancy below is a snapshot; call this for a fresh list.
+  Prefer this (and give_response_to_user) over start_task when they only ask
+  what is open / which tabs they have.
 {mcp_rule}
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
@@ -958,6 +963,7 @@ def _handle_tool(
         "save_screen_memory",
         "who_am_i",
         "mcp_call",
+        "list_open_apps",
     }:
         output = run_shared_tool(call.name, args, client=client)
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")

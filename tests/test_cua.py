@@ -116,7 +116,47 @@ class MainTests(unittest.TestCase):
     def test_observe_accept_all_dispatches(self) -> None:
         with patch("observe.cmd_accept", return_value=0) as cmd:
             self.assertEqual(cua.main(["observe", "accept", "--all"]), 0)
-            cmd.assert_called_once_with(name=None, all_drafts=True)
+            cmd.assert_called_once_with(
+                name=None,
+                all_drafts=True,
+                items=[],
+                memories=None,
+                skills=None,
+            )
+
+    def test_observe_accept_items_dispatch(self) -> None:
+        with patch("observe.cmd_accept", return_value=0) as cmd:
+            self.assertEqual(
+                cua.main(
+                    [
+                        "observe",
+                        "accept",
+                        "20260818T134913Z_google-chrome",
+                        "m1",
+                        "--skill",
+                        "open-hn",
+                    ]
+                ),
+                0,
+            )
+            cmd.assert_called_once_with(
+                name="20260818T134913Z_google-chrome",
+                all_drafts=False,
+                items=["m1"],
+                memories=None,
+                skills=["open-hn"],
+            )
+
+    def test_observe_reject_all_dispatches(self) -> None:
+        with patch("observe.cmd_reject", return_value=0) as cmd:
+            self.assertEqual(cua.main(["observe", "reject", "--all"]), 0)
+            cmd.assert_called_once_with(
+                name=None,
+                all_drafts=True,
+                items=[],
+                memories=None,
+                skills=None,
+            )
 
 
 if __name__ == "__main__":

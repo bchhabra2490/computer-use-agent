@@ -298,6 +298,113 @@ class DraftAcceptTests(unittest.TestCase):
         self.assertIn("Existing", body)
         self.assertNotIn("1. New", body)
 
+    def test_listing_numbers_memories_and_skills(self) -> None:
+        folder = self._write_draft(
+            "20260818T134913Z_google-chrome",
+            memories=[
+                {"kind": "app", "name": "chrome", "text": "Uses Chrome for HN"},
+                {"kind": "app", "name": "cursor", "text": "Edits in Cursor"},
+            ],
+            skills=[
+                {
+                    "name": "open-hn",
+                    "description": "Jump to Hacker News",
+                    "body": "## Steps\n1. Cmd+L",
+                }
+            ],
+        )
+        text = observe.format_draft_listing(folder)
+        self.assertIn("m1  app/chrome", text)
+        self.assertIn("m2  app/cursor", text)
+        self.assertIn("s1  open-hn", text)
+
+    def test_accept_selected_items_leaves_the_rest(self) -> None:
+        folder = self._write_draft(
+            "20260818T134913Z_google-chrome",
+            memories=[
+                {"kind": "app", "name": "chrome", "text": "Uses Chrome for HN"},
+                {"kind": "app", "name": "cursor", "text": "Edits in Cursor"},
+            ],
+            skills=[
+                {
+                    "name": "open-hn",
+                    "description": "Jump to Hacker News",
+                    "body": "## Steps\n1. Cmd+L\n2. Enter",
+                },
+                {
+                    "name": "open-cursor",
+                    "description": "Open Cursor",
+                    "body": "## Steps\n1. Spotlight\n2. Type Cursor",
+                },
+            ],
+        )
+        memory_dir = self.root / "memory"
+        skills_dir = self.root / "skills"
+        written = observe.accept_draft(
+            folder,
+            memory_dir=memory_dir,
+            skills_dir=skills_dir,
+            dest_root=self.root / "accepted",
+            items=["m2"],
+            skills=["open-hn"],
+        )
+        self.assertTrue(folder.exists())
+        self.assertTrue(any("cursor.md" in line for line in written))
+        self.assertTrue((memory_dir / "apps" / "cursor.md").is_file())
+        self.assertFalse((memory_dir / "apps" / "chrome.md").exists())
+        self.assertTrue((skills_dir / "open-hn" / "SKILL.md").is_file())
+        self.assertFalse((skills_dir / "open-cursor").exists())
+        leftover = observe.load_draft(folder)
+        self.assertEqual([m["name"] for m in leftover["memories"]], ["chrome"])
+        self.assertEqual([s["name"] for s in leftover["skills"]], ["open-cursor"])
+
+    def test_reject_selected_item_keeps_the_rest(self) -> None:
+        folder = self._write_draft(
+            "keep_some",
+            memories=[
+                {"kind": "app", "name": "chrome", "text": "Uses Chrome for HN"},
+                {"kind": "app", "name": "cursor", "text": "Edits in Cursor"},
+            ],
+        )
+        observe.reject_draft(folder, dest_root=self.root / "rejected", items=["m1"])
+        self.assertTrue(folder.exists())
+        leftover = observe.load_draft(folder)
+        self.assertEqual([m["name"] for m in leftover["memories"]], ["cursor"])
+
+    def test_reject_all_archives_every_draft(self) -> None:
+        first = self._write_draft(
+            "draft_a",
+            memories=[{"kind": "app", "name": "chrome", "text": "Uses Chrome"}],
+        )
+        second = self._write_draft(
+            "draft_b",
+            skills=[
+                {
+                    "name": "open-hn",
+                    "description": "Jump to HN",
+                    "body": "## Steps\n1. Cmd+L",
+                }
+            ],
+        )
+        rejected = self.root / "rejected"
+        with (
+            patch.object(observe, "PROPOSED_DIR", self.root / "proposed"),
+            patch.object(observe, "REJECTED_DIR", rejected),
+        ):
+            self.assertEqual(observe.cmd_reject(all_drafts=True), 0)
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertTrue((rejected / "draft_a" / "draft.json").is_file())
+        self.assertTrue((rejected / "draft_b" / "draft.json").is_file())
+
+    def test_unknown_item_ref_errors(self) -> None:
+        folder = self._write_draft(
+            "one_item",
+            memories=[{"kind": "app", "name": "chrome", "text": "Uses Chrome"}],
+        )
+        with self.assertRaises(ValueError):
+            observe.accept_draft(folder, items=["s1"])
+
 
 class ComputerUseGateTests(unittest.TestCase):
     def test_computer_use_active_when_agent_listed(self) -> None:

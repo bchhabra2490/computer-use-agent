@@ -307,50 +307,225 @@ def load_draft(path: Path) -> dict[str, Any]:
     return json.loads((path / "draft.json").read_text(encoding="utf-8"))
 
 
+def save_draft(path: Path, data: dict[str, Any]) -> None:
+    (path / "draft.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _preview_line(text: str, width: int = 88) -> str:
+    first = " ".join((text or "").split())
+    if len(first) <= width:
+        return first
+    return first[: width - 1] + "…"
+
+
+def format_draft_listing(path: Path, data: dict[str, Any] | None = None) -> str:
+    data = data if data is not None else load_draft(path)
+    focus = data.get("focus") or {}
+    lines = [
+        f"{path.name}  {focus.get('app') or '?'}  "
+        f"memories={len(data.get('memories') or [])} "
+        f"skills={len(data.get('skills') or [])}"
+    ]
+    for i, item in enumerate(data.get("memories") or [], start=1):
+        kind = str(item.get("kind") or "app")
+        name = str(item.get("name") or "?")
+        lines.append(f"  m{i}  {kind}/{name}")
+        preview = _preview_line(str(item.get("text") or ""))
+        if preview:
+            lines.append(f"      {preview}")
+    for i, item in enumerate(data.get("skills") or [], start=1):
+        name = str(item.get("name") or "?")
+        lines.append(f"  s{i}  {name}")
+        preview = _preview_line(str(item.get("description") or item.get("body") or ""))
+        if preview:
+            lines.append(f"      {preview}")
+    return "\n".join(lines)
+
+
+_ITEM_REF_RE = re.compile(r"^([ms])(\d+)$", re.I)
+
+
+def resolve_item_selection(
+    data: dict[str, Any],
+    *,
+    items: list[str] | None = None,
+    memories: list[str] | None = None,
+    skills: list[str] | None = None,
+) -> tuple[set[int], set[int]]:
+    """Return 0-based indexes of memories and skills to keep/write.
+
+    Empty selectors mean every item. Indexes are ``m1`` / ``s2`` (1-based).
+    Names match ``--memory`` / ``--skill`` or leftover args.
+    """
+    mems = list(data.get("memories") or [])
+    sks = list(data.get("skills") or [])
+    refs = [str(x).strip() for x in (items or []) if str(x).strip()]
+    mem_names = [str(x).strip() for x in (memories or []) if str(x).strip()]
+    skill_names = [str(x).strip() for x in (skills or []) if str(x).strip()]
+    if not refs and not mem_names and not skill_names:
+        return set(range(len(mems))), set(range(len(sks)))
+
+    sel_m: set[int] = set()
+    sel_s: set[int] = set()
+
+    def add_named(kind: str, name: str) -> None:
+        rows = mems if kind == "memory" else sks
+        target = sel_m if kind == "memory" else sel_s
+        exact = [i for i, row in enumerate(rows) if str(row.get("name") or "") == name]
+        hits = exact or [
+            i
+            for i, row in enumerate(rows)
+            if str(row.get("name") or "").startswith(name)
+        ]
+        label = "memory" if kind == "memory" else "skill"
+        if not hits:
+            raise ValueError(f"No {label} named {name!r}")
+        if len(hits) > 1:
+            raise ValueError(f"Ambiguous {label} name {name!r}")
+        target.add(hits[0])
+
+    for ref in refs:
+        match = _ITEM_REF_RE.fullmatch(ref)
+        if match:
+            kind, num = match.group(1).lower(), int(match.group(2))
+            idx = num - 1
+            if kind == "m":
+                if not (0 <= idx < len(mems)):
+                    raise ValueError(f"No memory {ref}")
+                sel_m.add(idx)
+            else:
+                if not (0 <= idx < len(sks)):
+                    raise ValueError(f"No skill {ref}")
+                sel_s.add(idx)
+            continue
+        mem_hit = any(str(row.get("name") or "") == ref or str(row.get("name") or "").startswith(ref) for row in mems)
+        skill_hit = any(str(row.get("name") or "") == ref or str(row.get("name") or "").startswith(ref) for row in sks)
+        if mem_hit and not skill_hit:
+            add_named("memory", ref)
+        elif skill_hit and not mem_hit:
+            add_named("skill", ref)
+        elif mem_hit and skill_hit:
+            raise ValueError(f"{ref!r} matches both a memory and a skill; use mN/sN")
+        else:
+            raise ValueError(f"No memory or skill named {ref!r}")
+
+    for name in mem_names:
+        add_named("memory", name)
+    for name in skill_names:
+        add_named("skill", name)
+    if not sel_m and not sel_s:
+        raise ValueError("No matching memories or skills")
+    return sel_m, sel_s
+
+
+def _write_memory_item(
+    item: dict[str, Any],
+    *,
+    memory_dir: Path | None = None,
+) -> str:
+    from memory import save_memory
+
+    kind = str(item.get("kind") or "app")
+    name = str(item.get("name") or "").strip()
+    text = str(item.get("text") or "").strip()
+    if not name or not text:
+        return ""
+    dest = save_memory(kind, name, text, mode="append", memory_dir=memory_dir)
+    return str(dest)
+
+
+def _write_skill_item(
+    item: dict[str, Any],
+    *,
+    skills_dir: Path | None = None,
+) -> str:
+    from skills import write_skill
+
+    name = str(item.get("name") or "").strip()
+    description = str(item.get("description") or "").strip()
+    body = str(item.get("body") or "").strip()
+    if not name or not description or not body:
+        return ""
+    try:
+        dest = write_skill(
+            name,
+            description,
+            body,
+            skills_dir=skills_dir,
+            overwrite=False,
+        )
+    except FileExistsError:
+        return f"skipped skill {name} (already exists)"
+    return str(dest)
+
+
 def accept_draft(
     path: Path,
     *,
     memory_dir: Path | None = None,
     skills_dir: Path | None = None,
     dest_root: Path | None = None,
+    items: list[str] | None = None,
+    memories: list[str] | None = None,
+    skills: list[str] | None = None,
 ) -> list[str]:
-    """Merge a proposed draft into memory/ and skills/. Returns written paths."""
-    from memory import save_memory
-    from skills import write_skill
+    """Merge selected draft items into memory/ and skills/. Returns written paths.
 
+    With no selectors, every memory and skill is accepted. Remaining items stay
+    in the proposed folder; an empty draft is archived.
+    """
     data = load_draft(path)
+    sel_m, sel_s = resolve_item_selection(
+        data, items=items, memories=memories, skills=skills
+    )
+    mems = list(data.get("memories") or [])
+    sks = list(data.get("skills") or [])
     written: list[str] = []
-    for item in data.get("memories") or []:
-        kind = str(item.get("kind") or "app")
-        name = str(item.get("name") or "").strip()
-        text = str(item.get("text") or "").strip()
-        if not name or not text:
-            continue
-        dest = save_memory(kind, name, text, mode="append", memory_dir=memory_dir)
-        written.append(str(dest))
-    for item in data.get("skills") or []:
-        name = str(item.get("name") or "").strip()
-        description = str(item.get("description") or "").strip()
-        body = str(item.get("body") or "").strip()
-        if not name or not description or not body:
-            continue
-        try:
-            dest = write_skill(
-                name,
-                description,
-                body,
-                skills_dir=skills_dir,
-                overwrite=False,
-            )
-        except FileExistsError:
-            written.append(f"skipped skill {name} (already exists)")
-            continue
-        written.append(str(dest))
-    _archive_draft(path, dest_root or ACCEPTED_DIR, status="accepted")
+    for i in sorted(sel_m):
+        line = _write_memory_item(mems[i], memory_dir=memory_dir)
+        if line:
+            written.append(line)
+    for i in sorted(sel_s):
+        line = _write_skill_item(sks[i], skills_dir=skills_dir)
+        if line:
+            written.append(line)
+    remaining_mem = [row for i, row in enumerate(mems) if i not in sel_m]
+    remaining_sk = [row for i, row in enumerate(sks) if i not in sel_s]
+    if remaining_mem or remaining_sk:
+        data["memories"] = remaining_mem
+        data["skills"] = remaining_sk
+        data["status"] = "proposed"
+        save_draft(path, data)
+    else:
+        _archive_draft(path, dest_root or ACCEPTED_DIR, status="accepted")
     return written
 
 
-def reject_draft(path: Path, *, dest_root: Path | None = None) -> None:
+def reject_draft(
+    path: Path,
+    *,
+    dest_root: Path | None = None,
+    items: list[str] | None = None,
+    memories: list[str] | None = None,
+    skills: list[str] | None = None,
+) -> None:
+    data = load_draft(path)
+    selectors = bool(items or memories or skills)
+    if not selectors:
+        _archive_draft(path, dest_root or REJECTED_DIR, status="rejected")
+        return
+    sel_m, sel_s = resolve_item_selection(
+        data, items=items, memories=memories, skills=skills
+    )
+    mems = list(data.get("memories") or [])
+    sks = list(data.get("skills") or [])
+    remaining_mem = [row for i, row in enumerate(mems) if i not in sel_m]
+    remaining_sk = [row for i, row in enumerate(sks) if i not in sel_s]
+    if remaining_mem or remaining_sk:
+        data["memories"] = remaining_mem
+        data["skills"] = remaining_sk
+        save_draft(path, data)
+        return
     _archive_draft(path, dest_root or REJECTED_DIR, status="rejected")
 
 
@@ -479,24 +654,41 @@ def cmd_list() -> int:
         print("No proposed drafts.")
         return 0
     for path in drafts:
-        data = load_draft(path)
-        n_mem = len(data.get("memories") or [])
-        n_sk = len(data.get("skills") or [])
-        focus = data.get("focus") or {}
-        print(f"{path.name}  {focus.get('app') or '?'}  " f"memories={n_mem} skills={n_sk}")
-    print("Accept: cua observe accept <id>   or   cua observe accept --all")
+        print(format_draft_listing(path))
+        print()
+    print("Accept items:  cua observe accept <id> m1 s2")
+    print("Accept names:  cua observe accept <id> --memory NAME --skill NAME")
+    print("Accept all:    cua observe accept <id>   or   cua observe accept --all")
+    print("Reject all:    cua observe reject --all")
     return 0
 
 
-def cmd_accept(*, name: str | None = None, all_drafts: bool = False) -> int:
+def _find_drafts(name: str | None, drafts: list[Path]) -> list[Path]:
+    if not name:
+        return drafts
+    return [p for p in drafts if p.name == name or p.name.startswith(name)]
+
+
+def cmd_accept(
+    *,
+    name: str | None = None,
+    all_drafts: bool = False,
+    items: list[str] | None = None,
+    memories: list[str] | None = None,
+    skills: list[str] | None = None,
+) -> int:
     drafts = list_proposed()
     if not drafts:
         print("No proposed drafts.")
         return 0
+    selectors = bool(items or memories or skills)
+    if all_drafts and selectors:
+        print("Pass a draft id to accept individual items (not --all).", file=sys.stderr)
+        return 2
     if all_drafts:
         chosen = drafts
     elif name:
-        chosen = [p for p in drafts if p.name == name or p.name.startswith(name)]
+        chosen = _find_drafts(name, drafts)
         if not chosen:
             print(f"No draft matching {name!r}. Try: cua observe list", file=sys.stderr)
             return 1
@@ -506,26 +698,74 @@ def cmd_accept(*, name: str | None = None, all_drafts: bool = False) -> int:
         print("Multiple drafts; pass an id or --all. Current:")
         cmd_list()
         return 2
+    if selectors and len(chosen) != 1:
+        print("Pass one draft id when selecting individual items.", file=sys.stderr)
+        return 2
     for path in chosen:
-        written = accept_draft(path)
-        print(f"accepted {path.name}")
+        try:
+            written = accept_draft(
+                path,
+                items=items,
+                memories=memories,
+                skills=skills,
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        leftover = path.exists()
+        print(f"{'accepted items from' if leftover else 'accepted'} {path.name}")
         for line in written:
             print(f"  {line}")
+        if leftover:
+            print("  remaining:")
+            print(format_draft_listing(path))
     return 0
 
 
-def cmd_reject(*, name: str | None = None) -> int:
+def cmd_reject(
+    *,
+    name: str | None = None,
+    all_drafts: bool = False,
+    items: list[str] | None = None,
+    memories: list[str] | None = None,
+    skills: list[str] | None = None,
+) -> int:
     drafts = list_proposed()
-    if not name:
-        print("Pass a draft id. Try: cua observe list", file=sys.stderr)
+    if not drafts:
+        print("No proposed drafts.")
+        return 0
+    selectors = bool(items or memories or skills)
+    if all_drafts and selectors:
+        print("Pass a draft id to reject individual items (not --all).", file=sys.stderr)
         return 2
-    chosen = [p for p in drafts if p.name == name or p.name.startswith(name)]
-    if not chosen:
-        print(f"No draft matching {name!r}.", file=sys.stderr)
-        return 1
+    if all_drafts:
+        chosen = drafts
+    elif name:
+        chosen = _find_drafts(name, drafts)
+        if not chosen:
+            print(f"No draft matching {name!r}.", file=sys.stderr)
+            return 1
+    else:
+        print("Pass a draft id or --all. Try: cua observe list", file=sys.stderr)
+        return 2
+    if selectors and len(chosen) != 1:
+        print("Pass one draft id when selecting individual items.", file=sys.stderr)
+        return 2
     for path in chosen:
-        reject_draft(path)
-        print(f"rejected {path.name}")
+        try:
+            reject_draft(
+                path,
+                items=items,
+                memories=memories,
+                skills=skills,
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        leftover = path.exists()
+        print(f"{'dropped items from' if leftover else 'rejected'} {path.name}")
+        if leftover:
+            print(format_draft_listing(path))
     return 0
 
 

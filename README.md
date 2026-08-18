@@ -51,8 +51,11 @@ cua skills condense --dry-run  # show what would change; do not write
 cua skills merge --dry-run     # propose duplicate merges; do not delete
 cua skills merge               # merge duplicates and remove the extras
 cua observe start              # separate daemon: log your clicks, draft memories/skills
-cua observe list               # pending drafts under .runtime/observe/proposed/
-cua observe accept --all       # write accepted drafts into memory/ and skills/
+cua observe list               # pending drafts; numbered m1 / s1 items
+cua observe accept <id> m1 s2  # write selected memories/skills; leave the rest
+cua observe accept --all       # write every item in every draft
+cua observe reject <id> m2     # drop one item from a draft
+cua observe reject --all       # discard every proposed draft
 cua observe stop
 ```
 

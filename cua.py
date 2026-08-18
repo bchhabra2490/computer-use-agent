@@ -8,7 +8,7 @@ Passive desktop observer (separate process, drafts only)::
 
     cua observe start
     cua observe list
-    cua observe accept --all
+    cua observe accept 20260818T134913Z_google-chrome m1 s2
 
 MCP apps (Linear, GitHub, …) connect with browser login::
 
@@ -433,13 +433,66 @@ def main(argv: list[str] | None = None) -> int:
         help="Draft folder name (from cua observe list)",
     )
     accept_p.add_argument(
+        "items",
+        nargs="*",
+        help="Item refs from list, e.g. m1 s2 (omit to accept the whole draft)",
+    )
+    accept_p.add_argument(
+        "--memory",
+        action="append",
+        dest="memories",
+        metavar="NAME",
+        default=None,
+        help="Accept this memory name (repeatable)",
+    )
+    accept_p.add_argument(
+        "--skill",
+        action="append",
+        dest="skills",
+        metavar="NAME",
+        default=None,
+        help="Accept this skill name (repeatable)",
+    )
+    accept_p.add_argument(
         "--all",
         action="store_true",
         dest="all_drafts",
         help="Accept every proposed draft",
     )
-    reject_p = obs_sub.add_parser("reject", help="Discard a proposed draft")
-    reject_p.add_argument("id", help="Draft folder name (from cua observe list)")
+    reject_p = obs_sub.add_parser("reject", help="Discard a proposed draft or selected items")
+    reject_p.add_argument(
+        "id",
+        nargs="?",
+        default=None,
+        help="Draft folder name (from cua observe list)",
+    )
+    reject_p.add_argument(
+        "items",
+        nargs="*",
+        help="Item refs from list, e.g. m2 s1 (omit to reject the whole draft)",
+    )
+    reject_p.add_argument(
+        "--memory",
+        action="append",
+        dest="memories",
+        metavar="NAME",
+        default=None,
+        help="Drop this memory name (repeatable)",
+    )
+    reject_p.add_argument(
+        "--skill",
+        action="append",
+        dest="skills",
+        metavar="NAME",
+        default=None,
+        help="Drop this skill name (repeatable)",
+    )
+    reject_p.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_drafts",
+        help="Reject every proposed draft",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "start":
@@ -496,9 +549,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.observe_command == "list":
             return observe_mod.cmd_list()
         if args.observe_command == "accept":
-            return observe_mod.cmd_accept(name=args.id, all_drafts=args.all_drafts)
+            return observe_mod.cmd_accept(
+                name=args.id,
+                all_drafts=args.all_drafts,
+                items=args.items,
+                memories=args.memories,
+                skills=args.skills,
+            )
         if args.observe_command == "reject":
-            return observe_mod.cmd_reject(name=args.id)
+            return observe_mod.cmd_reject(
+                name=args.id,
+                all_drafts=args.all_drafts,
+                items=args.items,
+                memories=args.memories,
+                skills=args.skills,
+            )
         return 2
     parser.print_help()
     return 2

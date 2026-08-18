@@ -125,6 +125,9 @@ Rules:
 - Prefer mcp_call over start_task when a connected MCP server can search, fetch, or
   change the data (issues, docs, analytics, APIs). Use start_task only for real
   mouse/keyboard/UI work (open an app, click play, fill a form on screen).
+- For physical hardware/device control (lights, switches, TV, AC, locks, sensors),
+  prefer hardware MCP via mcp_call. Do not use desktop UI clicks as a workaround
+  when the hardware MCP can perform the action.
 - Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
 - Call read_memory before ask_user when the missing detail may already be stored
   (name, usernames, usual apps, what was on screen). save_memory for durable

@@ -156,6 +156,28 @@ class ExtractMemoryTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["name"], "github")
 
+    def test_parse_items_skips_volatile_hardware_telemetry(self) -> None:
+        payload = {
+            "items": [
+                {
+                    "kind": "app",
+                    "name": "home-hardware",
+                    "text": (
+                        'Memory snapshot: Node "office" — online: false; '
+                        "component lamp; last ping 2026-08-18T08:57:58.552Z."
+                    ),
+                },
+                {
+                    "kind": "app",
+                    "name": "home-hardware",
+                    "text": "- Office lamp is controlled by relay component `lamp`.",
+                },
+            ]
+        }
+        items = mem.parse_extracted_memory_items(payload)
+        self.assertEqual(len(items), 1)
+        self.assertIn("relay component", items[0]["text"])
+
     def test_apply_writes_app_memory(self) -> None:
         written = mem.apply_extracted_memory_items(
             [

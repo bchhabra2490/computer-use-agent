@@ -276,6 +276,28 @@ def _text_looks_secret(text: str) -> bool:
     return bool(_SECRET_TEXT_RE.search(text or ""))
 
 
+_VOLATILE_HARDWARE_MEMORY_RE = re.compile(
+    r"(?is)\b("
+    r"last\s+ping"
+    r"|last\s+seen"
+    r"|heartbeat"
+    r"|memory\s+snapshot"
+    r"|online\s*:\s*(true|false)"
+    r"|offline"
+    r"|uptime"
+    r"|signal\s+strength"
+    r"|battery\s*%"
+    r"|temperature\s*[:=]"
+    r"|humidity\s*[:=]"
+    r")\b"
+)
+
+
+def _text_looks_volatile_hardware(text: str) -> bool:
+    """True for transient hardware telemetry that should not become durable memory."""
+    return bool(_VOLATILE_HARDWARE_MEMORY_RE.search(text or ""))
+
+
 def _response_output_text(response: Any) -> str:
     text = _response_text(response)
     if text:
@@ -312,6 +334,8 @@ def parse_extracted_memory_items(payload: Any) -> list[dict[str, str]]:
         if _is_live_layout_memory(kind, name):
             continue
         if _text_looks_secret(text):
+            continue
+        if _text_looks_volatile_hardware(text):
             continue
         items.append({"kind": kind, "name": name, "text": text})
     return items
@@ -379,6 +403,8 @@ Do NOT save:
 - Passwords, API keys, OTPs, tokens, or payment details
 - One-off clicks, "opened Chrome", raw tool dumps, or the task itself with no fact
 - Live window/monitor occupancy (that is stored automatically as app/displays)
+- Hardware live telemetry/status snapshots (online/offline, last ping/last seen,
+  heartbeat, battery/temperature/humidity point-in-time readings)
 - Anything already in existing memories unless this run has a new or updated value
 
 Existing memories (do not repeat unless updated):

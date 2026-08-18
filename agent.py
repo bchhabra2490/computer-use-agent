@@ -79,6 +79,7 @@ MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
 # Used when routing is disabled / skill review fallback.
 MODEL = MODEL_OVERRIDE or os.environ.get("AGENT_MODEL_HARD", "gpt-5.6")
 
+
 class TaskMarkedDone(Exception):
     """Raised when the model or user ends the computer-use run."""
 
@@ -582,7 +583,10 @@ def run(
     own_session = False
     if standalone:
         register_agent_process()
-        start_mcp()
+        try:
+            start_mcp()
+        except BaseException as e:
+            print(f"[agent] MCP start error: {e}", flush=True)
         bind_session(Session())
         own_session = True
 
@@ -861,7 +865,7 @@ def run(
                 bind_session(None)
             try:
                 stop_mcp()
-            except Exception:
+            except BaseException:
                 pass
         if message_inbox is not None:
             try:

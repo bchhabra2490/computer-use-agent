@@ -88,6 +88,59 @@ class ReadOnlyTests(unittest.TestCase):
         self.assertFalse(mc.tool_is_read_only("search", {"readOnlyHint": False}))
 
 
+class ConnectErrorIsolationTests(unittest.TestCase):
+    def test_mcp_error_text_unwraps_taskgroup(self) -> None:
+        inner = RuntimeError("MCP linear session expired. Run: cua mcp login linear")
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [inner])
+        text = mc._mcp_error_text(group)
+        self.assertIn("session expired", text)
+        self.assertNotIn("\n", text)
+
+    def test_start_survives_connect_exception_group(self) -> None:
+        group = ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [RuntimeError("MCP linear session expired. Run: cua mcp login linear")],
+        )
+        mgr = mc.McpManager(
+            specs={
+                "linear": mc.ServerSpec(
+                    name="linear",
+                    url="https://example.test/mcp",
+                    transport="http",
+                )
+            }
+        )
+        with (
+            patch.object(mgr, "_submit", side_effect=group),
+            patch("threading.Thread.start", lambda self: None),
+        ):
+            mgr.start()
+        self.assertTrue(mgr._started)
+        if mgr._loop is not None:
+            mgr._loop.close()
+            mgr._loop = None
+
+    def test_start_survives_timeout(self) -> None:
+        mgr = mc.McpManager(
+            specs={
+                "linear": mc.ServerSpec(
+                    name="linear",
+                    url="https://example.test/mcp",
+                    transport="http",
+                )
+            }
+        )
+        with (
+            patch.object(mgr, "_submit", side_effect=mc.concurrent.futures.TimeoutError()),
+            patch("threading.Thread.start", lambda self: None),
+        ):
+            mgr.start()
+        self.assertTrue(mgr._started)
+        if mgr._loop is not None:
+            mgr._loop.close()
+            mgr._loop = None
+
+
 @unittest.skipUnless(ECHO_SERVER.is_file(), "echo fixture missing")
 class LiveStdioTests(unittest.TestCase):
     def setUp(self) -> None:

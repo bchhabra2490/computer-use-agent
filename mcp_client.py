@@ -8,6 +8,7 @@ Neither orchestrator.py nor agent.py speaks JSON-RPC — they call
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -40,6 +41,21 @@ MCP_READ_ONLY = os.environ.get("MCP_READ_ONLY", "0").strip().lower() not in {
 MCP_MAX_OUTPUT = int(os.environ.get("MCP_MAX_OUTPUT", "24000"))
 MCP_CONNECT_TIMEOUT = float(os.environ.get("MCP_CONNECT_TIMEOUT", "25"))
 MCP_CALL_TIMEOUT = float(os.environ.get("MCP_CALL_TIMEOUT", "60"))
+
+
+def _is_fatal(exc: BaseException) -> bool:
+    return isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError))
+
+
+def _mcp_error_text(exc: BaseException) -> str:
+    try:
+        from mcp_auth import unwrap_error
+
+        err = unwrap_error(exc)
+    except Exception:
+        err = exc
+    text = str(err).strip() or type(err).__name__
+    return text.replace("\n", " ")[:300]
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _WRITE_NAME = re.compile(
@@ -313,6 +329,7 @@ class McpManager:
         self._servers: dict[str, _LiveServer] = {}
         self._lock = threading.Lock()
         self._started = False
+        self._pending_futs: list[concurrent.futures.Future] = []
 
     @property
     def connected(self) -> bool:
@@ -342,9 +359,20 @@ class McpManager:
             )
             self._thread.start()
             try:
-                self._submit(self._connect_all(), timeout=MCP_CONNECT_TIMEOUT + 10)
-            except Exception as e:
-                print(f"[mcp] connect failed: {e}", flush=True)
+                self._submit(
+                    self._connect_all(),
+                    timeout=MCP_CONNECT_TIMEOUT + 15,
+                )
+            except concurrent.futures.TimeoutError:
+                print(
+                    "[mcp] connect still running in background "
+                    f"(>{MCP_CONNECT_TIMEOUT + 15:.0f}s); other servers may already be up",
+                    flush=True,
+                )
+            except BaseException as e:
+                if _is_fatal(e):
+                    raise
+                print(f"[mcp] connect failed: {_mcp_error_text(e)}", flush=True)
             self._started = True
 
     def stop(self) -> None:
@@ -354,9 +382,16 @@ class McpManager:
             if self._loop is not None:
                 try:
                     self._submit(self._disconnect_all(), timeout=8)
-                except Exception as e:
-                    print(f"[mcp] shutdown error: {e}", flush=True)
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                except BaseException as e:
+                    if _is_fatal(e):
+                        raise
+                    print(f"[mcp] shutdown error: {_mcp_error_text(e)}", flush=True)
+                try:
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                except BaseException as e:
+                    if _is_fatal(e):
+                        raise
+                    print(f"[mcp] loop stop error: {_mcp_error_text(e)}", flush=True)
             if self._thread is not None:
                 self._thread.join(timeout=5)
             self._loop = None
@@ -392,8 +427,10 @@ class McpManager:
                 self._call_async(live, tool_name, args),
                 timeout=MCP_CALL_TIMEOUT,
             )
-        except Exception as e:
-            return f"Error calling {name}/{tool_name}: {e}"
+        except BaseException as e:
+            if _is_fatal(e):
+                raise
+            return f"Error calling {name}/{tool_name}: {_mcp_error_text(e)}"
 
     def catalog_text(self) -> str:
         if not self._specs and not self._servers:
@@ -433,6 +470,16 @@ class McpManager:
 
     def _run_loop(self) -> None:
         assert self._loop is not None
+
+        def _handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            err = context.get("exception")
+            if isinstance(err, BaseException):
+                print(f"[mcp] loop: {_mcp_error_text(err)}", flush=True)
+                return
+            msg = str(context.get("message") or "unknown error")
+            print(f"[mcp] loop: {msg}", flush=True)
+
+        self._loop.set_exception_handler(_handler)
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
@@ -440,15 +487,29 @@ class McpManager:
         if self._loop is None:
             raise RuntimeError("MCP loop is not running")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # Keep the Future so the asyncio Task is not garbage-collected
+            # ("Task was destroyed but it is pending").
+            self._pending_futs.append(fut)
+            raise
 
     async def _connect_all(self) -> None:
-        tasks = [self._connect_one(spec) for spec in self._specs.values()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(
+            *(self._connect_one(spec) for spec in self._specs.values()),
+            return_exceptions=True,
+        )
         for spec, result in zip(self._specs.values(), results):
-            if isinstance(result, Exception):
-                print(f"[mcp] {spec.name}: {result}", flush=True)
-                self._servers[spec.name] = _LiveServer(spec=spec, session=None, error=str(result))
+            if not isinstance(result, BaseException):
+                continue
+            if _is_fatal(result):
+                raise result
+            msg = _mcp_error_text(result)
+            print(f"[mcp] {spec.name}: {msg}", flush=True)
+            live = self._servers.get(spec.name)
+            if live is None or live.session is None:
+                self._servers[spec.name] = _LiveServer(spec=spec, session=None, error=msg)
 
     async def _connect_one(self, spec: ServerSpec) -> None:
         from contextlib import AsyncExitStack
@@ -518,19 +579,43 @@ class McpManager:
                 )
                 ready.set()
                 await stop.wait()
-            except Exception as e:
+            except asyncio.CancelledError:
+                ready.set()
+                raise
+            except BaseException as e:
                 box["error"] = e
                 ready.set()
+                if _is_fatal(e):
+                    raise
             finally:
                 try:
                     await stack.aclose()
-                except Exception as e:
-                    print(f"[mcp] {spec.name} close: {e}", flush=True)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as e:
+                    print(f"[mcp] {spec.name} close: {_mcp_error_text(e)}", flush=True)
 
         task = asyncio.create_task(lifetime(), name=f"mcp-{spec.name}")
-        await ready.wait()
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=MCP_CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            task.cancel()
+            msg = f"timed out after {MCP_CONNECT_TIMEOUT:.0f}s"
+            print(f"[mcp] {spec.name}: {msg}", flush=True)
+            self._servers[spec.name] = _LiveServer(spec=spec, session=None, error=msg)
+            return
         if "error" in box:
-            raise box["error"]
+            err = box["error"]
+            if isinstance(err, BaseException) and _is_fatal(err):
+                raise err
+            msg = (
+                _mcp_error_text(err)
+                if isinstance(err, BaseException)
+                else str(err)
+            )
+            print(f"[mcp] {spec.name}: {msg}", flush=True)
+            self._servers[spec.name] = _LiveServer(spec=spec, session=None, error=msg)
+            return
         live = box.get("live")
         if live is not None:
             live.task = task
@@ -599,7 +684,13 @@ def start_mcp(*, specs: dict[str, ServerSpec] | None = None) -> McpManager:
     with _manager_lock:
         if _manager is None:
             _manager = McpManager(specs)
-            _manager.start()
+            try:
+                _manager.start()
+            except BaseException as e:
+                if _is_fatal(e):
+                    _manager = None
+                    raise
+                print(f"[mcp] start failed: {_mcp_error_text(e)}", flush=True)
         return _manager
 
 
@@ -607,7 +698,12 @@ def stop_mcp() -> None:
     global _manager
     with _manager_lock:
         if _manager is not None:
-            _manager.stop()
+            try:
+                _manager.stop()
+            except BaseException as e:
+                if _is_fatal(e):
+                    raise
+                print(f"[mcp] stop failed: {_mcp_error_text(e)}", flush=True)
             _manager = None
 
 

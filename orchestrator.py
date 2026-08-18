@@ -1160,7 +1160,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             print(f"[orchestrator] low-latency TTS init failed ({e}); sync TTS only", flush=True)
             llm_tts = None
 
-    start_mcp()
+    try:
+        start_mcp()
+    except BaseException as e:
+        print(f"[orchestrator] MCP start error: {e}", flush=True)
     mcp_rule = ""
     if mcp_openai_tools(for_agent=False):
         mcp_rule = (
@@ -1336,7 +1339,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             pass
         try:
             stop_mcp()
-        except Exception as e:
+        except BaseException as e:
             print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()

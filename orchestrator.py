@@ -1387,6 +1387,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     try:
         sess.enter_and_log("ready", "Orchestrator starting")
         print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
+        print(
+            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} " "(TTS_CONFIRM_HEARD)",
+            flush=True,
+        )
         # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
         if audio.arm_wake() is not None:
             print("[orchestrator] persistent wake barge-in armed", flush=True)

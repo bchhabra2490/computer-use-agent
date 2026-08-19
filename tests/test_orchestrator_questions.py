@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -13,6 +15,8 @@ sys.path.insert(0, str(ROOT))
 from orchestrator import (  # noqa: E402
     TurnTrace,
     _assistant_message_text,
+    _confirm_heard,
+    _confirm_heard_enabled,
     _give_response_closes_turn,
     _looks_like_question,
     _strip_wait_filler,
@@ -132,6 +136,24 @@ class UserTurnInputTests(unittest.TestCase):
         url = next(p["image_url"] for p in content if p["type"] == "input_image")
         self.assertTrue(url.startswith("data:image/jpeg;base64,"))
         self.assertIn("image attached", content[0]["text"])
+
+
+class ConfirmHeardTests(unittest.TestCase):
+    def test_enabled_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TTS_CONFIRM_HEARD", None)
+            self.assertTrue(_confirm_heard_enabled())
+
+    def test_disabled_with_zero(self) -> None:
+        with patch.dict(os.environ, {"TTS_CONFIRM_HEARD": "0"}):
+            self.assertFalse(_confirm_heard_enabled())
+
+    def test_skip_speak_when_disabled(self) -> None:
+        with patch.dict(os.environ, {"TTS_CONFIRM_HEARD": "off"}):
+            with patch("orchestrator._speak") as speak:
+                out = _confirm_heard(SimpleNamespace(), "open a map of India")
+        speak.assert_not_called()
+        self.assertEqual(out, "open a map of India")
 
 
 if __name__ == "__main__":

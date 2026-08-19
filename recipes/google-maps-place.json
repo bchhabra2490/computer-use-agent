@@ -11,6 +11,7 @@
   "prelude": [
     {
       "type": "open_url",
+      "app": "Google Chrome",
       "url": "https://www.google.com/maps/search/?api=1&query={{place}}"
     }
   ],

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +45,17 @@ class MatchTemplateTests(unittest.TestCase):
         params, leftover = hit  # type: ignore[misc]
         self.assertEqual(params["query"], "lag ja gale")
         self.assertEqual(leftover, "")
+
+    def test_youtube_brief_uses_song_not_playable_clause(self) -> None:
+        prompt = (
+            "(VEVO / official channel) or the highest-quality audio result and start "
+            "playback. 3) Ensure the tab/audio is unmuted and system volume is at a "
+            "normal listening level. 4) If YouTube is not playable, try YouTube Music; "
+            "if that fails, open Apple Music and play the track. When playback begins, "
+            'speak a short mid-task update: "Now playing Thunderstruck by AC/DC."'
+        )
+        self.assertEqual(rc.extract_media_query(prompt), "Thunderstruck AC/DC")
+        self.assertFalse(rc._valid_slot("query", "is not playable"))
 
     def test_long_agent_prompt_does_not_swallow_place(self) -> None:
         prompt = (
@@ -109,7 +122,8 @@ class RecipeRunTests(unittest.TestCase):
         self.assertIsInstance(result, rc.RecipeHit)
         assert isinstance(result, rc.RecipeHit)
         prompt = rc.handoff_prompt("Open a map of India and zoom to the Ganges", result)
-        self.assertIn("Do not reopen", prompt)
+        self.assertIn("RECIPE HANDOFF", prompt)
+        self.assertIn("checklist", prompt.lower())
         self.assertIn("ganges", prompt.lower())
 
     def test_long_maps_prompt_binds_togo(self) -> None:
@@ -133,6 +147,40 @@ class RecipeRunTests(unittest.TestCase):
         self.assertIsInstance(result, rc.RecipeHit)
         assert isinstance(result, rc.RecipeHit)
         self.assertEqual(result.params["place"], "Togo")
+        self.assertNotIn("create a new tab", (result.leftover or "").lower())
+
+    def test_verify_fail_still_handoffs(self) -> None:
+        with (
+            patch.object(rc, "open_url"),
+            patch.object(rc, "open_app"),
+            patch.object(rc, "verify_recipe", return_value=False),
+            patch.object(rc.time, "sleep"),
+        ):
+            result = rc.try_recipe(
+                "Open a map of India and zoom to the Ganges",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+            )
+        self.assertIsInstance(result, rc.RecipeHit)
+
+    def test_orchestrator_brief_does_not_replay_new_tab(self) -> None:
+        prompt = (
+            "Open Google Chrome, create a new tab, and navigate to "
+            "https://www.google.com/maps/place/Togo. Wait for the page to finish "
+            "loading and ensure the map is centered on the country of Togo. "
+            "Capture a screenshot of the map and stop."
+        )
+        with (
+            patch.object(rc, "open_url"),
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(prompt, recipes_dir=_seed_dir(self), settle=0)
+        self.assertIsInstance(result, rc.RecipeHit)
+        assert isinstance(result, rc.RecipeHit)
+        self.assertEqual(result.params["place"], "Togo")
+        blob = (result.leftover or "").lower()
+        self.assertNotIn("create a new tab", blob)
+        self.assertIn("screenshot", blob)
 
     def test_open_notes_does_not_match_url_recipe(self) -> None:
         with patch.object(rc, "open_url") as opener:
@@ -150,6 +198,89 @@ class RecipeRunTests(unittest.TestCase):
                 recipes_dir=_seed_dir(self),
                 settle=0,
             )
+        self.assertIsInstance(result, rc.RecipeHit)
+
+    def test_youtube_try_recipe_searches_thunderstruck(self) -> None:
+        prompt = (
+            "If YouTube is not playable, try YouTube Music; if that fails, open "
+            "Apple Music and play the track. When playback begins, speak a short "
+            'mid-task update: "Now playing Thunderstruck by AC/DC."'
+        )
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(prompt, recipes_dir=_seed_dir(self), settle=0)
+        opener.assert_called_once()
+        self.assertIn("Thunderstruck", opener.call_args[0][0])
+        self.assertNotIn("playable", opener.call_args[0][0])
+        self.assertIsInstance(result, rc.RecipeHit)
+
+
+class _FakeResponsesClient:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls = 0
+        self.last_input = ""
+        self.responses = SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs: object) -> SimpleNamespace:
+        self.calls += 1
+        self.last_input = str(kwargs.get("input") or "")
+        part = SimpleNamespace(type="output_text", text=json.dumps(self.payload))
+        return SimpleNamespace(output=[SimpleNamespace(type="message", content=[part])])
+
+
+class LlmFillTests(unittest.TestCase):
+    def test_llm_fills_togo_not_the_brief(self) -> None:
+        prompt = (
+            "Open Chrome and go to Google Maps and load the map for the country "
+            "Togo (for example: https://www.google.com/maps/place/Togo). Wait for "
+            "the map to finish loading; if it stalls, reload once."
+        )
+        client = _FakeResponsesClient(
+            {"params": {"place": "Togo"}, "leftover": "screenshot the existing window"}
+        )
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(
+                prompt,
+                recipes_dir=_seed_dir(self),
+                settle=0,
+                client=client,
+            )
+        self.assertEqual(client.calls, 1)
+        self.assertIn("Togo", client.last_input)
+        opener.assert_called_once()
+        self.assertIn("query=Togo", opener.call_args[0][0])
+        self.assertIsInstance(result, rc.RecipeHit)
+        assert isinstance(result, rc.RecipeHit)
+        self.assertEqual(result.params["place"], "Togo")
+
+    def test_bad_llm_slot_falls_back_to_regex(self) -> None:
+        prompt = (
+            "If YouTube is not playable, try YouTube Music. "
+            'When playback begins, speak: "Now playing Thunderstruck by AC/DC."'
+        )
+        client = _FakeResponsesClient(
+            {"params": {"query": "is not playable"}, "leftover": ""}
+        )
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(
+                prompt,
+                recipes_dir=_seed_dir(self),
+                settle=0,
+                client=client,
+            )
+        self.assertEqual(client.calls, 1)
+        opener.assert_called_once()
+        self.assertIn("Thunderstruck", opener.call_args[0][0])
+        self.assertNotIn("playable", opener.call_args[0][0])
         self.assertIsInstance(result, rc.RecipeHit)
 
 

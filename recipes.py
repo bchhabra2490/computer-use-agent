@@ -2,7 +2,8 @@
 
 A recipe opens a URL or app (with ``{{placeholders}}``), then either finishes
 or hands leftover work to the vision agent. Matching recipes run before traces
-and before the screenshot loop.
+and before the screenshot loop. Slot values are filled with EVAL_MODEL; regex
+is only a fallback.
 """
 
 from __future__ import annotations
@@ -49,6 +50,12 @@ RECIPE_AUTO_SAVE = os.environ.get("RECIPE_AUTO_SAVE", "1").strip().lower() not i
     "no",
     "off",
 }
+RECIPE_LLM_FILL = os.environ.get("RECIPE_LLM_FILL", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 _ALLOWED_STEPS = frozenset({"open_url", "open_app"})
@@ -64,16 +71,27 @@ _MAPS_QUERY_URL = re.compile(
 )
 _SLOT_STOP = (
     r"and|then|wait|if|pan|zoom|make|capture|screenshot|reload|after|"
-    r"before|using|until|while|please|when|once"
+    r"before|using|until|while|please|when|once|is|not|try|or"
 )
 _SLOT_TOKEN = r"[^\s,.;:()/?#]+"
 _NEEDS_VISION = re.compile(
-    r"\b(zoom|pan|screenshot|capture|reload|frontmost|visible|wait for)\b",
+    r"\b(zoom|pan|screenshot|capture|reload|frontmost|visible|wait for|play|unmute|volume)\b",
     re.I,
 )
 _INSTRUCTIONISH = re.compile(
     r"\b(wait for|screenshot|reload once|frontmost|comfortable zoom|"
-    r"pan/zoom|report back|finish loading)\b",
+    r"pan/zoom|report back|finish loading|is not playable|if that fails|"
+    r"try youtube|open apple)\b",
+    re.I,
+)
+_BAD_QUERY_START = re.compile(
+    r"^(is|not|if|try|when|the track|it|that)\b",
+    re.I,
+)
+_PLAY_BY = re.compile(
+    r"(?:now\s+playing|play(?:ing)?)\s+"
+    r"(?:the\s+(?:song|track|video)\s+)?"
+    r"[\"']?([^.\n\"']{1,50}?)\s+by\s+[\"']?([A-Za-z0-9][^\"'\n.]{0,40})",
     re.I,
 )
 
@@ -240,8 +258,11 @@ def _safe_app_name(app: str) -> str:
     return name
 
 
-def open_url(url: str) -> None:
+def open_url(url: str, *, app: str | None = None) -> None:
     safe = _safe_http_url(url)
+    if app:
+        subprocess.run(["open", "-a", _safe_app_name(app), safe], check=True, timeout=20)
+        return
     subprocess.run(["open", safe], check=True, timeout=20)
 
 
@@ -265,7 +286,8 @@ def run_prelude(
             bound = apply_params(str(step.get("url") or ""), params, url=True)
             if placeholders_in(bound):
                 raise RecipeError("unbound placeholder in URL")
-            open_url(bound)
+            app = str(step.get("app") or "").strip() or None
+            open_url(bound, app=app)
             opened.append(bound)
             continue
         bound_app = apply_params(str(step.get("app") or ""), params, url=False)
@@ -346,6 +368,8 @@ def _valid_slot(name: str, value: str) -> bool:
         return False
     if _INSTRUCTIONISH.search(text):
         return False
+    if name in {"query", "place"} and _BAD_QUERY_START.search(text):
+        return False
     return True
 
 
@@ -357,6 +381,39 @@ def extract_maps_place(utterance: str) -> str | None:
     if found:
         return unquote(found.group(1).replace("+", " ")).strip(" .,") or None
     return None
+
+
+def extract_media_query(utterance: str) -> str | None:
+    """Prefer 'play TITLE by ARTIST' / quoted titles over a random 'youtube' clause."""
+    found = _PLAY_BY.search(utterance or "")
+    if found:
+        title = found.group(1).strip(" \"'")
+        artist = found.group(2).strip(" \"'")
+        combined = f"{title} {artist}".strip()
+        if _valid_slot("query", combined):
+            return combined
+    for quoted in re.findall(r"[\"']([^\"']{3,80})[\"']", utterance or ""):
+        inner = re.sub(r"^(?:now\s+playing)\s+", "", quoted, flags=re.I).strip()
+        play = _PLAY_BY.search(inner) or _PLAY_BY.search(f"play {inner}")
+        if play:
+            title = play.group(1).strip(" \"'")
+            artist = play.group(2).strip(" \"'")
+            combined = f"{title} {artist}".strip()
+            if _valid_slot("query", combined):
+                return combined
+        if _valid_slot("query", inner) and not re.search(
+            r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I
+        ):
+            return inner
+    return None
+
+
+def _prelude_is_youtube(recipe: Recipe) -> bool:
+    for step in recipe.prelude:
+        url = str(step.get("url") or "").lower()
+        if "youtube.com" in url and step.get("type") == "open_url":
+            return True
+    return False
 
 
 def _prelude_is_maps(recipe: Recipe) -> bool:
@@ -371,12 +428,44 @@ def _task_needs_vision(utterance: str) -> bool:
     return bool(_NEEDS_VISION.search(utterance or ""))
 
 
+def _vision_leftover(utterance: str) -> str:
+    """Short remainder after a URL open — never 'create a new tab / navigate'."""
+    bits: list[str] = []
+    if re.search(r"\b(zoom|pan|center|visible)\b", utterance or "", re.I):
+        bits.append("Adjust zoom or pan only if the place is not clearly visible.")
+    if re.search(r"\b(screenshot|capture|save)\b", utterance or "", re.I):
+        bits.append(
+            "If a screenshot file was requested, capture the existing Chrome window. "
+            "Do not open a new tab or type the URL again."
+        )
+    if re.search(r"\b(frontmost|bring.{0,20}front|retina display)\b", utterance or "", re.I):
+        bits.append("Bring the existing Chrome window to the front if it is behind another app.")
+    return " ".join(bits)
+
+
+def _looks_like_agent_brief(text: str) -> bool:
+    return bool(
+        re.search(
+            r"create a new tab|navigate to https?://|wait for the page to finish loading|"
+            r"open google chrome,|ensure the map is centered|"
+            r"youtube is not playable|if that fails|apple music",
+            text or "",
+            re.I,
+        )
+    )
+
+
 def _bind_recipe(recipe: Recipe, utterance: str) -> tuple[dict[str, str], str] | None:
     if _prelude_is_maps(recipe) and "place" in (recipe.params or ["place"]):
         place = extract_maps_place(utterance)
         if place and _valid_slot("place", place):
-            leftover = utterance.strip() if _task_needs_vision(utterance) else ""
+            leftover = _vision_leftover(utterance) if _task_needs_vision(utterance) else ""
             return {"place": place}, leftover
+    if _prelude_is_youtube(recipe) and "query" in (recipe.params or ["query"]):
+        query = extract_media_query(utterance)
+        if query:
+            leftover = _vision_leftover(utterance) if recipe.handoff or _task_needs_vision(utterance) else ""
+            return {"query": query}, leftover
     for template in recipe.match_templates:
         hit = match_template(template, utterance)
         if hit:
@@ -467,6 +556,137 @@ def find_matching_recipe(
     return best[2], best[3], best[4]
 
 
+def _recipe_slot_names(recipe: Recipe) -> list[str]:
+    names = list(recipe.params)
+    for step in recipe.prelude:
+        names.extend(placeholders_in(str(step.get("url") or "")))
+        names.extend(placeholders_in(str(step.get("app") or "")))
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def recipe_match_score(recipe: Recipe, utterance: str) -> float:
+    """How well this recipe applies — literals/phrases only, no slot capture."""
+    if not recipe.prelude:
+        return 0.0
+    text = utterance or ""
+    if _prelude_is_maps(recipe) and (
+        extract_maps_place(text)
+        or _phrase_in(text, "map")
+        or _phrase_in(text, "maps")
+    ):
+        return 2.0
+    if _prelude_is_youtube(recipe) and _phrase_in(text, "youtube"):
+        return 2.0
+    best = 0.0
+    for template in recipe.match_templates:
+        lits = [
+            " ".join((value or "").split())
+            for kind, value in tokenize_template(template)
+            if kind == "lit" and (value or "").split()
+        ]
+        if lits and all(_phrase_in(text, lit) for lit in lits):
+            best = max(best, 1.5)
+    if recipe.match:
+        hits = sum(1 for phrase in recipe.match if _phrase_in(text, phrase))
+        if hits == len(recipe.match):
+            if recipe.params == ["url"] and not _extract_urls(text):
+                return best
+            best = max(best, 1.0)
+    return best
+
+
+def pick_matching_recipe(
+    utterance: str,
+    recipes: list[Recipe] | None = None,
+) -> Recipe | None:
+    recipes = load_recipes() if recipes is None else recipes
+    best: tuple[float, int, Recipe] | None = None
+    for recipe in recipes:
+        score = recipe_match_score(recipe, utterance)
+        if score <= 0:
+            continue
+        rank = (score, len(recipe.match_templates) + len(recipe.match), recipe)
+        if best is None or (rank[0], rank[1]) > (best[0], best[1]):
+            best = rank
+    return None if best is None else best[2]
+
+
+def fill_recipe_slots_llm(
+    client: Any,
+    recipe: Recipe,
+    utterance: str,
+) -> tuple[dict[str, str], str] | None:
+    from evaluator import EVAL_MODEL
+
+    names = _recipe_slot_names(recipe)
+    prompt = f"""Fill placeholders for a desktop recipe from the task text.
+
+Recipe: {recipe.name}
+Placeholders: {names}
+URL/app template: {json.dumps(recipe.prelude)}
+
+Task:
+{utterance}
+
+Rules:
+- Each placeholder value is SHORT: a place name, a song plus artist, or an http(s) URL.
+- Do not copy fallback/instruction clauses ("is not playable", "create a new tab",
+  "wait for the page", "if that fails").
+- leftover is only UI work AFTER the URL/app is already open (zoom, click the
+  official video, screenshot the existing window). Empty string if opening is enough.
+- leftover must not tell the agent to open a new tab or type the same URL again.
+
+JSON only (no markdown):
+{{"params": {{"{names[0] if names else "query"}": "..."}}, "leftover": ""}}
+"""
+    response = client.responses.create(model=EVAL_MODEL, input=prompt)
+    text = ""
+    for item in response.output:
+        if item.type == "message":
+            for part in item.content:
+                if getattr(part, "type", None) == "output_text":
+                    text += part.text
+    data = _extract_json_object(text)
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("params")
+    if not isinstance(raw, dict):
+        return None
+    params = {str(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+    leftover = str(data.get("leftover") or "").strip()
+    for name in names:
+        if not params.get(name) or not _valid_slot(name, params[name]):
+            print(f"[recipe] LLM fill rejected slot {name}={params.get(name)!r}", flush=True)
+            return None
+    if _looks_like_agent_brief(leftover):
+        leftover = _vision_leftover(utterance)
+    print(f"[recipe] LLM fill {recipe.name} params={params} leftover={leftover!r}", flush=True)
+    return params, leftover
+
+
+def fill_recipe_slots(
+    recipe: Recipe,
+    utterance: str,
+    *,
+    client: Any | None = None,
+) -> tuple[dict[str, str], str] | None:
+    """Fill {{placeholders}}. Prefer the LLM; regex is only a fallback."""
+    if client is not None and RECIPE_LLM_FILL and _recipe_slot_names(recipe):
+        try:
+            filled = fill_recipe_slots_llm(client, recipe, utterance)
+            if filled is not None:
+                return filled
+        except Exception as e:
+            print(f"[recipe] LLM fill failed ({e}) — regex fallback", flush=True)
+    return _bind_recipe(recipe, utterance)
+
+
 def leftover_text(recipe: Recipe, leftover: str, params: dict[str, str]) -> str:
     extra = (leftover or "").strip()
     if recipe.leftover:
@@ -483,8 +703,16 @@ def handoff_prompt(task: str, hit: RecipeHit) -> str:
     finish = leftover or "Confirm the page matches the request, then mark_done."
     return (
         f"{finish}\n\n"
-        "A recipe already ran the first steps. Do not reopen the app, retype "
-        "the URL, or repeat Spotlight / the address bar.\n"
+        "RECIPE HANDOFF — a prefix already ran. This is not a fresh desktop task.\n"
+        "1. Look at the screenshot and occupancy first. Decide what is already true "
+        "(app open, URL/page loaded, search done).\n"
+        "2. If you read a skill, treat it as a checklist of remaining work, not a "
+        "script. Skip every step whose outcome is already on screen. Do not start "
+        "from skill step 1 (no Spotlight, no retyping the URL, no new Maps search "
+        "if the place is already visible).\n"
+        "3. Only act on leftover visual work (zoom, pick a result, save a screenshot "
+        "of the window that is already open). Do not create a new tab. Do not type "
+        "the URL again. If the leftover is already done, mark_done.\n"
         f"Already done:\n{opened}\n"
         f"Original request: {task}"
     )
@@ -495,6 +723,7 @@ def try_recipe(
     *,
     recipes_dir: Path | None = None,
     settle: float | None = None,
+    client: Any | None = None,
 ) -> RecipeHit | str | None:
     """
     Run a matching recipe prelude.
@@ -505,10 +734,16 @@ def try_recipe(
     if not RECIPE_REPLAY:
         return None
     recipes = load_recipes(recipes_dir)
-    found = find_matching_recipe(task, recipes)
-    if found is None:
+    recipe = pick_matching_recipe(task, recipes)
+    if recipe is None:
         return None
-    recipe, params, leftover = found
+    bound = fill_recipe_slots(recipe, task, client=client)
+    if bound is None:
+        print(f"[recipe] {recipe.name} could not fill placeholders — falling back", flush=True)
+        return None
+    params, leftover = bound
+    if _looks_like_agent_brief(leftover) or _looks_like_agent_brief(task):
+        leftover = _vision_leftover(task)
     print(f"[recipe] {recipe.name} params={params} leftover={leftover!r}", flush=True)
     try:
         opened = run_prelude(recipe, params, settle=settle)
@@ -519,8 +754,18 @@ def try_recipe(
         print(f"[recipe] prelude failed ({e}) — falling back", flush=True)
         return None
     if not verify_recipe(recipe):
-        print("[recipe] verify failed — falling back", flush=True)
-        return None
+        want = str((recipe.verify or {}).get("ax_app") or "").strip()
+        if want:
+            try:
+                open_app(want)
+                time.sleep(0.6)
+            except Exception as e:
+                print(f"[recipe] could not focus {want!r} ({e})", flush=True)
+        if not verify_recipe(recipe):
+            print(
+                "[recipe] verify still failed — handing off anyway (prelude already ran)",
+                flush=True,
+            )
     hit = RecipeHit(recipe=recipe, params=params, leftover=leftover, opened=opened)
     extra = leftover_text(recipe, leftover, params)
     # Leftover work always continues. handoff=true means the prelude is never the
@@ -686,10 +931,7 @@ def validate_recipe(recipe: Recipe) -> str | None:
             names = placeholders_in(raw)
             filled = apply_params(
                 raw,
-                {
-                    name: "https://example.com" if name == "url" else "example"
-                    for name in names
-                },
+                {name: "https://example.com" if name == "url" else "example" for name in names},
                 url=False,
             )
             try:
@@ -857,6 +1099,7 @@ def maybe_save_recipe(
 ) -> Path | None:
     """After a successful run, maybe persist an open_url recipe. Default: daemon."""
     if background:
+
         def _work() -> None:
             try:
                 _maybe_save_recipe_impl(client, log, task, recipes_dir=recipes_dir)

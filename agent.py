@@ -473,6 +473,7 @@ def maybe_create_skill(
     in the background path.
     """
     if background:
+
         def _work() -> None:
             try:
                 _maybe_create_skill_impl(client, log, voice=voice, prompt_user=False)
@@ -729,7 +730,7 @@ def run(
         }
 
     try:
-        recipe_result = try_recipe(task)
+        recipe_result = try_recipe(task, client=client)
         if isinstance(recipe_result, str):
             log.record("recipe", recipe_result.split("\n", 1)[0], {"result": recipe_result})
             log.finish("completed", "Ran saved recipe.")
@@ -738,6 +739,7 @@ def run(
             return recipe_result
 
         model_task = task
+        handoff_shot_b64: str | None = None
         if isinstance(recipe_result, RecipeHit):
             log.record(
                 "recipe_handoff",
@@ -749,6 +751,16 @@ def run(
                 },
             )
             model_task = handoff_prompt(task, recipe_result)
+            try:
+                shot = desktop.capture_screenshot()
+                handoff_shot_b64 = base64.b64encode(shot).decode("utf-8")
+                log.record(
+                    "recipe_handoff_screenshot",
+                    f"{len(shot)} bytes",
+                    {"bytes": len(shot)},
+                )
+            except Exception as e:
+                print(f"[recipe] handoff screenshot failed ({e})", flush=True)
         else:
             replayed = try_replay(task, desktop=desktop)
             if replayed:
@@ -763,10 +775,7 @@ def run(
         if message_inbox is not None:
             print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
 
-        response = client.responses.create(
-            model=model,
-            tools=agent_tools(),
-            input=(
+        prompt_body = (
                 f"{model_task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
@@ -778,6 +787,10 @@ def run(
                 "companion files you need) before using the computer tool. For "
                 "accounts, names, or app preferences, call read_memory first "
                 "(skill read-memory).\n"
+                "1b. After a recipe handoff (or whenever the target UI may already "
+                "be visible), look at the screenshot and occupancy before any click. "
+                "Skills are a checklist: skip steps that are already done. Never "
+                "replay a skill from the first step when the page/app is already open.\n"
                 "2. If they ask who you are, what you can do, or about this agent, "
                 "call who_am_i then mark_done with a short spoken summary from the "
                 "README (do not drive the desktop or read the README aloud).\n"
@@ -794,7 +807,8 @@ def run(
                 "set_timer and mark_done. Do not open Clock, do not sleep, do not "
                 "watch the screen until it rings. speak=true when they asked to "
                 "be reminded of something.\n"
-                "4. Follow the skill’s steps; adapt to what you see on screen.\n"
+                "4. Follow the skill’s remaining steps only; adapt to what you see "
+                "on screen. Do not blindly execute earlier steps.\n"
                 "5. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI. Never sleep for "
                 "media duration or use macOS say for spoken updates.\n"
@@ -822,7 +836,28 @@ def run(
                 "advisory guidance and adapt.\n"
                 "12. When the request is complete and no other action is required, "
                 "call mark_done (do not keep using the computer tool)."
-            ),
+        )
+        if handoff_shot_b64:
+            api_input: str | list = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt_body},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{handoff_shot_b64}",
+                            "detail": "original",
+                        },
+                    ],
+                }
+            ]
+        else:
+            api_input = prompt_body
+
+        response = client.responses.create(
+            model=model,
+            tools=agent_tools(),
+            input=api_input,
         )
 
         steps = 0

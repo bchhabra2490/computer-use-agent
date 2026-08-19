@@ -3,14 +3,13 @@
   "match": ["youtube"],
   "match_templates": [
     "play {{query}} on youtube",
-    "{{query}} on youtube",
-    "youtube {{query}}",
     "search youtube for {{query}}"
   ],
   "params": ["query"],
   "prelude": [
     {
       "type": "open_url",
+      "app": "Google Chrome",
       "url": "https://www.youtube.com/results?search_query={{query}}"
     }
   ],

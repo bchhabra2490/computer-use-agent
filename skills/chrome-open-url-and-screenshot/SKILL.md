@@ -6,7 +6,7 @@ description: >-
 
 ## Steps
 
-1. Bring Google Chrome to the front using Spotlight: press Cmd+Space, type "Google Chrome", press Enter. If Chrome is already running, use Cmd+Tab or click its window to focus it.
+1. Bring Google Chrome to the front using Spotlight: press Cmd+Space, type "Google Chrome", press Enter. If Chrome is already running, use Cmd+Tab or click its window to focus it. If the requested URL is already open in a tab, use that tab — do not Cmd+T a new tab or retype the URL.
 2. Focus the address bar with Cmd+L.
 3. Paste or type the exact URL and press Enter.
 4. Wait for the page to load: watch for the page title to update and the central/loading spinner to disappear. Allow an initial wait of 5–10 seconds; if dynamic content (video/live) is expected, allow an additional 5–15 seconds.

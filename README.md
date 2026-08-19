@@ -99,7 +99,7 @@ then transcribes your request and lets an LLM choose tools:
 
 Easy tasks that succeed are saved as **action traces** under `traces/`. The next matching request (e.g. “open Chrome, go to …”) replays those keypresses/types with no screenshot loop. Wake word during replay falls back to the vision agent. Set `TRACE_REPLAY=0` / `TRACE_RECORD=0` to disable.
 
-**Recipes** (`recipes/*.json`) are better when the first step is `open` a URL: “open a map of India” fills `{{place}}` and skips Spotlight. If you also asked to zoom or screenshot, the vision agent continues from that page and is told not to redo the prefix. After a successful run the agent may save a new recipe (`RECIPE_RECORD=0` to disable).
+**Recipes** (`recipes/*.json`) are better when the first step is `open` a URL: a matching recipe is chosen from phrases/templates, then `EVAL_MODEL` fills `{{placeholders}}` from the full task text (regex only if the LLM fails or `RECIPE_LLM_FILL=0`). If you also asked to zoom or screenshot, the vision agent continues from that page and is told not to redo the prefix. After a successful run the agent may save a new recipe (`RECIPE_RECORD=0` to disable).
 | `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
 | `give_response_to_user` | Speak a reply (set `end_session` to stop) |
 | `mcp_call` | Tools from servers in `mcp.json` (search, GitHub, Linear, …) when configured |

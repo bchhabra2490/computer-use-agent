@@ -8,6 +8,8 @@ description: >-
 
 ## Steps
 
+If Maps already shows the requested place (recipe or a previous step opened it), skip to zoom or mark_done. Do not reopen Chrome or type a new search.
+
 1. If Chrome is not already running, open Chrome (e.g., Spotlight: Cmd+Space → type "Chrome" → Enter). If Chrome is running, switch to it.
 2. If a Google Maps tab is already open and showing search results for the target (e.g., "Wentworth, New South Wales, Australia"), activate that tab. Otherwise, go to https://maps.google.com in Chrome (click the address bar then type or paste the URL and press Enter). Prefer opening `https://www.google.com/maps/search/?api=1&query=` plus the place name when that is faster than typing in the Maps search box.
 3. Focus the Maps search box (click it or press Tab until focused), type the exact place query (for example: `Wentworth, New South Wales, Australia`) and press Enter — unless the place is already loaded from the search URL.

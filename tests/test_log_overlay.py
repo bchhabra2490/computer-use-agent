@@ -79,45 +79,62 @@ class OverlayTextTests(unittest.TestCase):
         self.assertIn("opening Chrome", text)
         self.assertIn("type news.ycombinator.com", text)
 
-    def test_overlay_enabled_env(self) -> None:
-        import os
+    def test_overlay_enabled_defaults_on(self) -> None:
+        self.assertTrue(overlay_enabled({}))
+        self.assertTrue(overlay_enabled({"overlay_enabled": True}))
+        self.assertFalse(overlay_enabled({"overlay_enabled": False}))
+
+    def test_overlay_toggle_persists(self) -> None:
+        import tempfile
         from unittest.mock import patch
 
-        with patch.dict(os.environ, {"STATUS_OVERLAY": "0"}):
-            self.assertFalse(overlay_enabled())
-        with patch.dict(os.environ, {"STATUS_OVERLAY": "1"}):
-            self.assertTrue(overlay_enabled())
+        import app_status as st
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "status.json"
+            with patch.object(st, "STATUS_PATH", path):
+                self.assertTrue(overlay_enabled())
+                st.set_overlay_enabled(False)
+                self.assertFalse(overlay_enabled())
+                st.set_overlay_enabled(True)
+                self.assertTrue(overlay_enabled())
 
 
 class OverlayHideForCaptureTests(unittest.TestCase):
     def setUp(self) -> None:
-        import os
         from unittest.mock import patch
 
-        env = patch.dict(os.environ, {"STATUS_OVERLAY": "1"})
-        env.start()
-        self.addCleanup(env.stop)
+        enabled = patch("log_overlay.overlay_enabled", return_value=True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
 
     def test_hides_on_single_display(self) -> None:
         self.assertTrue(should_hide_overlay_for_capture([DUAL[1]]))
 
-    def test_keeps_overlay_on_dual_display(self) -> None:
-        self.assertFalse(should_hide_overlay_for_capture(DUAL))
+    def test_hides_on_dual_display(self) -> None:
+        self.assertTrue(should_hide_overlay_for_capture(DUAL))
 
     def test_disabled_overlay_never_hides(self) -> None:
-        import os
         from unittest.mock import patch
 
-        with patch.dict(os.environ, {"STATUS_OVERLAY": "0"}):
+        with patch("log_overlay.overlay_enabled", return_value=False):
             self.assertFalse(should_hide_overlay_for_capture([DUAL[1]]))
 
-    def test_pause_skips_hide_on_dual(self) -> None:
+    def test_pause_hides_on_dual_when_tray_alive(self) -> None:
         from unittest.mock import patch
 
-        with patch("log_overlay.set_overlay_hidden") as hidden:
+        with (
+            patch("log_overlay.set_overlay_hidden") as hidden,
+            patch(
+                "log_overlay.read_status",
+                return_value={"tray_pid": 1, "overlay_ack_hidden": True},
+            ),
+            patch("log_overlay.pid_alive", return_value=True),
+            patch("log_overlay._post_overlay_note"),
+        ):
             with pause_overlay_for_capture(monitors=DUAL):
-                pass
-        hidden.assert_not_called()
+                hidden.assert_called_with(True)
+        hidden.assert_called_with(False)
 
     def test_pause_skips_when_tray_not_running(self) -> None:
         from unittest.mock import patch
@@ -148,14 +165,6 @@ class OverlayHideForCaptureTests(unittest.TestCase):
 
 
 class OverlayLifetimeTests(unittest.TestCase):
-    def setUp(self) -> None:
-        import os
-        from unittest.mock import patch
-
-        env = patch.dict(os.environ, {"STATUS_OVERLAY": "1"})
-        env.start()
-        self.addCleanup(env.stop)
-
     def test_hidden_when_no_owner_process(self) -> None:
         from unittest.mock import patch
 
@@ -176,6 +185,17 @@ class OverlayLifetimeTests(unittest.TestCase):
         from unittest.mock import patch
 
         data = {"orchestrator_pid": 42, "overlay_hidden": True}
+        with patch("log_overlay.pid_alive", return_value=True):
+            self.assertFalse(overlay_should_show(data))
+
+    def test_hidden_when_toggled_off(self) -> None:
+        from unittest.mock import patch
+
+        data = {
+            "orchestrator_pid": 42,
+            "overlay_hidden": False,
+            "overlay_enabled": False,
+        }
         with patch("log_overlay.pid_alive", return_value=True):
             self.assertFalse(overlay_should_show(data))
 

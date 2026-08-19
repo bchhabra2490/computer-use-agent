@@ -95,6 +95,7 @@ then transcribes your request and lets an LLM choose tools:
 |------|------|
 | `who_am_i` | Read `README.md` and answer who this agent is / what it can do |
 | `start_task` | Run the computer-use agent on a concrete UI task |
+| `set_timer` | Native countdown / reminder (notification; TTS if they asked to be reminded) |
 
 Easy tasks that succeed are saved as **action traces** under `traces/`. The next matching request (e.g. “open Chrome, go to …”) replays those keypresses/types with no screenshot loop. Wake word during replay falls back to the vision agent. Set `TRACE_REPLAY=0` / `TRACE_RECORD=0` to disable.
 | `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
@@ -234,11 +235,11 @@ A small **menu-bar icon** starts with the orchestrator or agent:
 
 - **Hover** — live state (waiting / listening / speaking / agent) + recent log lines
 - **On-screen overlay** — the same logs on a transparent, click-through panel
-  (prefers a second display so computer-use screenshots stay clean). On a
-  single display it hides for the screenshot, then comes back. `STATUS_OVERLAY=0` to hide.
+  (prefers a second display). Hides for each screenshot, then comes back.
+  Toggle **Log Overlay** in the menu-bar icon.
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
-  **Add Memory** (screenshot + description), in-progress agents,
+  **Add Memory** (screenshot + description), **Log Overlay**, in-progress agents,
   **Mark Task Done**, recent logs, **Quit Orchestrator**, open latest `logs/`
   run folder, quit the icon
 
@@ -249,6 +250,77 @@ calls `mark_done` itself when the request is finished.
 ```bash
 python status_tray.py          # run the icon alone (optional)
 STATUS_TRAY=0 python orchestrator.py   # disable auto-start
+```
+
+### Phone gateway (optional)
+
+A small HTTP + SSE server on the Mac so a companion app can send text commands
+and read live status. **Off by default** (`PHONE_GATEWAY=0`). It does not drive
+the mouse; it queues text the same way speech does.
+
+```bash
+PHONE_GATEWAY=1 python orchestrator.py --auto
+# prints LAN URLs and a 5-character Bearer token (.runtime/phone.token)
+```
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/v1/health` | liveness (no auth) |
+| GET | `/v1/status` | state, logs (incl. LLM replies), last spoken / last LLM |
+| GET | `/v1/events` | SSE stream of the same payload |
+| GET | `/v1/screen` | last agent screenshot (JPEG) |
+| POST | `/v1/command` | `{ "text": "play lag ja gale" }` |
+| POST | `/v1/audio` | clip → Mac STT → same command queue |
+| POST | `/v1/photo` | camera still → Jarvis looks at it (alias `/v1/image`) |
+| POST | `/v1/control` | `{ "action": "send" \| "mark_done" \| "quit" }` |
+
+Send `Authorization: Bearer <token>` (or `?token=` on SSE / `/v1/screen`). Same Wi‑Fi or an
+Android hotspot is enough. iPhone Personal Hotspot often blocks LAN to the Mac —
+use Tailscale or USB tethering. Tailscale is only required off the LAN.
+
+`/v1/status` includes `screen_at` when the computer-use agent has captured a
+frame. Refetch `/v1/screen` when that timestamp changes — there is no extra
+screenshot; it is the same PNG the model just saw, saved as a phone-sized JPEG.
+
+LLM replies are in `logs` as `[llm]`, `[agent]`, `[tts]`, or `[mark_done]`
+lines (up to ~2000 characters). `last_llm` is the newest of those; `last_spoken`
+is the last line actually sent to TTS.
+
+`POST /v1/audio` is hold-to-talk from the phone. Send a WAV/M4A body
+(`Content-Type: audio/m4a`), multipart `audio` file, or JSON
+`{ "audio": "<base64>", "mime": "audio/m4a" }`. Optional `text` skips STT and
+queues that string (edited caption). The Mac transcribes with the same
+`STT_PROVIDER` as the desktop mic, then enqueues the transcript like `/v1/command`.
+Cap is ~30s / `PHONE_AUDIO_MAX_BYTES` (default 2.5MB). Response:
+`{ "ok": true, "queued": true, "text": "…", "source": "audio" }`.
+
+`POST /v1/photo` is a camera still from the phone. Send a JPEG/PNG/HEIC body
+(`Content-Type: image/jpeg`), multipart `photo` file, or JSON
+`{ "photo": "<base64>", "mime": "image/jpeg" }`. Optional `text` / `caption`
+is the question ("what does this label say?"). Optional mic clip is transcribed
+on the Mac and used as that caption: multipart field `audio`, or JSON
+`{ "photo": "<base64>", "audio": "<base64>", "audio_mime": "audio/m4a" }`.
+Explicit `text` wins over audio. With neither, Jarvis explains the photo and
+waits for follow-ups. The Mac resizes the still, attaches it to the
+orchestrator vision turn, and keeps it for later questions in the same
+session. Cap `PHONE_PHOTO_MAX_BYTES` (default 6MB) plus `PHONE_AUDIO_MAX_BYTES`
+for the clip. Response:
+`{ "ok": true, "queued": true, "text": "…", "source": "photo", "caption_source": "audio", "width": 1280, "height": 960 }`.
+Status includes `photo_at` when a still is stored.
+
+```bash
+TOKEN=$(cat .runtime/phone.token)
+curl -s http://127.0.0.1:8742/v1/health
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/v1/status
+curl -s -H "Authorization: Bearer $TOKEN" -o /tmp/jarvis.jpg \
+  http://127.0.0.1:8742/v1/screen
+curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"text":"open notes"}' http://127.0.0.1:8742/v1/command
+curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: audio/m4a" \
+  --data-binary @clip.m4a http://127.0.0.1:8742/v1/audio
+curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/jpeg" \
+  --data-binary @shot.jpg http://127.0.0.1:8742/v1/photo
+python phone_gateway.py          # run the server alone (optional)
 ```
 
 **Models (cost-aware defaults)**

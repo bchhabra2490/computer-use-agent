@@ -8,6 +8,7 @@ Tools:
   - give_response_to_user — speak a reply (optionally end the session)
   - list_memories / read_memory / save_memory / save_screen_memory — notes + screen snapshots
   - list_open_apps — running apps, windows by display, and open browser tabs
+  - set_timer / list_timers / cancel_timer — native countdown (no Clock UI)
   - mcp_call — tools from servers in mcp.json (when configured)
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
@@ -34,6 +35,7 @@ from envfile import load_dotenv
 load_dotenv()
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -50,15 +52,24 @@ import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
     active_agents,
+    clear_phone_photo,
+    consume_utterance,
     is_mark_done_utterance,
+    log_llm,
     mark_done_pending,
+    phone_photo_jpeg,
+    phone_photo_pending,
     quit_requested,
     register_orchestrator,
     remove_agent,
     request_mark_done,
     request_quit,
+    set_last_spoken,
+    speak_pending,
+    consume_speak,
     unregister_orchestrator,
     upsert_agent,
+    utterance_pending,
 )
 from bus import (
     AgentMessageInbox,
@@ -80,6 +91,7 @@ from mcp_client import (
     stop_mcp,
 )
 from session import Session, bind_session, get_session
+from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
 from stt import POST_TTS_COOLDOWN, ask_user, listen_once
 from tools_registry import orchestrator_tools, run_shared_tool
@@ -101,10 +113,12 @@ TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "no",
     "off",
 }
+_phone_photo_in_session = False
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
-You receive transcribed speech from the user. Decide the next action with tools only
+You receive transcribed speech from the user, and sometimes a photo from their
+phone camera (attached as an image on that turn). Decide the next action with tools only
 — never reply with a plain assistant message (the user will not hear it, and the mic
 will not open):
 - give_response_to_user — speak an answer or acknowledgment that does not need a reply
@@ -121,9 +135,17 @@ will not open):
   (titles + URLs). Occupancy below is a snapshot; call this for a fresh list.
   Prefer this (and give_response_to_user) over start_task when they only ask
   what is open / which tabs they have.
+- set_timer / list_timers / cancel_timer — native countdown (no Clock app).
+  Use set_timer for “set a 5 minute timer” and reminders (“remind me in 5 minutes
+  to check the oven”). Convert to seconds. speak=true plus message when they
+  asked to be reminded of something; otherwise notification only. Then
+  give_response_to_user once. Do not start_task or sleep.
 {mcp_rule}
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
+- When a phone-camera photo is attached, look at it. Explain what you see if they asked,
+  and answer follow-up questions about that same photo. Prefer give_response_to_user.
+  Do not start_task unless they asked you to do something on the Mac with what you saw.
 - If they ask who you are, what you do, how you work, or about this agent / Jarvis /
   Rekha / computer-use-agent, call who_am_i first, then give_response_to_user with a
   short spoken summary from the README (do not read it verbatim, no markdown).
@@ -134,6 +156,7 @@ Rules:
   prefer hardware MCP via mcp_call. Do not use desktop UI clicks as a workaround
   when the hardware MCP can perform the action.
 - Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
+  Not for timers or reminders — those are set_timer.
 - Call read_memory before ask_user when the missing detail may already be stored
   (name, usernames, usual apps, what was on screen). save_memory for durable
   facts they state. save_screen_memory when they want the current display stored.
@@ -200,12 +223,59 @@ def _format_task_history(history: list[dict[str, str]]) -> str:
     return "\n\n".join(blocks)
 
 
+def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: bool = False) -> str:
+    prefix = ""
+    if photo:
+        prefix = (
+            "The user sent a photo from their phone camera (image attached). "
+            "Look at the image. Explain it if they asked, and answer follow-ups "
+            "about this same photo. Do not start_task unless they asked you to "
+            "do something on the Mac.\n\n"
+        )
+    return (
+        prefix + f"User said: {utterance}\n\n" + f"Computer task history so far:\n{_format_task_history(task_history)}"
+    )
+
+
+def _user_turn_input(
+    utterance: str,
+    task_history: list[dict[str, str]],
+    *,
+    pending_fn_outputs: list[dict] | None = None,
+    photo_jpeg: bytes | None = None,
+) -> Any:
+    """Build Responses API ``input`` for one user turn (optional phone photo)."""
+    note = _history_note(utterance, task_history, photo=bool(photo_jpeg))
+    extras = list(pending_fn_outputs or [])
+    if photo_jpeg:
+        b64 = base64.b64encode(photo_jpeg).decode("ascii")
+        user = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": note},
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{b64}",
+                    "detail": "high",
+                },
+            ],
+        }
+        return [*extras, user] if extras else [user]
+    if extras:
+        return [*extras, {"role": "user", "content": note}]
+    return note
+
+
 def _print_messages(response) -> None:
     for item in response.output:
         if item.type == "message":
             for part in item.content:
                 if getattr(part, "type", None) == "output_text":
                     print(f"\n[orchestrator] {part.text}")
+                    try:
+                        log_llm(part.text, source="llm")
+                    except Exception:
+                        pass
 
 
 def _record_llm_step(turn: TurnTrace | None, response) -> None:
@@ -546,7 +616,8 @@ def _speak(client: OpenAI, text: str) -> str | None:
     """
     if not text:
         return None
-    status_log(f"[tts] {text[:160]}")
+    log_llm(text, source="tts")
+    set_last_spoken(text)
     audio = get_audio()
     if audio is not None:
         return audio.speak(text)
@@ -563,7 +634,8 @@ def _speak_later(client: OpenAI, text: str) -> None:
     """Start TTS without blocking the agent / tool loop."""
     if not text:
         return
-    status_log(f"[tts] {text[:160]}")
+    log_llm(text, source="tts")
+    set_last_spoken(text)
     audio = get_audio()
     if audio is not None:
         audio.speak_later(text)
@@ -612,6 +684,42 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
     return utterance
 
 
+def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | None:
+    """Look at a phone photo while a computer task is running (no start_task)."""
+    b64 = base64.b64encode(jpeg).decode("ascii")
+    prompt = (
+        "Look at this photo from the user's phone. "
+        f"They said: {utterance}\n"
+        "Reply in 2-5 spoken sentences. No markdown, no file paths."
+    )
+    get_session().enter("thinking", "Looking at phone photo")
+    try:
+        response = client.responses.create(
+            model=MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{b64}",
+                            "detail": "high",
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        print(f"[orchestrator] phone photo vision failed: {e}", flush=True)
+        return _speak(client, "I could not look at that photo.")
+    text = _strip_wait_filler(_assistant_message_text(response))
+    if not text:
+        return _speak(client, "I could not make out that photo.")
+    log_llm(text, source="llm")
+    return _speak(client, text)
+
+
 def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     """If the agent is waiting on ask_user, speak/listen and reply. Returns True if handled."""
     req = ask_bridge.poll(timeout=0)
@@ -633,6 +741,15 @@ def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     status_log(f"[ask_user] answer: {answer[:160]}")
     ask_bridge.reply(qid, answer)
     return True
+
+
+def _service_timer_speech(client: OpenAI) -> str | None:
+    """Speak a due timer reminder. Returns barge-in command, or None if idle/done."""
+    text = consume_speak()
+    if not text:
+        return None
+    print(f"[orchestrator] timer reminder: {text}", flush=True)
+    return _speak(client, text)
 
 
 def _listen_command(
@@ -657,6 +774,10 @@ def _listen_command(
     get_session().enter("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
 
     def _stop() -> bool:
+        if utterance_pending():
+            return True
+        if speak_pending():
+            return True
         if quit_requested():
             return True
         if should_stop is not None:
@@ -666,8 +787,11 @@ def _listen_command(
                 return True
         return False
 
+    queued = consume_utterance()
+    if queued:
+        return queued
     if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
-        return None
+        return consume_utterance()
     if quit_requested():
         return None
     hit = get_last_wake()
@@ -709,6 +833,7 @@ def _supervise_agent(
     Main-thread loop while the agent thread runs.
     Services agent ask_user; mid-task directives require the Jarvis wake word.
     """
+    global _phone_photo_in_session
     print(
         f"[orchestrator] agent running — say {format_wake_phrases()} then an update; "
         "agent questions are spoken here automatically."
@@ -717,7 +842,13 @@ def _supervise_agent(
     notified_done = False
 
     def _stop_for_done() -> bool:
-        return job.done.is_set() or ask_bridge.has_pending() or quit_requested() or mark_done_pending(job.call_id)
+        return (
+            job.done.is_set()
+            or ask_bridge.has_pending()
+            or quit_requested()
+            or mark_done_pending(job.call_id)
+            or speak_pending()
+        )
 
     def _signal_agent_done(*, spoken: bool) -> None:
         nonlocal notified_done
@@ -750,6 +881,15 @@ def _supervise_agent(
             continue
         if _service_agent_ask(client, ask_bridge):
             continue
+        if speak_pending():
+            barged = _service_timer_speech(client)
+            if barged and not is_mark_done_utterance(barged):
+                try:
+                    publisher.send(barged)
+                    print(f"[orchestrator] forwarded to agent: {barged!r}")
+                except Exception as e:
+                    print(f"[orchestrator] bus send failed: {e}")
+            continue
 
         command = _listen_command(
             client,
@@ -765,9 +905,22 @@ def _supervise_agent(
         if command is None:
             continue
 
-        command = _confirm_heard(client, command)
-        print(f'\n[user] "{command}"')
-        status_log(f'[user] "{command}"')
+        if phone_photo_pending():
+            jpeg = phone_photo_jpeg(consume_pending=True)
+            if jpeg:
+                _phone_photo_in_session = True
+                print("[orchestrator] phone photo — answering without stopping the computer task")
+                print(f'\n[user] "{command}"')
+                status_log(f'[user] "{command}"')
+                barged = _reply_to_phone_photo(client, command, jpeg)
+                if barged:
+                    command = barged
+                else:
+                    continue
+        else:
+            command = _confirm_heard(client, command)
+            print(f'\n[user] "{command}"')
+            status_log(f'[user] "{command}"')
         low = command.lower().strip()
         if is_mark_done_utterance(command):
             print("[orchestrator] user marked the running task done")
@@ -874,6 +1027,8 @@ def _handle_tool(
         handled_barge = False
         if message and already_streamed:
             # Playback continues on the TTS worker — do not block the agent.
+            log_llm(message, source="tts")
+            set_last_spoken(message)
             print(
                 "[orchestrator] give_response already streaming via low-latency TTS " "(not waiting)",
                 flush=True,
@@ -966,6 +1121,9 @@ def _handle_tool(
         "who_am_i",
         "mcp_call",
         "list_open_apps",
+        "set_timer",
+        "list_timers",
+        "cancel_timer",
     }:
         output = run_shared_tool(call.name, args, client=client)
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
@@ -1135,7 +1293,10 @@ def _process_response(
 
 
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
+    global _phone_photo_in_session
+    _phone_photo_in_session = False
     ensure_tray_running()
+    ensure_phone_gateway()
     register_orchestrator()
     sess = Session()
     bind_session(sess)
@@ -1221,6 +1382,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 utterance = pending
                 pending = None
             else:
+                if speak_pending():
+                    barged = _service_timer_speech(client)
+                    if barged:
+                        pending = barged
+                    continue
                 utterance = _listen_command(
                     client,
                     should_stop=quit_requested,
@@ -1234,7 +1400,9 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if utterance is None:
                     continue
 
-            utterance = _confirm_heard(client, utterance)
+            photo_turn = phone_photo_pending()
+            if not photo_turn:
+                utterance = _confirm_heard(client, utterance)
             print(f'\n[user] "{utterance}"')
             status_log(f'[user] "{utterance}"')
             low = utterance.lower().strip()
@@ -1263,23 +1431,26 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if barged:
                     pending = barged
                     continue
+                clear_phone_photo()
+                _phone_photo_in_session = False
                 sess.enter_and_log("done", "Session ended")
                 return
 
             sess.enter("thinking", utterance[:100])
-            history_note = (
-                f"User said: {utterance}\n\n" f"Computer task history so far:\n{_format_task_history(task_history)}"
+            jpeg = None
+            if photo_turn or _phone_photo_in_session:
+                jpeg = phone_photo_jpeg(consume_pending=True)
+                if jpeg:
+                    _phone_photo_in_session = True
+            turn_input = _user_turn_input(
+                utterance,
+                task_history,
+                pending_fn_outputs=pending_fn_outputs or None,
+                photo_jpeg=jpeg,
             )
+            pending_fn_outputs = []
             turn = TurnTrace(utterance)
             system = _system_prompt()
-            if pending_fn_outputs:
-                turn_input: Any = [
-                    *pending_fn_outputs,
-                    {"role": "user", "content": history_note},
-                ]
-                pending_fn_outputs = []
-            else:
-                turn_input = history_note
 
             if previous_id is None:
                 response = _create_response(
@@ -1347,6 +1518,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()
+        stop_phone_gateway()
         stop_tray()
         sess.enter("idle", "Orchestrator stopped")
         bind_audio(None)
@@ -1367,6 +1539,7 @@ def main(argv: list[str] | None = None) -> None:
         run_orchestrator(auto=args.auto, max_steps=args.max_steps)
     except KeyboardInterrupt:
         print("\n[orchestrator] stopped.")
+        stop_phone_gateway()
         stop_tray()
         sys.exit(0)
 

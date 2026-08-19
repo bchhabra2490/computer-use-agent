@@ -91,7 +91,9 @@ class TaskLog:
             from app_status import log as status_log
             from app_status import set_state
 
-            status_log(f"[{kind}] {summary[:160]}")
+            # Full LLM text is already in the phone/tray ring via log_llm.
+            if kind not in {"message", "mark_done"}:
+                status_log(f"[{kind}] {summary[:160]}")
             if kind in {"start", "computer_actions", "run_terminal", "ask_user", "message"}:
                 set_state("agent", summary[:100], task=self.task, log_dir=str(self.dir))
         except Exception:

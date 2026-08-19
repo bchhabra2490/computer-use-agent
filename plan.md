@@ -231,7 +231,10 @@ Add a cheap orchestrator action (e.g. `point_at`) beside `start_task` / `ask_use
 
 ### 8b. Screenshots from all displays, index-marked
 
-Today occupancy text lists which app sits on which monitor, but computer-use screenshots are **primary only**. Clicky sends every display, labeled, so `screenN` in `POINT` (and any click/point decision) is unambiguous.
+Today occupancy text lists which app sits on which monitor. Computer-use
+screenshots stitch every display, labeled `screen N`, and clicks map through
+the virtual desktop (pyautogui origin = main display). `CU_ALL_DISPLAYS=0`
+reverts to primary-only.
 
 **Capture.** On each CU turn (and on `point_at`), grab every attached display (Quartz / ScreenCaptureKit / per-`display_id` capture already used by observe). Downscale like today’s CU cap. Attach images as `screen 0 (Built-in, secondary)`, `screen 1 (Studio Display, main / primary)` — same indexes as `list_monitors()` / occupancy.
 
@@ -243,7 +246,7 @@ Today occupancy text lists which app sits on which monitor, but computer-use scr
 
 The macOS **tray is status** (idle / listening / agent running). It does not teach. Clicky’s overlay is a transparent `NSPanel` that **joins all Spaces** and **does not become key** (`nonactivatingPanel`): the user keeps typing in Chrome while the buddy cursor moves. That is the right shape here.
 
-**First slice (logs).** A click-through, non-activating panel in the tray process shows live `app_status` logs. Prefers a **secondary** display so today’s primary-only CU screenshots do not include it. `ignoresMouseEvents` so clicks/scrolls pass through. `sharingType = none` so window-list captures skip it. On a **single** display, screenshots hide the panel for the capture and show it again after. `STATUS_OVERLAY=0` disables it. Point-at cursor comes later on this same window class.
+**First slice (logs).** A click-through, non-activating panel in the tray process shows live `app_status` logs. Prefers a **secondary** display. CU screenshots include every monitor, so the panel hides for each capture and comes back after. Toggle **Log Overlay** in the menu-bar icon. Point-at cursor comes later on this same window class.
 
 **Window.** Borderless, ignore-mouse except the drawn cursor/label if we want hover later (default: click-through so it never fights CU or the user). `canJoinAllSpaces` + `fullScreenAuxiliary` so it survives Space switches and fullscreen apps. Never `makeKeyAndOrderFront`. Never dock icon for this window.
 
@@ -252,3 +255,7 @@ The macOS **tray is status** (idle / listening / agent running). It does not tea
 **Lifetime.** Fade in for the turn (wake / `point_at` / mid-CU coach), fade out after TTS + a short idle. Optional: keep a tiny cursor while a CU job is running so the user can see where the *agent* is about to click, still without becoming key.
 
 **Done when.** You can type in a focused window on one display while the overlay points at a control on another, Spaces/fullscreen do not hide it, and clicking through the overlay does not steal focus or interrupt `DesktopController`.
+
+## 9. Phone gateway (companion app)
+
+Optional LAN HTTP+SSE process (`PHONE_GATEWAY=1`, default off). Phone sends text / audio / a camera still / mark-done; Mac orchestrator still owns CU, STT, TTS, and vision. Agent screenshots are saved as `.runtime/phone-screen.jpg` and served at `GET /v1/screen`. Phone camera photos are `POST /v1/photo` → `.runtime/phone-photo.jpg` attached to the next orchestrator turn. Same Wi‑Fi or phone hotspot; Tailscale only off-LAN. See `phone_gateway.py`.

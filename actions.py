@@ -2,11 +2,10 @@
 Translates OpenAI computer-use actions into real mouse/keyboard input via pyautogui,
 and captures screenshots of the actual desktop.
 
-Handles the Retina/HiDPI coordinate mismatch: on macOS, pyautogui.screenshot() returns
-an image at native pixel resolution (e.g. 2880x1800), but pyautogui.moveTo/click expect
-logical point coordinates (e.g. 1440x900). All model-generated coordinates are given
-relative to the (possibly downscaled) screenshot we send it, so we track two scale
-factors and compose them before ever moving the mouse.
+Handles the Retina/HiDPI coordinate mismatch: screenshots are native pixels,
+pyautogui clicks are logical points relative to the **main** display (other
+monitors can be negative X/Y). Multi-display captures stitch every monitor into
+one image so the computer tool can see and click all of them.
 """
 
 import os
@@ -284,6 +283,240 @@ def _ns_display_id(screen) -> int | None:
         return None
 
 
+def capture_all_displays_enabled() -> bool:
+    return os.environ.get("CU_ALL_DISPLAYS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def desktop_logical_bounds(monitors: list[dict]) -> tuple[int, int, int, int]:
+    """Return (origin_x, origin_y, width, height) of the virtual desktop."""
+    if not monitors:
+        w, h = pyautogui.size()
+        return 0, 0, int(w), int(h)
+    min_x = min(int(m["x"]) for m in monitors)
+    min_y = min(int(m["y"]) for m in monitors)
+    max_x = max(int(m["x"]) + int(m["width"]) for m in monitors)
+    max_y = max(int(m["y"]) + int(m["height"]) for m in monitors)
+    return min_x, min_y, max_x - min_x, max_y - min_y
+
+
+def desktop_logical_size(monitors: list[dict] | None = None) -> tuple[int, int]:
+    monitors = monitors if monitors is not None else list_monitors()
+    _ox, _oy, w, h = desktop_logical_bounds(monitors)
+    return w, h
+
+
+def _capture_cg_display(display_id: int) -> bytes | None:
+    if sys.platform != "darwin" or not display_id:
+        return None
+    try:
+        from AppKit import NSBitmapImageRep
+        from Quartz import CGDisplayCreateImage
+    except Exception:
+        return None
+    try:
+        from AppKit import NSBitmapImageFileTypePNG as png_type
+    except ImportError:
+        try:
+            from AppKit import NSPNGFileType as png_type
+        except ImportError:
+            return None
+    try:
+        image = CGDisplayCreateImage(int(display_id))
+        if image is None:
+            return None
+        rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+        blob = rep.representationUsingType_properties_(png_type, None)
+        if blob is None:
+            return None
+        return bytes(blob)
+    except Exception:
+        return None
+
+
+def capture_monitor_image(monitor: dict):
+    """PIL RGB image of one display, or None."""
+    import io
+
+    from PIL import Image
+
+    display_id = monitor.get("display_id")
+    png = _capture_cg_display(int(display_id)) if display_id else None
+    if not png:
+        return None
+    return Image.open(io.BytesIO(png)).convert("RGB")
+
+
+_LABEL_H = 22
+
+
+def stitch_monitor_screenshots(
+    monitors: list[dict],
+    images: dict[int, object],
+    *,
+    max_width: int,
+):
+    """Paste each display into a logical-desktop canvas. Returns (image, desk_w, desk_h)."""
+    from PIL import Image, ImageDraw
+
+    ox, oy, desk_w, desk_h = desktop_logical_bounds(monitors)
+    canvas = Image.new("RGB", (max(1, desk_w), max(1, desk_h)), (28, 28, 28))
+    draw = ImageDraw.Draw(canvas)
+    for m in monitors:
+        img = images.get(int(m["index"]))
+        w, h = int(m["width"]), int(m["height"])
+        x, y = int(m["x"]) - ox, int(m["y"]) - oy
+        if img is not None:
+            tile = img.convert("RGB").resize((max(1, w), max(1, h)))
+            canvas.paste(tile, (x, y))
+        role = "main" if m.get("main") else "secondary"
+        name = str(m.get("name") or f"Display {m.get('index')}")
+        banner = min(_LABEL_H, max(12, h // 8))
+        draw.rectangle([x, y, x + w, y + banner], fill=(16, 16, 16))
+        draw.text(
+            (x + 6, y + 3),
+            f"screen {m.get('index')}  {name}  ({role})",
+            fill=(255, 214, 70),
+        )
+    if max_width > 0 and canvas.width > max_width:
+        ratio = max_width / canvas.width
+        canvas = canvas.resize((max_width, max(1, round(canvas.height * ratio))))
+    return canvas, desk_w, desk_h
+
+
+def to_pyautogui_coords(
+    desk_x: float,
+    desk_y: float,
+    monitors: list[dict],
+) -> tuple[int, int]:
+    """Map list_monitors() desktop space → CGEvent / pyautogui (origin = main display)."""
+    if not monitors:
+        return round(desk_x), round(desk_y)
+    main = next((m for m in monitors if m.get("main")), monitors[0])
+    return round(desk_x - int(main["x"])), round(desk_y - int(main["y"]))
+
+
+def capture_all_displays_enabled() -> bool:
+    return os.environ.get("CU_ALL_DISPLAYS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def desktop_logical_bounds(monitors: list[dict]) -> tuple[int, int, int, int]:
+    """Return (origin_x, origin_y, width, height) of the virtual desktop."""
+    if not monitors:
+        w, h = pyautogui.size()
+        return 0, 0, int(w), int(h)
+    min_x = min(int(m["x"]) for m in monitors)
+    min_y = min(int(m["y"]) for m in monitors)
+    max_x = max(int(m["x"]) + int(m["width"]) for m in monitors)
+    max_y = max(int(m["y"]) + int(m["height"]) for m in monitors)
+    return min_x, min_y, max_x - min_x, max_y - min_y
+
+
+def desktop_logical_size(monitors: list[dict] | None = None) -> tuple[int, int]:
+    monitors = monitors if monitors is not None else list_monitors()
+    _ox, _oy, w, h = desktop_logical_bounds(monitors)
+    return w, h
+
+
+def _capture_cg_display(display_id: int) -> bytes | None:
+    if sys.platform != "darwin" or not display_id:
+        return None
+    try:
+        from AppKit import NSBitmapImageRep
+        from Quartz import CGDisplayCreateImage
+    except Exception:
+        return None
+    try:
+        from AppKit import NSBitmapImageFileTypePNG as png_type
+    except ImportError:
+        try:
+            from AppKit import NSPNGFileType as png_type
+        except ImportError:
+            return None
+    try:
+        image = CGDisplayCreateImage(int(display_id))
+        if image is None:
+            return None
+        rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+        blob = rep.representationUsingType_properties_(png_type, None)
+        if blob is None:
+            return None
+        return bytes(blob)
+    except Exception:
+        return None
+
+
+def capture_monitor_image(monitor: dict):
+    """PIL RGB image of one display, or None."""
+    import io
+
+    from PIL import Image
+
+    display_id = monitor.get("display_id")
+    png = _capture_cg_display(int(display_id)) if display_id else None
+    if not png:
+        return None
+    return Image.open(io.BytesIO(png)).convert("RGB")
+
+
+_LABEL_H = 22
+
+
+def stitch_monitor_screenshots(
+    monitors: list[dict],
+    images: dict[int, object],
+    *,
+    max_width: int,
+):
+    """Paste each display into a logical-desktop canvas. Returns (image, desk_w, desk_h)."""
+    from PIL import Image, ImageDraw
+
+    ox, oy, desk_w, desk_h = desktop_logical_bounds(monitors)
+    canvas = Image.new("RGB", (max(1, desk_w), max(1, desk_h)), (28, 28, 28))
+    draw = ImageDraw.Draw(canvas)
+    for m in monitors:
+        img = images.get(int(m["index"]))
+        w, h = int(m["width"]), int(m["height"])
+        x, y = int(m["x"]) - ox, int(m["y"]) - oy
+        if img is not None:
+            tile = img.convert("RGB").resize((max(1, w), max(1, h)))
+            canvas.paste(tile, (x, y))
+        role = "main" if m.get("main") else "secondary"
+        name = str(m.get("name") or f"Display {m.get('index')}")
+        banner = min(_LABEL_H, max(12, h // 8))
+        draw.rectangle([x, y, x + w, y + banner], fill=(16, 16, 16))
+        draw.text(
+            (x + 6, y + 3),
+            f"screen {m.get('index')}  {name}  ({role})",
+            fill=(255, 214, 70),
+        )
+    if max_width > 0 and canvas.width > max_width:
+        ratio = max_width / canvas.width
+        canvas = canvas.resize((max_width, max(1, round(canvas.height * ratio))))
+    return canvas, desk_w, desk_h
+
+
+def to_pyautogui_coords(
+    desk_x: float,
+    desk_y: float,
+    monitors: list[dict],
+) -> tuple[int, int]:
+    """Map list_monitors() desktop space → CGEvent / pyautogui (origin = main display)."""
+    if not monitors:
+        return round(desk_x), round(desk_y)
+    main = next((m for m in monitors if m.get("main")), monitors[0])
+    return round(desk_x - int(main["x"])), round(desk_y - int(main["y"]))
+
+
 def format_display_context(
     monitors: list[dict] | None = None,
     screenshot_size: tuple[int, int] | None = None,
@@ -300,11 +533,19 @@ def format_display_context(
         )
 
     primary = next((m for m in monitors if m["main"]), monitors[0])
-    lines.append(
-        f"Screenshots and action coordinates are relative to the primary display "
-        f"({primary['name']}, {primary['width']}x{primary['height']} logical). "
-        f"Other monitors are not in the screenshot."
-    )
+    if len(monitors) > 1 and capture_all_displays_enabled():
+        lines.append(
+            "Screenshots include EVERY attached display, laid out like the physical "
+            "desktop, each labeled screen N at the top. Click/move/scroll coordinates "
+            "are relative to this combined image (not one monitor). "
+            f"Main display for pyautogui origin is [{primary['index']}] {primary['name']}."
+        )
+    else:
+        lines.append(
+            f"Screenshots and action coordinates are relative to the primary display "
+            f"({primary['name']}, {primary['width']}x{primary['height']} logical). "
+            f"Other monitors are not in the screenshot."
+        )
     if screenshot_size:
         lines.append(
             f"Last / expected screenshot pixel size sent to you: " f"{screenshot_size[0]}x{screenshot_size[1]}."
@@ -317,37 +558,87 @@ class DesktopController:
     actual screen (logical point) space."""
 
     def __init__(self, screenshot_max_width: int = 1568):
-        # Logical screen size pyautogui uses for mouse coordinates.
+        # Logical size of the main display (pyautogui origin). Virtual desktop
+        # size is refreshed on each capture_screenshot().
         self.screen_w, self.screen_h = pyautogui.size()
         self.screenshot_max_width = screenshot_max_width
-        # Populated on each capture_screenshot() call.
         self._model_w, self._model_h = self.screen_w, self.screen_h
+        self._desk_w, self._desk_h = self.screen_w, self.screen_h
+        self._desk_ox = 0
+        self._desk_oy = 0
+        self._monitors: list[dict] = []
 
     def _to_screen_coords(self, x: int, y: int) -> tuple[int, int]:
-        """Map coordinates the model gave us (relative to the last screenshot we
-        sent it) into real logical screen coordinates."""
-        scale_x = self.screen_w / self._model_w
-        scale_y = self.screen_h / self._model_h
+        """Map screenshot pixels → pyautogui points (main-display origin)."""
+        mw = self._model_w or 1
+        mh = self._model_h or 1
+        desk_x = self._desk_ox + (x / mw) * self._desk_w
+        desk_y = self._desk_oy + (y / mh) * self._desk_h
+        if self._monitors:
+            return to_pyautogui_coords(desk_x, desk_y, self._monitors)
+        scale_x = self.screen_w / mw
+        scale_y = self.screen_h / mh
         return round(x * scale_x), round(y * scale_y)
 
     def capture_screenshot(self) -> bytes:
-        """Capture the real screen, downscale for the API, return PNG bytes.
-        Records the resulting image size so future action coordinates (which are
-        relative to this image) can be remapped correctly."""
-        from log_overlay import pause_overlay_for_capture
+        """Capture attached displays, downscale, return PNG bytes.
 
-        with pause_overlay_for_capture():
-            img = pyautogui.screenshot()  # native pixel resolution
-        if img.width > self.screenshot_max_width:
-            ratio = self.screenshot_max_width / img.width
-            img = img.resize((self.screenshot_max_width, round(img.height * ratio)))
-        self._model_w, self._model_h = img.size
+        Multi-display: one labeled stitch so the computer tool can see every
+        monitor. Coordinates are remapped through the virtual desktop.
+        """
+        from log_overlay import pause_overlay_for_capture
 
         import io
 
+        from PIL import Image
+
+        monitors = list_monitors()
+        if not capture_all_displays_enabled() and monitors:
+            primary = next((m for m in monitors if m.get("main")), monitors[0])
+            monitors = [primary]
+        self._monitors = monitors
+        ox, oy, desk_w, desk_h = desktop_logical_bounds(monitors)
+        self._desk_ox, self._desk_oy = ox, oy
+        self._desk_w, self._desk_h = desk_w, desk_h
+
+        with pause_overlay_for_capture(monitors=monitors):
+            img = None
+            if capture_all_displays_enabled() and len(monitors) >= 1:
+                tiles: dict[int, object] = {}
+                for m in monitors:
+                    shot = capture_monitor_image(m)
+                    if shot is not None:
+                        tiles[int(m["index"])] = shot
+                if tiles:
+                    img, desk_w, desk_h = stitch_monitor_screenshots(
+                        monitors,
+                        tiles,
+                        max_width=self.screenshot_max_width,
+                    )
+                    self._desk_w, self._desk_h = desk_w, desk_h
+            if img is None:
+                img = pyautogui.screenshot()
+                if not isinstance(img, Image.Image):
+                    img = Image.fromarray(img)
+                if img.width > self.screenshot_max_width:
+                    ratio = self.screenshot_max_width / img.width
+                    img = img.resize((self.screenshot_max_width, round(img.height * ratio)))
+                if len(monitors) <= 1:
+                    self._desk_w, self._desk_h = self.screen_w, self.screen_h
+                    self._desk_ox = self._desk_oy = 0
+                    self._monitors = monitors[:1] if monitors else []
+
+        self._model_w, self._model_h = img.size
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        return buf.getvalue()
+        png = buf.getvalue()
+        try:
+            from app_status import publish_phone_screen
+
+            publish_phone_screen(png)
+        except Exception:
+            pass
+        return png
 
     def run_actions(self, actions: list, *, should_stop=None) -> None:
         # Synthetic Ctrl+C from the model still delivers SIGINT to this process

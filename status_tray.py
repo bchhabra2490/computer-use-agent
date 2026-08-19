@@ -2,7 +2,7 @@
 macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
-Click for a menu with Send (while listening), Add Memory, Mark Task Done, logs, and quit.
+Click for a menu with Send (while listening), Add Memory, Log Overlay, Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -31,6 +31,7 @@ from app_status import (
     read_status,
     request_mark_done,
     request_send,
+    set_overlay_enabled,
     set_tray_pid,
     signal_quit_orchestrator,
     status_label,
@@ -249,14 +250,6 @@ def main() -> None:
             self.lastSig = None
             self.overlay = None
             try:
-                from log_overlay import LogOverlay, overlay_enabled
-
-                if overlay_enabled():
-                    self.overlay = LogOverlay()
-                    print("[tray] log overlay on (click-through, non-activating)", flush=True)
-            except Exception as e:
-                print(f"[tray] log overlay unavailable: {e}", flush=True)
-            try:
                 from log_overlay import OVERLAY_HIDE_NOTE, OVERLAY_SHOW_NOTE
 
                 center = NSDistributedNotificationCenter.defaultCenter()
@@ -327,7 +320,8 @@ def main() -> None:
                 f"{len(data.get('logs') or [])}|{len(agents)}|"
                 f"{data.get('done_requested')}|{data.get('stt_active')}|"
                 f"{data.get('send_requested')}|{data.get('overlay_hidden')}|"
-                f"{data.get('orchestrator_pid')}|{data.get('agent_pid')}"
+                f"{data.get('overlay_enabled')}|{data.get('orchestrator_pid')}|"
+                f"{data.get('agent_pid')}"
             )
             if sig == self.lastSig:
                 return
@@ -343,6 +337,21 @@ def main() -> None:
                     button.setTitle_(glyph)
                 button.setToolTip_(format_tooltip(data))
             self.rebuildMenu(data)
+            self.syncOverlay(data)
+
+        @objc.python_method
+        def syncOverlay(self, data: dict) -> None:
+            from log_overlay import LogOverlay, overlay_enabled
+
+            want = overlay_enabled(data)
+            if want and getattr(self, "overlay", None) is None:
+                try:
+                    self.overlay = LogOverlay()
+                    print("[tray] log overlay on (click-through, non-activating)", flush=True)
+                except Exception as e:
+                    print(f"[tray] log overlay unavailable: {e}", flush=True)
+            elif not want and getattr(self, "overlay", None) is not None:
+                self.teardownOverlay()
             overlay = getattr(self, "overlay", None)
             if overlay is not None:
                 try:
@@ -475,6 +484,17 @@ def main() -> None:
             add_mem.setTarget_(self)
             self.menu.addItem_(add_mem)
 
+            from log_overlay import overlay_enabled as overlay_is_on
+
+            overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Log Overlay",
+                "toggleOverlay:",
+                "",
+            )
+            overlay_item.setTarget_(self)
+            overlay_item.setState_(1 if overlay_is_on(data) else 0)
+            self.menu.addItem_(overlay_item)
+
             if agents:
                 mark_all = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                     "Mark Task Done",
@@ -550,6 +570,13 @@ def main() -> None:
                 )
             except Exception:
                 NSWorkspace.sharedWorkspace().openFile_(str(STATUS_PATH.parent))
+
+        def toggleOverlay_(self, _sender) -> None:
+            from log_overlay import overlay_enabled
+
+            data = read_status()
+            set_overlay_enabled(not overlay_enabled(data))
+            self.applyStatus(read_status())
 
         def sendAudio_(self, _sender) -> None:
             data = read_status()

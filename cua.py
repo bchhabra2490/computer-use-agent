@@ -270,6 +270,15 @@ def _stop_tray() -> None:
         pass
 
 
+def _stop_phone_gateway() -> None:
+    try:
+        from phone_gateway import stop_phone_gateway
+
+        stop_phone_gateway()
+    except Exception:
+        pass
+
+
 def cmd_stop() -> int:
     pid = running_pid()
     if pid is None:
@@ -286,6 +295,7 @@ def cmd_stop() -> int:
 
     stopped = _terminate(pid)
     _stop_tray()
+    _stop_phone_gateway()
     _clear_pid_file()
     if stopped:
         print(f"cua stopped (pid {pid})")

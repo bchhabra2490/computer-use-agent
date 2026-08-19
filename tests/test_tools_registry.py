@@ -22,6 +22,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("who_am_i", names)
         self.assertIn("ask_user", names)
         self.assertIn("list_open_apps", names)
+        self.assertIn("set_timer", names)
         self.assertNotIn("computer", names)
         self.assertNotIn("mark_done", names)
 
@@ -32,6 +33,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("mark_done", names)
         self.assertIn("who_am_i", names)
         self.assertIn("list_open_apps", names)
+        self.assertIn("set_timer", names)
         self.assertNotIn("start_task", names)
         self.assertNotIn("give_response_to_user", names)
 

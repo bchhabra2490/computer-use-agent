@@ -38,7 +38,7 @@ import uuid
 
 from openai import OpenAI
 
-from actions import DesktopController, list_monitors
+from actions import DesktopController, desktop_logical_size, list_monitors
 from accessibility import read_ui_text
 from app_status import (
     consume_mark_done,
@@ -148,6 +148,12 @@ def _print_and_log_messages(response, log: TaskLog) -> list[str]:
             for part in item.content:
                 if getattr(part, "type", None) == "output_text":
                     print(f"\n[agent] {part.text}")
+                    try:
+                        from app_status import log_llm
+
+                        log_llm(part.text, source="agent")
+                    except Exception:
+                        pass
                     log.record("message", part.text[:200], {"text": part.text})
                     texts.append(part.text)
     return texts
@@ -386,6 +392,12 @@ def _handle_function_call(
         args = json.loads(call.arguments or "{}")
         summary = (args.get("summary") or "Task complete.").strip()
         print(f"[agent] mark_done: {summary[:160]}")
+        try:
+            from app_status import log_llm
+
+            log_llm(summary, source="mark_done")
+        except Exception:
+            pass
         log.record("mark_done", summary[:200], {"summary": summary})
         raise TaskMarkedDone(summary)
     log.record("unsupported_tool", call.name, {"name": call.name})
@@ -642,8 +654,8 @@ def run(
     get_session().enter_and_log("agent", f"Starting: {task[:120]}", task=task, log_dir=str(log.dir))
 
     monitors = list_monitors()
-    primary = next((m for m in monitors if m["main"]), monitors[0])
-    shot_w, shot_h = primary["native_width"], primary["native_height"]
+    desk_w, desk_h = desktop_logical_size(monitors)
+    shot_w, shot_h = desk_w, desk_h
     if shot_w > desktop.screenshot_max_width:
         ratio = desktop.screenshot_max_width / shot_w
         shot_w = desktop.screenshot_max_width
@@ -756,14 +768,18 @@ def run(
                 "3c. Open windows, running apps, and browser tabs are listed in "
                 "the occupancy block. Call list_open_apps for a fresh snapshot "
                 "(do not scrape the tab bar with the computer tool).\n"
+                "3d. For a countdown or reminder (tea, oven, 5 minutes), call "
+                "set_timer and mark_done. Do not open Clock, do not sleep, do not "
+                "watch the screen until it rings. speak=true when they asked to "
+                "be reminded of something.\n"
                 "4. Follow the skill’s steps; adapt to what you see on screen.\n"
                 "5. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI. Never sleep for "
                 "media duration or use macOS say for spoken updates.\n"
-                "6. Use the computer tool for UI actions on this real desktop. "
-                "If Open windows by display lists the target app on another monitor, "
-                "activate or move to that screen — do not hunt only in the primary "
-                "screenshot.\n"
+        "6. Use the computer tool for UI actions on this real desktop. "
+        "The screenshot shows every monitor, labeled screen N. Click the "
+        "display that holds the target app (see occupancy). Do not assume "
+        "the task is on the primary display.\n"
                 "7. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
                 "8. Anything the user will hear (mark_done summary, ask_user, on-screen "

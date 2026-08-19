@@ -23,6 +23,11 @@ RUNTIME_DIR = Path(
     )
 )
 STATUS_PATH = RUNTIME_DIR / "status.json"
+PHONE_SCREEN_PATH = RUNTIME_DIR / "phone-screen.jpg"
+PHONE_SCREEN_MAX_WIDTH = int(os.environ.get("PHONE_SCREEN_MAX_WIDTH", "1080"))
+PHONE_SCREEN_QUALITY = int(os.environ.get("PHONE_SCREEN_QUALITY", "60"))
+PHONE_PHOTO_PATH = RUNTIME_DIR / "phone-photo.jpg"
+PHONE_PHOTO_TTL_SEC = float(os.environ.get("PHONE_PHOTO_TTL_SEC", str(30 * 60)))
 MAX_LOG_LINES = int(os.environ.get("STATUS_LOG_LINES", "40"))
 
 _lock = threading.Lock()
@@ -47,6 +52,19 @@ def _default_state() -> dict[str, Any]:
         "agents": [],  # active subagents / computer-agent jobs
         "overlay_hidden": False,
         "overlay_ack_hidden": False,
+        "overlay_enabled": True,
+        "phone_gateway_pid": None,
+        "pending_utterances": [],
+        "pending_speaks": [],
+        "last_spoken": None,
+        "last_llm": None,
+        "screen_at": None,
+        "screen_width": None,
+        "screen_height": None,
+        "phone_photo_at": None,
+        "phone_photo_pending": False,
+        "phone_photo_width": None,
+        "phone_photo_height": None,
     }
 
 
@@ -67,6 +85,10 @@ def _read() -> dict[str, Any]:
             base["logs"] = []
         if not isinstance(base.get("agents"), list):
             base["agents"] = []
+        if not isinstance(base.get("pending_utterances"), list):
+            base["pending_utterances"] = []
+        if not isinstance(base.get("pending_speaks"), list):
+            base["pending_speaks"] = []
         return base
     except Exception:
         return _default_state()
@@ -120,6 +142,30 @@ def log(message: str, *, also_print: bool = False) -> None:
         _write(data)
 
 
+LLM_LOG_CHARS = 2000
+LLM_STORE_CHARS = 4000
+
+
+def log_llm(text: str, *, source: str = "llm") -> None:
+    """Put an LLM reply in the status log (and ``last_llm``) for the phone / tray."""
+    text = (text or "").strip()
+    if not text:
+        return
+    source = (source or "llm").strip() or "llm"
+    one_line = " ".join(text.split())
+    stamp = time.strftime("%H:%M:%S")
+    line = f"{stamp} [{source}] {one_line[:LLM_LOG_CHARS]}"
+    with _lock:
+        data = _read()
+        logs = list(data.get("logs") or [])
+        logs.append(line)
+        if len(logs) > MAX_LOG_LINES:
+            logs = logs[-MAX_LOG_LINES:]
+        data["logs"] = logs
+        data["last_llm"] = text[:LLM_STORE_CHARS]
+        _write(data)
+
+
 def set_and_log(state: str, message: str, *, detail: str | None = None, **kwargs: Any) -> None:
     """Set state and append the same message to the log ring."""
     detail = message if detail is None else detail
@@ -143,6 +189,14 @@ def set_overlay_hidden(hidden: bool) -> None:
         _write(data)
 
 
+def set_overlay_enabled(enabled: bool) -> None:
+    """Show or hide the on-screen log panel (tray menu toggle)."""
+    with _lock:
+        data = _read()
+        data["overlay_enabled"] = bool(enabled)
+        _write(data)
+
+
 def ack_overlay_hidden(hidden: bool) -> None:
     """Tray confirms the panel is actually off-screen (or back)."""
     with _lock:
@@ -156,6 +210,249 @@ def set_tray_pid(pid: int | None) -> None:
         data = _read()
         data["tray_pid"] = pid
         _write(data)
+
+
+def set_phone_gateway_pid(pid: int | None) -> None:
+    with _lock:
+        data = _read()
+        data["phone_gateway_pid"] = pid
+        _write(data)
+
+
+def enqueue_utterance(text: str, *, source: str = "phone", photo: bool = False) -> None:
+    """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
+    text = (text or "").strip()
+    if not text:
+        return
+    source = (source or "phone").strip() or "phone"
+    with _lock:
+        data = _read()
+        pending = list(data.get("pending_utterances") or [])
+        pending.append(
+            {
+                "text": text,
+                "source": source,
+                "ts": time.time(),
+                "photo": bool(photo),
+            }
+        )
+        data["pending_utterances"] = pending[-20:]
+        _write(data)
+    kind = "photo" if photo else "queued"
+    log(f"[phone] {kind}: {text[:160]}")
+
+
+def utterance_pending() -> bool:
+    with _lock:
+        pending = _read().get("pending_utterances") or []
+        return bool(pending)
+
+
+def consume_utterance() -> str | None:
+    """Pop the next queued text command, or None."""
+    with _lock:
+        data = _read()
+        pending = list(data.get("pending_utterances") or [])
+        if not pending:
+            return None
+        item = pending.pop(0)
+        data["pending_utterances"] = pending
+        _write(data)
+    if isinstance(item, str):
+        text = item.strip()
+        return text or None
+    text = str((item or {}).get("text") or "").strip()
+    return text or None
+
+
+def enqueue_speak(text: str, *, source: str = "timer") -> None:
+    """Queue a line for the orchestrator to speak (timer reminders, not user STT)."""
+    text = (text or "").strip()
+    if not text:
+        return
+    source = (source or "timer").strip() or "timer"
+    with _lock:
+        data = _read()
+        pending = list(data.get("pending_speaks") or [])
+        pending.append({"text": text, "source": source, "ts": time.time()})
+        data["pending_speaks"] = pending[-20:]
+        _write(data)
+    log(f"[{source}] speak: {text[:160]}")
+
+
+def speak_pending() -> bool:
+    with _lock:
+        pending = _read().get("pending_speaks") or []
+        return bool(pending)
+
+
+def consume_speak() -> str | None:
+    """Pop the next queued TTS line, or None."""
+    with _lock:
+        data = _read()
+        pending = list(data.get("pending_speaks") or [])
+        if not pending:
+            return None
+        item = pending.pop(0)
+        data["pending_speaks"] = pending
+        _write(data)
+    if isinstance(item, str):
+        text = item.strip()
+        return text or None
+    text = str((item or {}).get("text") or "").strip()
+    return text or None
+
+
+def set_last_spoken(text: str) -> None:
+    text = (text or "").strip()
+    if not text:
+        return
+    with _lock:
+        data = _read()
+        data["last_spoken"] = text[:2000]
+        _write(data)
+
+
+def write_phone_photo(jpeg: bytes, *, width: int, height: int) -> None:
+    """Store the latest phone-camera JPEG for the orchestrator to attach."""
+    if not jpeg:
+        raise ValueError("empty photo")
+    _ensure_dir()
+    tmp = PHONE_PHOTO_PATH.with_suffix(".tmp")
+    tmp.write_bytes(jpeg)
+    tmp.replace(PHONE_PHOTO_PATH)
+    with _lock:
+        data = _read()
+        data["phone_photo_at"] = time.time()
+        data["phone_photo_pending"] = True
+        data["phone_photo_width"] = int(width)
+        data["phone_photo_height"] = int(height)
+        _write(data)
+
+
+def phone_photo_pending() -> bool:
+    with _lock:
+        return bool(_read().get("phone_photo_pending"))
+
+
+def phone_photo_jpeg(*, consume_pending: bool = False, max_age: float | None = None) -> bytes | None:
+    """Return the latest phone JPEG if it is still fresh, else None."""
+    ttl = PHONE_PHOTO_TTL_SEC if max_age is None else max_age
+    with _lock:
+        data = _read()
+        at = data.get("phone_photo_at")
+        if consume_pending and data.get("phone_photo_pending"):
+            data["phone_photo_pending"] = False
+            _write(data)
+    if not at:
+        return None
+    try:
+        age = time.time() - float(at)
+    except (TypeError, ValueError):
+        return None
+    if ttl and ttl > 0 and age > ttl:
+        return None
+    try:
+        blob = PHONE_PHOTO_PATH.read_bytes()
+    except OSError:
+        return None
+    return blob or None
+
+
+def clear_phone_photo() -> None:
+    with _lock:
+        data = _read()
+        data["phone_photo_at"] = None
+        data["phone_photo_pending"] = False
+        data["phone_photo_width"] = None
+        data["phone_photo_height"] = None
+        _write(data)
+    try:
+        PHONE_PHOTO_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+_phone_screen_gen = 0
+_phone_screen_lock = threading.Lock()
+
+
+def set_phone_screen(*, at: float, width: int, height: int) -> None:
+    with _lock:
+        data = _read()
+        data["screen_at"] = float(at)
+        data["screen_width"] = int(width)
+        data["screen_height"] = int(height)
+        _write(data)
+
+
+def _encode_phone_jpeg(png_bytes: bytes) -> tuple[bytes, int, int]:
+    import io
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(png_bytes))
+    if img.mode not in {"RGB", "L"}:
+        img = img.convert("RGB")
+    max_w = max(320, PHONE_SCREEN_MAX_WIDTH)
+    if img.width > max_w:
+        ratio = max_w / img.width
+        img = img.resize((max_w, max(1, round(img.height * ratio))))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=max(30, min(PHONE_SCREEN_QUALITY, 90)))
+    return buf.getvalue(), img.width, img.height
+
+
+def write_phone_screen(png_bytes: bytes) -> bool:
+    """Synchronously encode the agent's PNG and replace ``phone-screen.jpg``."""
+    if not png_bytes:
+        return False
+    jpeg, width, height = _encode_phone_jpeg(png_bytes)
+    _ensure_dir()
+    tmp = PHONE_SCREEN_PATH.with_suffix(".tmp")
+    tmp.write_bytes(jpeg)
+    tmp.replace(PHONE_SCREEN_PATH)
+    set_phone_screen(at=time.time(), width=width, height=height)
+    return True
+
+
+def publish_phone_screen(png_bytes: bytes, *, background: bool = True) -> None:
+    """Share the latest computer-use screenshot with the phone gateway."""
+    if not png_bytes:
+        return
+    if not background:
+        write_phone_screen(png_bytes)
+        return
+    global _phone_screen_gen
+    with _phone_screen_lock:
+        _phone_screen_gen += 1
+        gen = _phone_screen_gen
+
+    def _run() -> None:
+        try:
+            jpeg, width, height = _encode_phone_jpeg(png_bytes)
+            with _phone_screen_lock:
+                if gen != _phone_screen_gen:
+                    return
+                _ensure_dir()
+                tmp = PHONE_SCREEN_PATH.with_suffix(".tmp")
+                tmp.write_bytes(jpeg)
+                tmp.replace(PHONE_SCREEN_PATH)
+            set_phone_screen(at=time.time(), width=width, height=height)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, name="phone-screen", daemon=True).start()
+
+
+def read_phone_screen() -> bytes | None:
+    try:
+        if not PHONE_SCREEN_PATH.is_file():
+            return None
+        data = PHONE_SCREEN_PATH.read_bytes()
+    except OSError:
+        return None
+    return data or None
 
 
 def register_orchestrator(pid: int | None = None) -> None:

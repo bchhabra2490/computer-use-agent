@@ -1,13 +1,13 @@
 """Non-activating, click-through log overlay (macOS).
 
 Shows live agent/orchestrator logs on a transparent NSPanel. Clicks pass
-through to whatever is underneath. Prefers a secondary display so computer-use
-screenshots (still primary-only) do not include the panel.
+through to whatever is underneath. Prefers a secondary display.
 
-On a single display, ``pause_overlay_for_capture`` hides the panel for the
-duration of a screenshot so ``pyautogui`` does not capture it.
+Computer-use screenshots now include every monitor, so the panel hides for
+each capture (same as a single-display Mac) and comes back after.
 
-``STATUS_OVERLAY=0`` disables it. Built by the tray process (AppKit main thread).
+Toggle from the menu-bar icon (**Log Overlay**). Built by the tray process
+(AppKit main thread).
 """
 
 from __future__ import annotations
@@ -27,13 +27,13 @@ OVERLAY_HIDE_NOTE = "cua.logOverlay.hide"
 OVERLAY_SHOW_NOTE = "cua.logOverlay.show"
 
 
-def overlay_enabled() -> bool:
-    return os.environ.get("STATUS_OVERLAY", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+def overlay_enabled(data: dict[str, Any] | None = None) -> bool:
+    """True unless the tray toggle turned the panel off (default on)."""
+    snap = data if data is not None else read_status()
+    val = snap.get("overlay_enabled")
+    if val is None:
+        return True
+    return bool(val)
 
 
 def overlay_target_monitor(monitors: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -74,26 +74,19 @@ def overlay_owner_alive(data: dict[str, Any] | None = None) -> bool:
 
 def overlay_should_show(data: dict[str, Any] | None = None) -> bool:
     """Panel is visible only while an owner process is alive and not mid-capture."""
-    if not overlay_enabled():
-        return False
     snap = data if data is not None else read_status()
+    if not overlay_enabled(snap):
+        return False
     if snap.get("overlay_hidden"):
         return False
     return overlay_owner_alive(snap)
 
 
 def should_hide_overlay_for_capture(monitors: list[dict[str, Any]] | None = None) -> bool:
-    """True when a full-display screenshot would include the overlay."""
+    """True when a CU screenshot would include the overlay (all displays)."""
     if not overlay_enabled():
         return False
-    if monitors is None:
-        try:
-            from actions import list_monitors
-
-            monitors = list_monitors()
-        except Exception:
-            return True
-    return len(monitors) <= 1
+    return True
 
 
 def _post_overlay_note(name: str) -> None:
@@ -123,7 +116,7 @@ def pause_overlay_for_capture(
     *,
     monitors: list[dict[str, Any]] | None = None,
 ) -> Iterator[None]:
-    """Hide the log overlay while capturing if only one display is attached."""
+    """Hide the log overlay while capturing a screenshot."""
     if not should_hide_overlay_for_capture(monitors):
         yield
         return

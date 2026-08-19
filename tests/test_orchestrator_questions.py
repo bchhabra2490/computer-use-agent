@@ -17,6 +17,7 @@ from orchestrator import (  # noqa: E402
     _looks_like_question,
     _strip_wait_filler,
     _turn_already_spoke,
+    _user_turn_input,
 )
 
 
@@ -112,6 +113,25 @@ class RepeatSpeechTests(unittest.TestCase):
                 call, {"output": "Speech interrupted. User then said: stop."}
             )
         )
+
+
+class UserTurnInputTests(unittest.TestCase):
+    def test_plain_text_without_photo(self) -> None:
+        inp = _user_turn_input("open notes", [])
+        self.assertIsInstance(inp, str)
+        self.assertIn("open notes", inp)
+
+    def test_attaches_phone_jpeg(self) -> None:
+        jpeg = b"\xff\xd8\xff" + b"\x00" * 20
+        inp = _user_turn_input("what is this?", [], photo_jpeg=jpeg)
+        self.assertIsInstance(inp, list)
+        content = inp[0]["content"]
+        types = [part["type"] for part in content]
+        self.assertIn("input_text", types)
+        self.assertIn("input_image", types)
+        url = next(p["image_url"] for p in content if p["type"] == "input_image")
+        self.assertTrue(url.startswith("data:image/jpeg;base64,"))
+        self.assertIn("image attached", content[0]["text"])
 
 
 if __name__ == "__main__":

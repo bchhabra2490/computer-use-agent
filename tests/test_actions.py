@@ -117,5 +117,90 @@ class BrowserOverlayDismissTests(unittest.TestCase):
         self.assertEqual(press.call_args_list[1].args[0], "tab")
 
 
+class ScreenshotPublishTests(unittest.TestCase):
+    def test_capture_publishes_png_to_phone(self) -> None:
+        from contextlib import nullcontext
+
+        from PIL import Image
+
+        ctrl = act.DesktopController(screenshot_max_width=1568)
+        img = Image.new("RGB", (40, 20), (9, 8, 7))
+        with (
+            patch.dict("os.environ", {"CU_ALL_DISPLAYS": "0"}),
+            patch.object(act.pyautogui, "screenshot", return_value=img),
+            patch("log_overlay.pause_overlay_for_capture", return_value=nullcontext()),
+            patch("app_status.publish_phone_screen") as publish,
+        ):
+            png = ctrl.capture_screenshot()
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        publish.assert_called_once()
+        self.assertEqual(publish.call_args.args[0], png)
+
+
+class MultiDisplayTests(unittest.TestCase):
+    def test_click_on_left_monitor_uses_negative_x(self) -> None:
+        monitors = [
+            {
+                "index": 0,
+                "name": "Built-in",
+                "main": False,
+                "x": 0,
+                "y": 0,
+                "width": 1440,
+                "height": 900,
+            },
+            {
+                "index": 1,
+                "name": "Studio",
+                "main": True,
+                "x": 1440,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+            },
+        ]
+        self.assertEqual(act.to_pyautogui_coords(100, 200, monitors), (-1340, 200))
+        self.assertEqual(act.to_pyautogui_coords(1540, 200, monitors), (100, 200))
+
+    def test_screenshot_coords_map_through_virtual_desktop(self) -> None:
+        ctrl = act.DesktopController()
+        ctrl._model_w, ctrl._model_h = 4000, 1440
+        ctrl._desk_w, ctrl._desk_h = 4000, 1440
+        ctrl._desk_ox, ctrl._desk_oy = 0, 0
+        ctrl._monitors = [
+            {"index": 0, "name": "Built-in", "main": False, "x": 0, "y": 0, "width": 1440, "height": 900},
+            {"index": 1, "name": "Studio", "main": True, "x": 1440, "y": 0, "width": 2560, "height": 1440},
+        ]
+        self.assertEqual(ctrl._to_screen_coords(100, 200), (-1340, 200))
+        self.assertEqual(ctrl._to_screen_coords(1540, 80), (100, 80))
+
+    def test_stitch_places_monitors_side_by_side(self) -> None:
+        from PIL import Image
+
+        monitors = [
+            {"index": 0, "name": "A", "main": False, "x": 0, "y": 0, "width": 40, "height": 40},
+            {"index": 1, "name": "B", "main": True, "x": 40, "y": 0, "width": 80, "height": 40},
+        ]
+        images = {
+            0: Image.new("RGB", (40, 40), (255, 0, 0)),
+            1: Image.new("RGB", (80, 40), (0, 255, 0)),
+        }
+        canvas, dw, dh = act.stitch_monitor_screenshots(monitors, images, max_width=1000)
+        self.assertEqual((dw, dh), (120, 40))
+        self.assertEqual(canvas.size, (120, 40))
+        self.assertEqual(canvas.getpixel((8, 30)), (255, 0, 0))
+        self.assertEqual(canvas.getpixel((70, 30)), (0, 255, 0))
+
+    def test_display_context_mentions_every_screen(self) -> None:
+        text = act.format_display_context(
+            [
+                {"index": 0, "name": "Built-in", "main": False, "x": 0, "y": 0, "width": 1440, "height": 900, "scale": 2, "native_width": 2880, "native_height": 1800},
+                {"index": 1, "name": "Studio", "main": True, "x": 1440, "y": 0, "width": 2560, "height": 1440, "scale": 2, "native_width": 5120, "native_height": 2880},
+            ]
+        )
+        self.assertIn("EVERY attached display", text)
+        self.assertIn("screen N", text)
+
+
 if __name__ == "__main__":
     unittest.main()

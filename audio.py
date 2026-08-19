@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
+from app_status import consume_utterance, utterance_pending
 from bus import strip_wake_prefix
 from session import Session, get_session
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
@@ -109,6 +110,8 @@ class AudioSession:
         """Wake word → one cloud STT utterance. Returns None if stopped or empty."""
 
         def _stop() -> bool:
+            if utterance_pending():
+                return True
             if quit_check is not None:
                 try:
                     if quit_check():
@@ -122,8 +125,12 @@ class AudioSession:
                     return True
             return False
 
+        queued = consume_utterance()
+        if queued:
+            return queued
+
         if not self.wait_for_wake(should_stop=_stop, prompt=wake_prompt):
-            return None
+            return consume_utterance()
         if quit_check is not None and quit_check():
             return None
         hit = get_last_wake()

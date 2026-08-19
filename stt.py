@@ -126,6 +126,10 @@ class NoSpeechError(RuntimeError):
     """Recording / transcription produced nothing usable."""
 
 
+class PhoneCommandReady(Exception):
+    """A phone-gateway text command arrived; abort mic capture and use it."""
+
+
 def save_recording(
     wav_bytes: bytes,
     *,
@@ -473,6 +477,25 @@ def _send_requested() -> bool:
         return False
 
 
+def _phone_pending() -> bool:
+    try:
+        from app_status import utterance_pending
+
+        return utterance_pending()
+    except Exception:
+        return False
+
+
+def _consume_phone_utterance() -> str | None:
+    try:
+        from app_status import consume_utterance
+
+        text = consume_utterance()
+    except Exception:
+        return None
+    return (text or "").strip() or None
+
+
 def _listen_end_spotter():
     try:
         from wake import listen_end_spotter
@@ -749,6 +772,8 @@ def _listen_realtime_body(
             else f"Listening… (sends after {idle:g}s without new words, {hint})"
         )
     )
+    if _phone_pending():
+        raise PhoneCommandReady()
 
     chunk_frames = max(1, int(CHUNK_SECONDS * capture_rate))
     warmup_frames = int(MIC_WARMUP_SECONDS * capture_rate)
@@ -845,6 +870,15 @@ def _listen_realtime_body(
                     text = shared["partial"].strip()
                     last = shared["last_delta_at"]
                     first = shared["first_word_at"]
+                if _phone_pending():
+                    print("[stt] phone command — using typed text.", flush=True)
+                    stop.set()
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+                    errors.put(PhoneCommandReady())
+                    return
                 if wake_send.is_set() or _send_requested():
                     _commit_once(connection, "Send — processing audio.")
                     return
@@ -944,6 +978,9 @@ def _listen_realtime_body(
             stop.set()
             worker.join(timeout=2.0)
             watcher.join(timeout=1.0)
+
+    if not errors.empty():
+        raise errors.get()
 
     if not pcm_24k_chunks:
         raise NoSpeechError("No audio captured — check microphone permissions.")
@@ -1052,6 +1089,9 @@ def record_until_silence(
                         break
                 except Exception:
                     pass
+            if _phone_pending():
+                print("[stt] phone command — using typed text.", flush=True)
+                raise PhoneCommandReady()
             if _send_requested():
                 print("[stt] menu Send — processing audio.")
                 sent = True
@@ -1257,6 +1297,10 @@ def listen_once(
     for attempt in range(1, max_attempts + 1):
         wav: bytes | None = None
         live = ""
+        queued = _consume_phone_utterance()
+        if queued:
+            print(f'Heard: "{queued}" (phone)')
+            return queued
         try:
             live, wav = listen_realtime(
                 client,
@@ -1273,6 +1317,15 @@ def listen_once(
             save_recording(wav, transcript=live, kind=mode, live_transcript=live)
             print(f'Heard: "{live}"')
             return live
+        except PhoneCommandReady:
+            queued = _consume_phone_utterance()
+            if queued:
+                print(f'Heard: "{queued}" (phone)')
+                return queued
+            last_err = NoSpeechError("Phone command vanished before it was read.")
+            print(f"[mic] {last_err} (attempt {attempt}/{max_attempts})", file=sys.stderr)
+            if attempt < max_attempts:
+                time.sleep(0.2)
         except NoSpeechError as e:
             if wav:
                 save_recording(

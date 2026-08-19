@@ -77,6 +77,27 @@ class FlagTests(unittest.TestCase):
         st.set_stt_listening(False)
         self.assertFalse(st.send_pending())
 
+    def test_enqueue_and_consume_utterance(self) -> None:
+        self.assertFalse(st.utterance_pending())
+        st.enqueue_utterance("  play a song  ")
+        self.assertTrue(st.utterance_pending())
+        self.assertEqual(st.consume_utterance(), "play a song")
+        self.assertFalse(st.utterance_pending())
+        self.assertIsNone(st.consume_utterance())
+
+    def test_utterance_queue_is_fifo(self) -> None:
+        st.enqueue_utterance("one")
+        st.enqueue_utterance("two")
+        self.assertEqual(st.consume_utterance(), "one")
+        self.assertEqual(st.consume_utterance(), "two")
+
+    def test_log_llm_stores_full_reply(self) -> None:
+        body = "A" * 500
+        st.log_llm(body, source="llm")
+        snap = st.read_status()
+        self.assertEqual(snap["last_llm"], body)
+        self.assertTrue(any("[llm]" in line and body[:80] in line for line in snap["logs"]))
+
 
 if __name__ == "__main__":
     unittest.main()

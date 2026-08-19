@@ -50,15 +50,19 @@ import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
     active_agents,
+    consume_utterance,
     is_mark_done_utterance,
+    log_llm,
     mark_done_pending,
     quit_requested,
     register_orchestrator,
     remove_agent,
     request_mark_done,
     request_quit,
+    set_last_spoken,
     unregister_orchestrator,
     upsert_agent,
+    utterance_pending,
 )
 from bus import (
     AgentMessageInbox,
@@ -80,6 +84,7 @@ from mcp_client import (
     stop_mcp,
 )
 from session import Session, bind_session, get_session
+from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
 from stt import POST_TTS_COOLDOWN, ask_user, listen_once
 from tools_registry import orchestrator_tools, run_shared_tool
@@ -206,6 +211,10 @@ def _print_messages(response) -> None:
             for part in item.content:
                 if getattr(part, "type", None) == "output_text":
                     print(f"\n[orchestrator] {part.text}")
+                    try:
+                        log_llm(part.text, source="llm")
+                    except Exception:
+                        pass
 
 
 def _record_llm_step(turn: TurnTrace | None, response) -> None:
@@ -546,7 +555,8 @@ def _speak(client: OpenAI, text: str) -> str | None:
     """
     if not text:
         return None
-    status_log(f"[tts] {text[:160]}")
+    log_llm(text, source="tts")
+    set_last_spoken(text)
     audio = get_audio()
     if audio is not None:
         return audio.speak(text)
@@ -563,7 +573,8 @@ def _speak_later(client: OpenAI, text: str) -> None:
     """Start TTS without blocking the agent / tool loop."""
     if not text:
         return
-    status_log(f"[tts] {text[:160]}")
+    log_llm(text, source="tts")
+    set_last_spoken(text)
     audio = get_audio()
     if audio is not None:
         audio.speak_later(text)
@@ -657,6 +668,8 @@ def _listen_command(
     get_session().enter("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
 
     def _stop() -> bool:
+        if utterance_pending():
+            return True
         if quit_requested():
             return True
         if should_stop is not None:
@@ -666,8 +679,11 @@ def _listen_command(
                 return True
         return False
 
+    queued = consume_utterance()
+    if queued:
+        return queued
     if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
-        return None
+        return consume_utterance()
     if quit_requested():
         return None
     hit = get_last_wake()
@@ -874,6 +890,8 @@ def _handle_tool(
         handled_barge = False
         if message and already_streamed:
             # Playback continues on the TTS worker — do not block the agent.
+            log_llm(message, source="tts")
+            set_last_spoken(message)
             print(
                 "[orchestrator] give_response already streaming via low-latency TTS " "(not waiting)",
                 flush=True,
@@ -1136,6 +1154,7 @@ def _process_response(
 
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     ensure_tray_running()
+    ensure_phone_gateway()
     register_orchestrator()
     sess = Session()
     bind_session(sess)
@@ -1347,6 +1366,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()
+        stop_phone_gateway()
         stop_tray()
         sess.enter("idle", "Orchestrator stopped")
         bind_audio(None)
@@ -1367,6 +1387,7 @@ def main(argv: list[str] | None = None) -> None:
         run_orchestrator(auto=args.auto, max_steps=args.max_steps)
     except KeyboardInterrupt:
         print("\n[orchestrator] stopped.")
+        stop_phone_gateway()
         stop_tray()
         sys.exit(0)
 

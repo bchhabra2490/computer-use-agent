@@ -43,10 +43,30 @@ class AudioSessionTests(unittest.TestCase):
             patch("audio.get_last_wake", return_value=MagicMock(label="Hey Jarvis")),
             patch("audio.get_wake_remainder", return_value=None),
             patch("audio.listen_for_utterance", return_value="open notes"),
+            patch("audio.consume_utterance", return_value=None),
+            patch("audio.utterance_pending", return_value=False),
         ):
             cmd = self.audio.listen_command()
         self.assertEqual(cmd, "open notes")
         self.assertEqual(self.sess.phase, "listening")
+
+    def test_listen_command_returns_phone_queue_without_wake(self) -> None:
+        with (
+            patch("audio.consume_utterance", return_value="play lag ja gale"),
+            patch("audio.wait_for_wake") as wake,
+        ):
+            cmd = self.audio.listen_command()
+        self.assertEqual(cmd, "play lag ja gale")
+        wake.assert_not_called()
+
+    def test_listen_command_consumes_queue_when_wake_aborted(self) -> None:
+        with (
+            patch("audio.consume_utterance", side_effect=[None, "from phone"]),
+            patch("audio.utterance_pending", return_value=True),
+            patch("audio.wait_for_wake", return_value=False),
+        ):
+            cmd = self.audio.listen_command()
+        self.assertEqual(cmd, "from phone")
 
 
 if __name__ == "__main__":

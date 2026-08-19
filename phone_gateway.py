@@ -4,6 +4,7 @@ Opt-in: ``PHONE_GATEWAY=1``. Off by default so CUA does not bind a port.
 
 The phone never drives the desktop. It queues text (same path as STT),
 accepts a short audio clip (``POST /v1/audio``) that the Mac transcribes,
+accepts a camera still (``POST /v1/photo``) for the orchestrator to look at,
 toggles tray flags (send / mark done / quit), and streams ``status.json``.
 
 Auth: Bearer token in ``Authorization`` or ``?token=`` (SSE). Token lives in
@@ -42,6 +43,7 @@ from app_status import (
     request_quit,
     request_send,
     set_phone_gateway_pid,
+    write_phone_photo,
 )
 
 HOST = os.environ.get("PHONE_GATEWAY_HOST", "0.0.0.0").strip() or "0.0.0.0"
@@ -52,7 +54,11 @@ TOKEN_LEN = 5
 _TOKEN_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _OFF = {"0", "false", "no", "off"}
 AUDIO_MAX_BYTES = int(os.environ.get("PHONE_AUDIO_MAX_BYTES", str(2_500_000)))
+PHOTO_MAX_BYTES = int(os.environ.get("PHONE_PHOTO_MAX_BYTES", str(6_000_000)))
+PHOTO_MAX_WIDTH = int(os.environ.get("PHONE_PHOTO_MAX_WIDTH", "1280"))
+PHOTO_JPEG_QUALITY = int(os.environ.get("PHONE_PHOTO_QUALITY", "70"))
 JSON_MAX_BYTES = 32_000
+DEFAULT_PHOTO_PROMPT = "Look at this photo from my phone. Explain what you see. I may ask follow-up questions."
 
 
 def phone_gateway_enabled() -> bool:
@@ -132,6 +138,10 @@ def phone_status_payload(data: dict[str, Any] | None = None) -> dict[str, Any]:
         "screen_at": snap.get("screen_at"),
         "screen_width": snap.get("screen_width"),
         "screen_height": snap.get("screen_height"),
+        "photo_at": snap.get("phone_photo_at"),
+        "photo_width": snap.get("phone_photo_width"),
+        "photo_height": snap.get("phone_photo_height"),
+        "photo_pending": bool(snap.get("phone_photo_pending")),
     }
 
 
@@ -290,6 +300,184 @@ def ingest_phone_audio(
         return {"ok": False, "error": "empty transcript"}
     enqueue_utterance(heard, source="phone")
     return {"ok": True, "queued": True, "text": heard, "source": "audio"}
+
+
+def _sips_to_jpeg(src: Path, dst: Path, max_width: int) -> bool:
+    try:
+        proc = subprocess.run(
+            [
+                "sips",
+                "-s",
+                "format",
+                "jpeg",
+                "-Z",
+                str(max(320, max_width)),
+                str(src),
+                "--out",
+                str(dst),
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and dst.is_file() and dst.stat().st_size > 0
+
+
+def photo_to_jpeg(
+    data: bytes,
+    *,
+    filename: str = "",
+    content_type: str = "",
+    max_width: int | None = None,
+    quality: int | None = None,
+) -> tuple[bytes, int, int]:
+    """Normalize a phone still to a resized JPEG (EXIF-rotated)."""
+    if not data:
+        raise ValueError("empty photo")
+    max_w = max(320, int(max_width or PHOTO_MAX_WIDTH))
+    q = max(40, min(int(quality or PHOTO_JPEG_QUALITY), 90))
+    from io import BytesIO
+
+    from PIL import Image, ImageOps
+
+    img = None
+    try:
+        img = Image.open(BytesIO(data))
+        img.load()
+    except Exception:
+        img = None
+    if img is None:
+        suffix = _suffix_for_photo(filename=filename, content_type=content_type)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / f"in{suffix}"
+            dst = Path(tmp) / "out.jpg"
+            src.write_bytes(data)
+            if not _sips_to_jpeg(src, dst, max_w):
+                raise ValueError("unsupported image")
+            jpeg = dst.read_bytes()
+        img = Image.open(BytesIO(jpeg))
+        img.load()
+    img = ImageOps.exif_transpose(img)
+    if img.mode not in {"RGB", "L"}:
+        img = img.convert("RGB")
+    elif img.mode == "L":
+        img = img.convert("RGB")
+    if img.width > max_w:
+        ratio = max_w / img.width
+        img = img.resize((max_w, max(1, round(img.height * ratio))))
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=q, optimize=True)
+    jpeg = buf.getvalue()
+    if not jpeg:
+        raise ValueError("jpeg encode failed")
+    return jpeg, img.width, img.height
+
+
+def _suffix_for_photo(*, filename: str = "", content_type: str = "") -> str:
+    name = (filename or "").lower()
+    for ext in (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff"):
+        if name.endswith(ext):
+            return ".jpg" if ext in {".jpg", ".jpeg"} else ext
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    return {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/heic": ".heic",
+        "image/heif": ".heif",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/tiff": ".tiff",
+    }.get(ctype, ".jpg")
+
+
+def parse_photo_body(
+    body: bytes,
+    *,
+    content_type: str = "",
+) -> dict[str, Any]:
+    """Extract image bytes + optional text from JSON, multipart, or raw body."""
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    if "multipart/form-data" in (content_type or "").lower():
+        preamble = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+        msg = message_from_bytes(preamble + body, policy=default)
+        photo = b""
+        filename = ""
+        text = ""
+        part_type = ""
+        if msg.is_multipart():
+            for part in msg.iter_parts():
+                name = str(part.get_param("name", header="content-disposition") or "")
+                fn = part.get_filename() or ""
+                payload = part.get_payload(decode=True)
+                if payload is None:
+                    continue
+                if isinstance(payload, str):
+                    payload = payload.encode("utf-8")
+                if name in {"text", "command", "caption", "prompt"}:
+                    text = payload.decode("utf-8", errors="replace").strip()
+                elif name in {"photo", "image", "camera", "file", "picture"} or fn:
+                    photo = payload
+                    filename = fn
+                    part_type = part.get_content_type() or ""
+        return {
+            "photo": photo,
+            "filename": filename,
+            "text": text,
+            "content_type": part_type or ctype,
+        }
+    if ctype in {"application/json", "text/json"}:
+        data = json.loads(body.decode("utf-8") or "{}")
+        if not isinstance(data, dict):
+            raise ValueError("JSON object required")
+        b64 = str(data.get("photo") or data.get("image") or data.get("data") or "").strip()
+        photo = base64.b64decode(b64) if b64 else b""
+        return {
+            "photo": photo,
+            "filename": str(data.get("filename") or data.get("name") or ""),
+            "text": str(data.get("text") or data.get("command") or data.get("caption") or "").strip(),
+            "content_type": str(data.get("mime") or data.get("content_type") or ctype),
+        }
+    return {
+        "photo": body,
+        "filename": "",
+        "text": "",
+        "content_type": ctype,
+    }
+
+
+def ingest_phone_photo(
+    photo: bytes,
+    *,
+    filename: str = "",
+    content_type: str = "",
+    text: str = "",
+) -> dict[str, Any]:
+    """Resize a phone still, store it, and queue a vision request."""
+    text = (text or "").strip() or DEFAULT_PHOTO_PROMPT
+    if not photo:
+        return {"ok": False, "error": "photo required"}
+    if len(photo) > PHOTO_MAX_BYTES:
+        return {"ok": False, "error": "photo too large"}
+    try:
+        jpeg, width, height = photo_to_jpeg(
+            photo,
+            filename=filename,
+            content_type=content_type,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"unsupported image: {e}"}
+    write_phone_photo(jpeg, width=width, height=height)
+    enqueue_utterance(text, source="phone", photo=True)
+    return {
+        "ok": True,
+        "queued": True,
+        "text": text,
+        "source": "photo",
+        "width": width,
+        "height": height,
+    }
 
 
 def ensure_phone_gateway() -> subprocess.Popen | None:
@@ -481,6 +669,28 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
             code = 200 if result.get("ok") else 400
             self._send_json(code, result)
             return
+        if path in {"/v1/photo", "/v1/image", "/v1/camera"}:
+            try:
+                raw = self._read_body(max(PHOTO_MAX_BYTES * 2, PHOTO_MAX_BYTES))
+                parsed = parse_photo_body(
+                    raw,
+                    content_type=self.headers.get("Content-Type") or "",
+                )
+            except ValueError as e:
+                self._send_json(413 if "too large" in str(e) else 400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send_json(400, {"ok": False, "error": str(e)})
+                return
+            result = ingest_phone_photo(
+                parsed.get("photo") or b"",
+                filename=str(parsed.get("filename") or ""),
+                content_type=str(parsed.get("content_type") or ""),
+                text=str(parsed.get("text") or ""),
+            )
+            code = 200 if result.get("ok") else 400
+            self._send_json(code, result)
+            return
         try:
             body = self._read_json()
         except Exception as e:
@@ -520,6 +730,7 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
                     payload.get("last_llm"),
                     payload.get("queued"),
                     payload.get("screen_at"),
+                    payload.get("photo_at"),
                 )
                 if sig != last:
                     last = sig

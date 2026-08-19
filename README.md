@@ -270,6 +270,7 @@ PHONE_GATEWAY=1 python orchestrator.py --auto
 | GET | `/v1/screen` | last agent screenshot (JPEG) |
 | POST | `/v1/command` | `{ "text": "play lag ja gale" }` |
 | POST | `/v1/audio` | clip → Mac STT → same command queue |
+| POST | `/v1/photo` | camera still → Jarvis looks at it (alias `/v1/image`) |
 | POST | `/v1/control` | `{ "action": "send" \| "mark_done" \| "quit" }` |
 
 Send `Authorization: Bearer <token>` (or `?token=` on SSE / `/v1/screen`). Same Wi‑Fi or an
@@ -292,6 +293,16 @@ queues that string (edited caption). The Mac transcribes with the same
 Cap is ~30s / `PHONE_AUDIO_MAX_BYTES` (default 2.5MB). Response:
 `{ "ok": true, "queued": true, "text": "…", "source": "audio" }`.
 
+`POST /v1/photo` is a camera still from the phone. Send a JPEG/PNG/HEIC body
+(`Content-Type: image/jpeg`), multipart `photo` file, or JSON
+`{ "photo": "<base64>", "mime": "image/jpeg" }`. Optional `text` / `caption`
+is the question ("what does this label say?"). With no text, Jarvis explains
+the photo and waits for follow-ups. The Mac resizes it, attaches it to the
+orchestrator vision turn, and keeps it for later questions in the same
+session. Cap `PHONE_PHOTO_MAX_BYTES` (default 6MB). Response:
+`{ "ok": true, "queued": true, "text": "…", "source": "photo", "width": 1280, "height": 960 }`.
+Status includes `photo_at` when a still is stored.
+
 ```bash
 TOKEN=$(cat .runtime/phone.token)
 curl -s http://127.0.0.1:8742/v1/health
@@ -302,6 +313,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"text":"open notes"}' http://127.0.0.1:8742/v1/command
 curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: audio/m4a" \
   --data-binary @clip.m4a http://127.0.0.1:8742/v1/audio
+curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/jpeg" \
+  --data-binary @shot.jpg http://127.0.0.1:8742/v1/photo
 python phone_gateway.py          # run the server alone (optional)
 ```
 

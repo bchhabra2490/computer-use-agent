@@ -258,4 +258,4 @@ The macOS **tray is status** (idle / listening / agent running). It does not tea
 
 ## 9. Phone gateway (companion app)
 
-Optional LAN HTTP+SSE process (`PHONE_GATEWAY=1`, default off). Phone sends text / mark-done; Mac orchestrator still owns CU and TTS. Agent screenshots are saved as `.runtime/phone-screen.jpg` and served at `GET /v1/screen`. Same Wi‑Fi or phone hotspot; Tailscale only off-LAN. See `phone_gateway.py`.
+Optional LAN HTTP+SSE process (`PHONE_GATEWAY=1`, default off). Phone sends text / audio / a camera still / mark-done; Mac orchestrator still owns CU, STT, TTS, and vision. Agent screenshots are saved as `.runtime/phone-screen.jpg` and served at `GET /v1/screen`. Phone camera photos are `POST /v1/photo` → `.runtime/phone-photo.jpg` attached to the next orchestrator turn. Same Wi‑Fi or phone hotspot; Tailscale only off-LAN. See `phone_gateway.py`.

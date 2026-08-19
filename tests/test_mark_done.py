@@ -98,6 +98,18 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(snap["last_llm"], body)
         self.assertTrue(any("[llm]" in line and body[:80] in line for line in snap["logs"]))
 
+    def test_write_phone_photo(self) -> None:
+        photo = Path(self.tmp.name) / "phone-photo.jpg"
+        with patch.object(st, "PHONE_PHOTO_PATH", photo):
+            st.write_phone_photo(b"\xff\xd8\xff" + b"x" * 40, width=32, height=24)
+            self.assertTrue(st.phone_photo_pending())
+            blob = st.phone_photo_jpeg(consume_pending=True)
+        self.assertEqual(blob[:3], b"\xff\xd8\xff")
+        self.assertFalse(st.phone_photo_pending())
+        snap = st.read_status()
+        self.assertEqual(snap["phone_photo_width"], 32)
+        self.assertTrue(snap["phone_photo_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

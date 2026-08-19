@@ -166,6 +166,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         self.assertIn("agents", payload)
         self.assertIn("screen_at", payload)
         self.assertIn("last_llm", payload)
+        self.assertIn("photo_at", payload)
 
     def test_status_payload_includes_llm_log(self) -> None:
         st.log_llm("Here is a long assistant reply for the phone.", source="llm")
@@ -228,6 +229,32 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         self.assertEqual(h._code, 200)
         self.assertEqual(st.consume_utterance(), "skip ads")
 
+    def test_post_photo_jpeg(self) -> None:
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 24), (9, 8, 7)).save(buf, format="JPEG", quality=80)
+        jpeg = buf.getvalue()
+        photo_path = Path(self.tmp.name) / "phone-photo.jpg"
+        with (
+            patch.object(st, "PHONE_PHOTO_PATH", photo_path),
+            patch.object(st, "RUNTIME_DIR", Path(self.tmp.name)),
+        ):
+            h = self._handler(
+                "POST",
+                "/v1/photo",
+                token="test-token-abc",
+                raw_body=jpeg,
+                content_type="image/jpeg",
+            )
+        self.assertEqual(h._code, 200)
+        body = json.loads(h.wfile.getvalue().decode("utf-8"))
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["source"], "photo")
+        self.assertEqual(st.consume_utterance(), pg.DEFAULT_PHOTO_PROMPT)
+        self.assertTrue(photo_path.is_file())
+        self.assertTrue(st.read_status().get("phone_photo_at"))
+
 
 class PhoneAudioIngestTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -272,6 +299,84 @@ class PhoneAudioIngestTests(unittest.TestCase):
             content_type="application/json",
         )
         self.assertEqual(parsed["audio"], wav)
+
+
+class PhonePhotoIngestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.path = root / "status.json"
+        self.photo = root / "phone-photo.jpg"
+        self.patches = [
+            patch.object(st, "STATUS_PATH", self.path),
+            patch.object(st, "PHONE_PHOTO_PATH", self.photo),
+            patch.object(st, "RUNTIME_DIR", root),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self) -> None:
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _jpeg(self, size: tuple[int, int] = (40, 30)) -> bytes:
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", size, (20, 40, 60)).save(buf, format="JPEG", quality=80)
+        return buf.getvalue()
+
+    def test_ingest_stores_and_queues(self) -> None:
+        result = pg.ingest_phone_photo(self._jpeg(), text="what is this label?")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"], "photo")
+        self.assertEqual(result["text"], "what is this label?")
+        self.assertEqual(st.consume_utterance(), "what is this label?")
+        self.assertTrue(self.photo.is_file())
+        self.assertTrue(st.phone_photo_pending())
+        jpeg = st.phone_photo_jpeg(consume_pending=True)
+        self.assertTrue(jpeg and jpeg.startswith(b"\xff\xd8"))
+        self.assertFalse(st.phone_photo_pending())
+
+    def test_default_prompt_when_no_text(self) -> None:
+        result = pg.ingest_phone_photo(self._jpeg())
+        self.assertEqual(result["text"], pg.DEFAULT_PHOTO_PROMPT)
+
+    def test_rejects_empty(self) -> None:
+        result = pg.ingest_phone_photo(b"")
+        self.assertFalse(result["ok"])
+
+    def test_rejects_too_large(self) -> None:
+        with patch.object(pg, "PHOTO_MAX_BYTES", 10):
+            result = pg.ingest_phone_photo(self._jpeg())
+        self.assertFalse(result["ok"])
+        self.assertIn("too large", result["error"])
+
+    def test_png_converts_to_jpeg(self) -> None:
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (80, 40), (1, 2, 3)).save(buf, format="PNG")
+        jpeg, width, height = pg.photo_to_jpeg(buf.getvalue(), content_type="image/png")
+        self.assertTrue(jpeg.startswith(b"\xff\xd8"))
+        self.assertEqual(width, 80)
+        self.assertEqual(height, 40)
+
+    def test_json_body_roundtrip(self) -> None:
+        raw = self._jpeg()
+        parsed = pg.parse_photo_body(
+            json.dumps(
+                {
+                    "photo": __import__("base64").b64encode(raw).decode(),
+                    "mime": "image/jpeg",
+                    "text": "read this",
+                }
+            ).encode(),
+            content_type="application/json",
+        )
+        self.assertEqual(parsed["text"], "read this")
+        self.assertTrue(parsed["photo"].startswith(b"\xff\xd8"))
 
 
 class EnsureGatewayTests(unittest.TestCase):

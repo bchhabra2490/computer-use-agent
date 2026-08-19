@@ -26,6 +26,8 @@ STATUS_PATH = RUNTIME_DIR / "status.json"
 PHONE_SCREEN_PATH = RUNTIME_DIR / "phone-screen.jpg"
 PHONE_SCREEN_MAX_WIDTH = int(os.environ.get("PHONE_SCREEN_MAX_WIDTH", "1080"))
 PHONE_SCREEN_QUALITY = int(os.environ.get("PHONE_SCREEN_QUALITY", "60"))
+PHONE_PHOTO_PATH = RUNTIME_DIR / "phone-photo.jpg"
+PHONE_PHOTO_TTL_SEC = float(os.environ.get("PHONE_PHOTO_TTL_SEC", str(30 * 60)))
 MAX_LOG_LINES = int(os.environ.get("STATUS_LOG_LINES", "40"))
 
 _lock = threading.Lock()
@@ -58,6 +60,10 @@ def _default_state() -> dict[str, Any]:
         "screen_at": None,
         "screen_width": None,
         "screen_height": None,
+        "phone_photo_at": None,
+        "phone_photo_pending": False,
+        "phone_photo_width": None,
+        "phone_photo_height": None,
     }
 
 
@@ -210,7 +216,7 @@ def set_phone_gateway_pid(pid: int | None) -> None:
         _write(data)
 
 
-def enqueue_utterance(text: str, *, source: str = "phone") -> None:
+def enqueue_utterance(text: str, *, source: str = "phone", photo: bool = False) -> None:
     """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
     text = (text or "").strip()
     if not text:
@@ -219,10 +225,18 @@ def enqueue_utterance(text: str, *, source: str = "phone") -> None:
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
-        pending.append({"text": text, "source": source, "ts": time.time()})
+        pending.append(
+            {
+                "text": text,
+                "source": source,
+                "ts": time.time(),
+                "photo": bool(photo),
+            }
+        )
         data["pending_utterances"] = pending[-20:]
         _write(data)
-    log(f"[phone] queued: {text[:160]}")
+    kind = "photo" if photo else "queued"
+    log(f"[phone] {kind}: {text[:160]}")
 
 
 def utterance_pending() -> bool:
@@ -256,6 +270,66 @@ def set_last_spoken(text: str) -> None:
         data = _read()
         data["last_spoken"] = text[:2000]
         _write(data)
+
+
+def write_phone_photo(jpeg: bytes, *, width: int, height: int) -> None:
+    """Store the latest phone-camera JPEG for the orchestrator to attach."""
+    if not jpeg:
+        raise ValueError("empty photo")
+    _ensure_dir()
+    tmp = PHONE_PHOTO_PATH.with_suffix(".tmp")
+    tmp.write_bytes(jpeg)
+    tmp.replace(PHONE_PHOTO_PATH)
+    with _lock:
+        data = _read()
+        data["phone_photo_at"] = time.time()
+        data["phone_photo_pending"] = True
+        data["phone_photo_width"] = int(width)
+        data["phone_photo_height"] = int(height)
+        _write(data)
+
+
+def phone_photo_pending() -> bool:
+    with _lock:
+        return bool(_read().get("phone_photo_pending"))
+
+
+def phone_photo_jpeg(*, consume_pending: bool = False, max_age: float | None = None) -> bytes | None:
+    """Return the latest phone JPEG if it is still fresh, else None."""
+    ttl = PHONE_PHOTO_TTL_SEC if max_age is None else max_age
+    with _lock:
+        data = _read()
+        at = data.get("phone_photo_at")
+        if consume_pending and data.get("phone_photo_pending"):
+            data["phone_photo_pending"] = False
+            _write(data)
+    if not at:
+        return None
+    try:
+        age = time.time() - float(at)
+    except (TypeError, ValueError):
+        return None
+    if ttl and ttl > 0 and age > ttl:
+        return None
+    try:
+        blob = PHONE_PHOTO_PATH.read_bytes()
+    except OSError:
+        return None
+    return blob or None
+
+
+def clear_phone_photo() -> None:
+    with _lock:
+        data = _read()
+        data["phone_photo_at"] = None
+        data["phone_photo_pending"] = False
+        data["phone_photo_width"] = None
+        data["phone_photo_height"] = None
+        _write(data)
+    try:
+        PHONE_PHOTO_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 _phone_screen_gen = 0

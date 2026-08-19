@@ -34,6 +34,7 @@ from envfile import load_dotenv
 load_dotenv()
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -50,10 +51,13 @@ import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
     active_agents,
+    clear_phone_photo,
     consume_utterance,
     is_mark_done_utterance,
     log_llm,
     mark_done_pending,
+    phone_photo_jpeg,
+    phone_photo_pending,
     quit_requested,
     register_orchestrator,
     remove_agent,
@@ -106,10 +110,12 @@ TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "no",
     "off",
 }
+_phone_photo_in_session = False
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
-You receive transcribed speech from the user. Decide the next action with tools only
+You receive transcribed speech from the user, and sometimes a photo from their
+phone camera (attached as an image on that turn). Decide the next action with tools only
 — never reply with a plain assistant message (the user will not hear it, and the mic
 will not open):
 - give_response_to_user — speak an answer or acknowledgment that does not need a reply
@@ -129,6 +135,9 @@ will not open):
 {mcp_rule}
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
+- When a phone-camera photo is attached, look at it. Explain what you see if they asked,
+  and answer follow-up questions about that same photo. Prefer give_response_to_user.
+  Do not start_task unless they asked you to do something on the Mac with what you saw.
 - If they ask who you are, what you do, how you work, or about this agent / Jarvis /
   Rekha / computer-use-agent, call who_am_i first, then give_response_to_user with a
   short spoken summary from the README (do not read it verbatim, no markdown).
@@ -203,6 +212,51 @@ def _format_task_history(history: list[dict[str, str]]) -> str:
     for i, entry in enumerate(history, start=1):
         blocks.append(f"### Task {i}\n" f"Request:\n{entry['task']}\n\n" f"Result:\n{entry['result']}")
     return "\n\n".join(blocks)
+
+
+def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: bool = False) -> str:
+    prefix = ""
+    if photo:
+        prefix = (
+            "The user sent a photo from their phone camera (image attached). "
+            "Look at the image. Explain it if they asked, and answer follow-ups "
+            "about this same photo. Do not start_task unless they asked you to "
+            "do something on the Mac.\n\n"
+        )
+    return (
+        prefix
+        + f"User said: {utterance}\n\n"
+        + f"Computer task history so far:\n{_format_task_history(task_history)}"
+    )
+
+
+def _user_turn_input(
+    utterance: str,
+    task_history: list[dict[str, str]],
+    *,
+    pending_fn_outputs: list[dict] | None = None,
+    photo_jpeg: bytes | None = None,
+) -> Any:
+    """Build Responses API ``input`` for one user turn (optional phone photo)."""
+    note = _history_note(utterance, task_history, photo=bool(photo_jpeg))
+    extras = list(pending_fn_outputs or [])
+    if photo_jpeg:
+        b64 = base64.b64encode(photo_jpeg).decode("ascii")
+        user = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": note},
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{b64}",
+                    "detail": "high",
+                },
+            ],
+        }
+        return [*extras, user] if extras else [user]
+    if extras:
+        return [*extras, {"role": "user", "content": note}]
+    return note
 
 
 def _print_messages(response) -> None:
@@ -623,6 +677,42 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
     return utterance
 
 
+def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | None:
+    """Look at a phone photo while a computer task is running (no start_task)."""
+    b64 = base64.b64encode(jpeg).decode("ascii")
+    prompt = (
+        "Look at this photo from the user's phone. "
+        f"They said: {utterance}\n"
+        "Reply in 2-5 spoken sentences. No markdown, no file paths."
+    )
+    get_session().enter("thinking", "Looking at phone photo")
+    try:
+        response = client.responses.create(
+            model=MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{b64}",
+                            "detail": "high",
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        print(f"[orchestrator] phone photo vision failed: {e}", flush=True)
+        return _speak(client, "I could not look at that photo.")
+    text = _strip_wait_filler(_assistant_message_text(response))
+    if not text:
+        return _speak(client, "I could not make out that photo.")
+    log_llm(text, source="llm")
+    return _speak(client, text)
+
+
 def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     """If the agent is waiting on ask_user, speak/listen and reply. Returns True if handled."""
     req = ask_bridge.poll(timeout=0)
@@ -725,6 +815,7 @@ def _supervise_agent(
     Main-thread loop while the agent thread runs.
     Services agent ask_user; mid-task directives require the Jarvis wake word.
     """
+    global _phone_photo_in_session
     print(
         f"[orchestrator] agent running — say {format_wake_phrases()} then an update; "
         "agent questions are spoken here automatically."
@@ -781,9 +872,22 @@ def _supervise_agent(
         if command is None:
             continue
 
-        command = _confirm_heard(client, command)
-        print(f'\n[user] "{command}"')
-        status_log(f'[user] "{command}"')
+        if phone_photo_pending():
+            jpeg = phone_photo_jpeg(consume_pending=True)
+            if jpeg:
+                _phone_photo_in_session = True
+                print("[orchestrator] phone photo — answering without stopping the computer task")
+                print(f'\n[user] "{command}"')
+                status_log(f'[user] "{command}"')
+                barged = _reply_to_phone_photo(client, command, jpeg)
+                if barged:
+                    command = barged
+                else:
+                    continue
+        else:
+            command = _confirm_heard(client, command)
+            print(f'\n[user] "{command}"')
+            status_log(f'[user] "{command}"')
         low = command.lower().strip()
         if is_mark_done_utterance(command):
             print("[orchestrator] user marked the running task done")
@@ -1153,6 +1257,8 @@ def _process_response(
 
 
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
+    global _phone_photo_in_session
+    _phone_photo_in_session = False
     ensure_tray_running()
     ensure_phone_gateway()
     register_orchestrator()
@@ -1253,7 +1359,9 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if utterance is None:
                     continue
 
-            utterance = _confirm_heard(client, utterance)
+            photo_turn = phone_photo_pending()
+            if not photo_turn:
+                utterance = _confirm_heard(client, utterance)
             print(f'\n[user] "{utterance}"')
             status_log(f'[user] "{utterance}"')
             low = utterance.lower().strip()
@@ -1282,23 +1390,26 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if barged:
                     pending = barged
                     continue
+                clear_phone_photo()
+                _phone_photo_in_session = False
                 sess.enter_and_log("done", "Session ended")
                 return
 
             sess.enter("thinking", utterance[:100])
-            history_note = (
-                f"User said: {utterance}\n\n" f"Computer task history so far:\n{_format_task_history(task_history)}"
+            jpeg = None
+            if photo_turn or _phone_photo_in_session:
+                jpeg = phone_photo_jpeg(consume_pending=True)
+                if jpeg:
+                    _phone_photo_in_session = True
+            turn_input = _user_turn_input(
+                utterance,
+                task_history,
+                pending_fn_outputs=pending_fn_outputs or None,
+                photo_jpeg=jpeg,
             )
+            pending_fn_outputs = []
             turn = TurnTrace(utterance)
             system = _system_prompt()
-            if pending_fn_outputs:
-                turn_input: Any = [
-                    *pending_fn_outputs,
-                    {"role": "user", "content": history_note},
-                ]
-                pending_fn_outputs = []
-            else:
-                turn_input = history_note
 
             if previous_id is None:
                 response = _create_response(

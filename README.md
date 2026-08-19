@@ -98,6 +98,8 @@ then transcribes your request and lets an LLM choose tools:
 | `set_timer` | Native countdown / reminder (notification; TTS if they asked to be reminded) |
 
 Easy tasks that succeed are saved as **action traces** under `traces/`. The next matching request (e.g. “open Chrome, go to …”) replays those keypresses/types with no screenshot loop. Wake word during replay falls back to the vision agent. Set `TRACE_REPLAY=0` / `TRACE_RECORD=0` to disable.
+
+**Recipes** (`recipes/*.json`) are better when the first step is `open` a URL: “open a map of India” fills `{{place}}` and skips Spotlight. If you also asked to zoom or screenshot, the vision agent continues from that page and is told not to redo the prefix. After a successful run the agent may save a new recipe (`RECIPE_RECORD=0` to disable).
 | `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
 | `give_response_to_user` | Speak a reply (set `end_session` to stop) |
 | `mcp_call` | Tools from servers in `mcp.json` (search, GitHub, Linear, …) when configured |
@@ -269,18 +271,24 @@ PHONE_GATEWAY=1 python orchestrator.py --auto
 | GET | `/v1/status` | state, logs (incl. LLM replies), last spoken / last LLM |
 | GET | `/v1/events` | SSE stream of the same payload |
 | GET | `/v1/screen` | last agent screenshot (JPEG) |
+| GET | `/v1/speech` | last Mac-synthesized reply WAV (phone turns only) |
 | POST | `/v1/command` | `{ "text": "play lag ja gale" }` |
 | POST | `/v1/audio` | clip → Mac STT → same command queue |
 | POST | `/v1/photo` | camera still → Jarvis looks at it (alias `/v1/image`) |
 | POST | `/v1/control` | `{ "action": "send" \| "mark_done" \| "quit" }` |
 
-Send `Authorization: Bearer <token>` (or `?token=` on SSE / `/v1/screen`). Same Wi‑Fi or an
+Send `Authorization: Bearer <token>` (or `?token=` on SSE / `/v1/screen` / `/v1/speech`). Same Wi‑Fi or an
 Android hotspot is enough. iPhone Personal Hotspot often blocks LAN to the Mac —
 use Tailscale or USB tethering. Tailscale is only required off the LAN.
 
 `/v1/status` includes `screen_at` when the computer-use agent has captured a
 frame. Refetch `/v1/screen` when that timestamp changes — there is no extra
 screenshot; it is the same PNG the model just saw, saved as a phone-sized JPEG.
+
+TTS is always synthesized on the Mac. When the last user turn came from the
+phone (`/v1/command`, `/v1/audio`, or `/v1/photo`), playback skips Mac speakers
+and `speech_at` updates instead. Refetch `/v1/speech` (WAV) and play it on the
+phone. Mac wake-word turns still use `afplay` and do not publish that file.
 
 LLM replies are in `logs` as `[llm]`, `[agent]`, `[tts]`, or `[mark_done]`
 lines (up to ~2000 characters). `last_llm` is the newest of those; `last_spoken`
@@ -314,6 +322,8 @@ curl -s http://127.0.0.1:8742/v1/health
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/v1/status
 curl -s -H "Authorization: Bearer $TOKEN" -o /tmp/jarvis.jpg \
   http://127.0.0.1:8742/v1/screen
+curl -s -H "Authorization: Bearer $TOKEN" -o /tmp/jarvis.wav \
+  http://127.0.0.1:8742/v1/speech
 curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"text":"open notes"}' http://127.0.0.1:8742/v1/command
 curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: audio/m4a" \
@@ -485,6 +495,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `actions.py` — mouse/keyboard executor.
 - `skills/` + `skills.py` — task playbooks (`cua skills condense` / `cua skills merge`).
 - `traces/` + `traces.py` — saved easy-task action sequences (replay without vision).
+- `recipes/` + `recipes.py` — parameterized `open` URL/app prefixes with optional computer-use handoff.
 - `memory/` + `memory.py` — personal and per-app notes (`read_memory` / `save_memory`); auto-extract then condense after each run.
 - `whoami.py` — `who_am_i` reads `README.md` when the user asks about this agent.
 - `mcp.json` + `mcp_client.py` + `mcp_auth.py` — MCP servers (`cua mcp login linear`).

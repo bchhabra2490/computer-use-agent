@@ -1,0 +1,22 @@
+{
+  "name": "google-maps-place",
+  "match": ["map of", "on a map", "google maps"],
+  "match_templates": [
+    "map of {{place}}",
+    "{{place}} on a map",
+    "country {{place}}",
+    "maps/place/{{place}}"
+  ],
+  "params": ["place"],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/maps/search/?api=1&query={{place}}"
+    }
+  ],
+  "handoff": false,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": ""
+}

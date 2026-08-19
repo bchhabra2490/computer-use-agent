@@ -65,6 +65,7 @@ from app_status import (
     request_mark_done,
     request_quit,
     set_last_spoken,
+    set_reply_sink,
     speak_pending,
     consume_speak,
     unregister_orchestrator,
@@ -799,6 +800,7 @@ def _listen_command(
     get_session().enter_and_log("listening", f"{heard} heard — listening")
     remainder = get_wake_remainder()
     if remainder:
+        set_reply_sink("mac")
         return strip_wake_prefix(remainder).strip() or remainder
     try:
         utterance = listen_for_utterance(
@@ -820,6 +822,7 @@ def _listen_command(
         except Exception as e:
             print(f"[orchestrator] follow-up listen failed: {e}")
             return None
+    set_reply_sink("mac")
     return command or None
 
 

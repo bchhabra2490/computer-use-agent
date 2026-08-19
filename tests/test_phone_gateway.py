@@ -167,6 +167,8 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         self.assertIn("screen_at", payload)
         self.assertIn("last_llm", payload)
         self.assertIn("photo_at", payload)
+        self.assertIn("speech_at", payload)
+        self.assertIn("reply_sink", payload)
 
     def test_status_payload_includes_llm_log(self) -> None:
         st.log_llm("Here is a long assistant reply for the phone.", source="llm")
@@ -201,6 +203,26 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         body = h.wfile.getvalue()
         self.assertTrue(body.startswith(b"\xff\xd8"))
         self.assertTrue(st.read_status().get("screen_at"))
+
+    def test_speech_404_before_publish(self) -> None:
+        speech = Path(self.tmp.name) / "phone-tts.wav"
+        with patch.object(st, "PHONE_SPEECH_PATH", speech):
+            h = self._handler("GET", "/v1/speech", token="test-token-abc")
+        self.assertEqual(h._code, 404)
+
+    def test_speech_serves_wav(self) -> None:
+        speech = Path(self.tmp.name) / "phone-tts.wav"
+        wav = b"RIFF" + b"xxxx" + b"WAVE" + b"\x00" * 16
+        with patch.object(st, "PHONE_SPEECH_PATH", speech):
+            st.write_phone_speech(wav)
+            h = self._handler("GET", "/v1/speech", token="test-token-abc")
+        self.assertEqual(h._code, 200)
+        self.assertEqual(h.wfile.getvalue(), wav)
+        self.assertTrue(st.read_status().get("speech_at"))
+        self.assertIn(
+            ("Content-Type", "audio/wav"),
+            h._out_headers,
+        )
 
 
     def test_encode_downscales_for_phone(self) -> None:

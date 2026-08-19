@@ -82,6 +82,7 @@ class FlagTests(unittest.TestCase):
         st.enqueue_utterance("  play a song  ")
         self.assertTrue(st.utterance_pending())
         self.assertEqual(st.consume_utterance(), "play a song")
+        self.assertEqual(st.reply_sink(), "phone")
         self.assertFalse(st.utterance_pending())
         self.assertIsNone(st.consume_utterance())
 
@@ -109,6 +110,15 @@ class FlagTests(unittest.TestCase):
         snap = st.read_status()
         self.assertEqual(snap["phone_photo_width"], 32)
         self.assertTrue(snap["phone_photo_at"])
+
+    def test_write_phone_speech_does_not_enqueue_utterance(self) -> None:
+        speech = Path(self.tmp.name) / "phone-tts.wav"
+        with patch.object(st, "PHONE_SPEECH_PATH", speech):
+            st.write_phone_speech(b"RIFF" + b"xxxx" + b"WAVE")
+            blob = st.read_phone_speech()
+        self.assertTrue(blob.startswith(b"RIFF"))
+        self.assertFalse(st.utterance_pending())
+        self.assertTrue(st.read_status().get("speech_at"))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,10 @@ accepts a camera still (``POST /v1/photo``) for the orchestrator to look at
 (optional mic clip is transcribed as the caption),
 toggles tray flags (send / mark done / quit), and streams ``status.json``.
 
+TTS is synthesized on the Mac. Phone turns skip ``afplay`` and publish a WAV
+at ``GET /v1/speech`` when ``speech_at`` changes; Mac wake-word turns still
+play locally.
+
 Auth: Bearer token in ``Authorization`` or ``?token=`` (SSE). Token lives in
 ``.runtime/phone.token`` (or ``PHONE_GATEWAY_TOKEN``). Max 5 characters so it
 is easy to type on a phone.
@@ -39,6 +43,7 @@ from app_status import (
     enqueue_utterance,
     pid_alive,
     read_phone_screen,
+    read_phone_speech,
     read_status,
     request_mark_done,
     request_quit,
@@ -136,6 +141,9 @@ def phone_status_payload(data: dict[str, Any] | None = None) -> dict[str, Any]:
         "last_spoken": snap.get("last_spoken"),
         "last_llm": snap.get("last_llm"),
         "queued": bool(snap.get("pending_utterances")),
+        "reply_sink": snap.get("reply_sink") or "mac",
+        "speech_at": snap.get("speech_at"),
+        "speech_bytes": snap.get("speech_bytes"),
         "screen_at": snap.get("screen_at"),
         "screen_width": snap.get("screen_width"),
         "screen_height": snap.get("screen_height"),
@@ -718,6 +726,17 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(blob)
 
+    def _send_wav(self, blob: bytes, *, speech_at: Any = None) -> None:
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Cache-Control", "no-store")
+        if speech_at is not None:
+            self.send_header("ETag", f'"{speech_at}"')
+        self.end_headers()
+        self.wfile.write(blob)
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
         self._cors()
@@ -744,6 +763,14 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
                 return
             snap = read_status()
             self._send_jpeg(blob, screen_at=snap.get("screen_at"))
+            return
+        if path in {"/v1/speech", "/v1/tts"}:
+            blob = read_phone_speech()
+            if not blob:
+                self._send_json(404, {"ok": False, "error": "no speech yet"})
+                return
+            snap = read_status()
+            self._send_wav(blob, speech_at=snap.get("speech_at"))
             return
         if path == "/v1/events":
             self._stream_events()
@@ -838,6 +865,7 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
                     payload.get("last_llm"),
                     payload.get("queued"),
                     payload.get("screen_at"),
+                    payload.get("speech_at"),
                     payload.get("photo_at"),
                 )
                 if sig != last:

@@ -72,6 +72,7 @@ from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
 from tools_registry import SHARED_TOOL_NAMES, agent_tools, run_shared_tool
+from recipes import RecipeHit, handoff_prompt, maybe_save_recipe, try_recipe
 from traces import maybe_save_trace, try_replay
 from tts import speak, speak_later
 
@@ -728,13 +729,34 @@ def run(
         }
 
     try:
-        replayed = try_replay(task, desktop=desktop)
-        if replayed:
-            log.record("trace_replay", replayed.split("\n", 1)[0], {"result": replayed})
-            log.finish("completed", "Replayed saved action trace.")
+        recipe_result = try_recipe(task)
+        if isinstance(recipe_result, str):
+            log.record("recipe", recipe_result.split("\n", 1)[0], {"result": recipe_result})
+            log.finish("completed", "Ran saved recipe.")
             if voice:
                 speak_later(client, "Done.")
-            return replayed
+            return recipe_result
+
+        model_task = task
+        if isinstance(recipe_result, RecipeHit):
+            log.record(
+                "recipe_handoff",
+                recipe_result.recipe.name,
+                {
+                    "params": recipe_result.params,
+                    "leftover": recipe_result.leftover,
+                    "opened": recipe_result.opened,
+                },
+            )
+            model_task = handoff_prompt(task, recipe_result)
+        else:
+            replayed = try_replay(task, desktop=desktop)
+            if replayed:
+                log.record("trace_replay", replayed.split("\n", 1)[0], {"result": replayed})
+                log.finish("completed", "Replayed saved action trace.")
+                if voice:
+                    speak_later(client, "Done.")
+                return replayed
 
         model = resolve_agent_model(client, task, log)
         print(f"[agent] model={model} eval_every={EVAL_EVERY}")
@@ -745,7 +767,7 @@ def run(
             model=model,
             tools=agent_tools(),
             input=(
-                f"{task}\n\n"
+                f"{model_task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
                 f"{memory_catalog}\n\n"
@@ -776,10 +798,13 @@ def run(
                 "5. Use run_terminal for shell/CLI work (files, git, scripts, "
                 "path checks) when that is faster than the GUI. Never sleep for "
                 "media duration or use macOS say for spoken updates.\n"
-        "6. Use the computer tool for UI actions on this real desktop. "
-        "The screenshot shows every monitor, labeled screen N. Click the "
-        "display that holds the target app (see occupancy). Do not assume "
-        "the task is on the primary display.\n"
+                "5b. If the task is opening a known site, map, or search page, "
+                "prefer `open 'https://...'` (put the place/query in the URL) "
+                "instead of Spotlight and typing in the address bar.\n"
+                "6. Use the computer tool for UI actions on this real desktop. "
+                "The screenshot shows every monitor, labeled screen N. Click the "
+                "display that holds the target app (see occupancy). Do not assume "
+                "the task is on the primary display.\n"
                 "7. Prefer read_ui_text (Accessibility) to read labels/values/menus "
                 "cheaply; use screenshots when AX returns little or for layout/graphics.\n"
                 "8. Anything the user will hear (mark_done summary, ask_user, on-screen "
@@ -831,6 +856,7 @@ def run(
                     speak_later(client, "Done.")
                 log.finish("completed")
                 maybe_create_skill(client, log, voice=voice)
+                maybe_save_recipe(client, log, task)
                 maybe_save_trace(log, task)
                 _extract_memories_from_log(client, log, task)
                 summary = "\n".join(last_messages).strip()
@@ -908,6 +934,7 @@ def run(
             speak_later(client, "Done.")
         log.finish("completed", e.summary)
         maybe_create_skill(client, log, voice=voice)
+        maybe_save_recipe(client, log, task)
         maybe_save_trace(log, task)
         _extract_memories_from_log(client, log, task)
         return f"completed\nResult:\n{e.summary}"

@@ -28,6 +28,7 @@ PHONE_SCREEN_MAX_WIDTH = int(os.environ.get("PHONE_SCREEN_MAX_WIDTH", "1080"))
 PHONE_SCREEN_QUALITY = int(os.environ.get("PHONE_SCREEN_QUALITY", "60"))
 PHONE_PHOTO_PATH = RUNTIME_DIR / "phone-photo.jpg"
 PHONE_PHOTO_TTL_SEC = float(os.environ.get("PHONE_PHOTO_TTL_SEC", str(30 * 60)))
+PHONE_SPEECH_PATH = RUNTIME_DIR / "phone-tts.wav"
 MAX_LOG_LINES = int(os.environ.get("STATUS_LOG_LINES", "40"))
 
 _lock = threading.Lock()
@@ -58,6 +59,9 @@ def _default_state() -> dict[str, Any]:
         "pending_speaks": [],
         "last_spoken": None,
         "last_llm": None,
+        "reply_sink": "mac",
+        "speech_at": None,
+        "speech_bytes": None,
         "screen_at": None,
         "screen_width": None,
         "screen_height": None,
@@ -248,6 +252,24 @@ def utterance_pending() -> bool:
         return bool(pending)
 
 
+def _normalize_sink(sink: str | None) -> str:
+    return "phone" if (sink or "").strip().lower() == "phone" else "mac"
+
+
+def set_reply_sink(sink: str) -> None:
+    """Where the next TTS line should play: Mac speakers or the phone."""
+    value = _normalize_sink(sink)
+    with _lock:
+        data = _read()
+        data["reply_sink"] = value
+        _write(data)
+
+
+def reply_sink() -> str:
+    with _lock:
+        return _normalize_sink(_read().get("reply_sink"))
+
+
 def consume_utterance() -> str | None:
     """Pop the next queued text command, or None."""
     with _lock:
@@ -257,6 +279,11 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
+        if isinstance(item, str):
+            data["reply_sink"] = "phone"
+        else:
+            src = str((item or {}).get("source") or "phone").strip().lower()
+            data["reply_sink"] = "phone" if src == "phone" else "mac"
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -265,7 +292,12 @@ def consume_utterance() -> str | None:
     return text or None
 
 
-def enqueue_speak(text: str, *, source: str = "timer") -> None:
+def enqueue_speak(
+    text: str,
+    *,
+    source: str = "timer",
+    sink: str | None = None,
+) -> None:
     """Queue a line for the orchestrator to speak (timer reminders, not user STT)."""
     text = (text or "").strip()
     if not text:
@@ -274,7 +306,14 @@ def enqueue_speak(text: str, *, source: str = "timer") -> None:
     with _lock:
         data = _read()
         pending = list(data.get("pending_speaks") or [])
-        pending.append({"text": text, "source": source, "ts": time.time()})
+        pending.append(
+            {
+                "text": text,
+                "source": source,
+                "ts": time.time(),
+                "sink": _normalize_sink(sink if sink is not None else data.get("reply_sink")),
+            }
+        )
         data["pending_speaks"] = pending[-20:]
         _write(data)
     log(f"[{source}] speak: {text[:160]}")
@@ -295,6 +334,8 @@ def consume_speak() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_speaks"] = pending
+        if isinstance(item, dict):
+            data["reply_sink"] = _normalize_sink(item.get("sink"))
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -311,6 +352,31 @@ def set_last_spoken(text: str) -> None:
         data = _read()
         data["last_spoken"] = text[:2000]
         _write(data)
+
+
+def write_phone_speech(wav_bytes: bytes) -> None:
+    """Publish a Mac-synthesized WAV for the phone to play locally."""
+    if not wav_bytes:
+        return
+    _ensure_dir()
+    tmp = PHONE_SPEECH_PATH.with_suffix(".tmp")
+    tmp.write_bytes(wav_bytes)
+    tmp.replace(PHONE_SPEECH_PATH)
+    with _lock:
+        data = _read()
+        data["speech_at"] = time.time()
+        data["speech_bytes"] = len(wav_bytes)
+        _write(data)
+
+
+def read_phone_speech() -> bytes | None:
+    try:
+        if not PHONE_SPEECH_PATH.is_file():
+            return None
+        data = PHONE_SPEECH_PATH.read_bytes()
+    except OSError:
+        return None
+    return data or None
 
 
 def write_phone_photo(jpeg: bytes, *, width: int, height: int) -> None:

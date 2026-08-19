@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any
 
-from app_status import enqueue_speak
+from app_status import enqueue_speak, reply_sink
 from app_status import log as status_log
 
 MIN_SECONDS = 1.0
@@ -84,7 +84,7 @@ def _fire(job_id: str) -> None:
         pass
     if speak:
         try:
-            enqueue_speak(body, source="timer")
+            enqueue_speak(body, source="timer", sink=str(job.get("sink") or "mac"))
         except Exception:
             pass
 
@@ -111,6 +111,10 @@ def set_timer(
     fire_at = time.time() + secs
     timer = threading.Timer(secs, _fire, args=(job_id,))
     timer.daemon = True
+    try:
+        sink = reply_sink()
+    except Exception:
+        sink = "mac"
     job = {
         "id": job_id,
         "label": label,
@@ -118,6 +122,7 @@ def set_timer(
         "fire_at": fire_at,
         "speak": bool(speak),
         "message": msg,
+        "sink": sink,
         "timer": timer,
     }
     with _lock:

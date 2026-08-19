@@ -37,7 +37,14 @@ from typing import Any
 
 from openai import OpenAI
 
-from tts import BARGE_IN_DEFAULT, TTS_VOICE, active_tts_voice, play_wav, synthesize
+from tts import (
+    BARGE_IN_DEFAULT,
+    TTS_VOICE,
+    active_tts_voice,
+    concat_wavs,
+    play_wav,
+    synthesize,
+)
 
 # Lower defaults = sooner first audio; still large enough for natural clauses.
 _MIN_CHARS = int(os.environ.get("TTS_CHUNK_MIN_CHARS", "20"))
@@ -132,6 +139,7 @@ class _Session:
     outstanding: int = 0
     final_seen: bool = False
     call_ids: set[str] = field(default_factory=set)
+    phone_chunks: list[bytes] = field(default_factory=list)
 
 
 class LowLatencyTTS:
@@ -469,6 +477,18 @@ class LowLatencyTTS:
                             detail=detail,
                         )
                     print(f"[tts] {text}", flush=True)
+                    try:
+                        from app_status import reply_sink
+
+                        phone = reply_sink() == "phone"
+                    except Exception:
+                        phone = False
+                    if phone:
+                        with self._lock:
+                            session = self._sessions.get(response_id)
+                            if session is not None:
+                                session.phone_chunks.append(audio)
+                        continue
                     interrupt_event, release = self._acquire_interrupt()
                     try:
                         # afplay / configured player — avoid PortAudio TTS by default.
@@ -493,13 +513,28 @@ class LowLatencyTTS:
                 self._audio_q.task_done()
 
     def _complete_chunk(self, response_id: str) -> None:
+        chunks: list[bytes] = []
         with self._lock:
             session = self._sessions.get(response_id)
             if session is None:
                 return
             session.outstanding = max(0, session.outstanding - 1)
             if session.final_seen and session.outstanding == 0:
+                chunks = list(session.phone_chunks)
+                session.phone_chunks.clear()
                 session.done.set()
+        if chunks:
+            try:
+                from app_status import reply_sink, write_phone_speech
+
+                if reply_sink() == "phone":
+                    write_phone_speech(concat_wavs(chunks))
+            except Exception as exc:
+                self._log(
+                    "phone_speech_error",
+                    response_id=response_id,
+                    detail=repr(exc),
+                )
     def wait(self, response_id: str, timeout: float | None = None) -> bool:
         with self._lock:
             session = self._sessions.get(response_id)

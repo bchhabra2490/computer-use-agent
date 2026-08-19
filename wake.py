@@ -294,13 +294,18 @@ def _afplay(sound: str, *, blocking: bool) -> bool:
         import subprocess
 
         def _run() -> None:
-            subprocess.run(
-                ["afplay", sound],
-                check=False,
-                timeout=3,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            try:
+                subprocess.run(
+                    ["afplay", sound],
+                    check=False,
+                    timeout=3,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                # afplay can hang if the output device is busy (TTS). Do not
+                # dump an uncaught exception from the chime daemon thread.
+                return
 
         if blocking:
             _run()

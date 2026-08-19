@@ -170,5 +170,19 @@ class WakeSpotterTests(unittest.TestCase):
         model.predict.assert_not_called()
 
 
+class AfplayChimeTests(unittest.TestCase):
+    def test_timeout_is_swallowed_when_blocking(self) -> None:
+        import subprocess
+
+        with (
+            patch.object(wake.sys, "platform", "darwin"),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["afplay"], 3),
+            ),
+        ):
+            self.assertTrue(wake._afplay("/System/Library/Sounds/Ping.aiff", blocking=True))
+
+
 if __name__ == "__main__":
     unittest.main()

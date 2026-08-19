@@ -61,8 +61,20 @@ class TimerToolTests(unittest.TestCase):
             self.assertTrue(st.speak_pending())
             self.assertFalse(st.utterance_pending())
             self.assertEqual(st.consume_speak(), "Check the oven.")
+            self.assertEqual(st.reply_sink(), "mac")
             self.assertIsNone(st.consume_utterance())
             notify.assert_called()
+
+    def test_fire_keeps_phone_sink_from_set_time(self) -> None:
+        st.set_reply_sink("phone")
+        with patch.object(tm, "notify_macos"):
+            tm.set_timer(1.05, label="pasta", speak=True, message="Pasta is done.")
+            st.set_reply_sink("mac")
+            deadline = time.time() + 3.0
+            while time.time() < deadline and not st.speak_pending():
+                time.sleep(0.05)
+            self.assertEqual(st.consume_speak(), "Pasta is done.")
+            self.assertEqual(st.reply_sink(), "phone")
 
     def test_fire_without_speak_does_not_queue_tts(self) -> None:
         with patch.object(tm, "notify_macos"):

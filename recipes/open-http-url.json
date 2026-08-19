@@ -1,0 +1,16 @@
+{
+  "name": "open-http-url",
+  "match": ["open"],
+  "params": ["url"],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "{{url}}"
+    }
+  ],
+  "handoff": false,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": ""
+}

@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
-from app_status import consume_utterance, speak_pending, utterance_pending
+from app_status import consume_utterance, set_reply_sink, speak_pending, utterance_pending
 from bus import strip_wake_prefix
 from session import Session, get_session
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
@@ -140,6 +140,7 @@ class AudioSession:
         self._phase("listening", f"{heard} heard — listening", log=True)
         remainder = get_wake_remainder()
         if remainder:
+            set_reply_sink("mac")
             return strip_wake_prefix(remainder).strip() or remainder
         try:
             utterance = self.listen(listen_prompt or "Listening…")
@@ -155,6 +156,7 @@ class AudioSession:
             except Exception as e:
                 print(f"[audio] follow-up listen failed: {e}")
                 return None
+        set_reply_sink("mac")
         return command or None
 
     def speak(self, text: str) -> str | None:

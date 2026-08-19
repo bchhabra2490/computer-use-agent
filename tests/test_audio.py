@@ -46,9 +46,11 @@ class AudioSessionTests(unittest.TestCase):
             patch("audio.consume_utterance", return_value=None),
             patch("audio.utterance_pending", return_value=False),
             patch("audio.speak_pending", return_value=False),
+            patch("audio.set_reply_sink") as sink,
         ):
             cmd = self.audio.listen_command()
         self.assertEqual(cmd, "open notes")
+        sink.assert_called_with("mac")
         self.assertEqual(self.sess.phase, "listening")
 
     def test_listen_command_returns_phone_queue_without_wake(self) -> None:

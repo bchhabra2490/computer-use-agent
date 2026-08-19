@@ -291,6 +291,45 @@ def _play_sounddevice(wav_bytes: bytes, *, interrupt_event=None) -> bool:
     return interrupted or interrupt_event.is_set()
 
 
+def concat_wavs(parts: list[bytes]) -> bytes:
+    """Join WAV blobs that share the same format (streaming TTS chunks)."""
+    blobs = [p for p in parts if p]
+    if not blobs:
+        return b""
+    if len(blobs) == 1:
+        return blobs[0]
+    frames: list[bytes] = []
+    params = None
+    for blob in blobs:
+        with wave.open(io.BytesIO(blob), "rb") as src:
+            if params is None:
+                params = src.getparams()
+            elif (
+                src.getnchannels() != params.nchannels
+                or src.getsampwidth() != params.sampwidth
+                or src.getframerate() != params.framerate
+            ):
+                continue
+            frames.append(src.readframes(src.getnframes()))
+    if not frames or params is None:
+        return blobs[0]
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setparams(params)
+        for chunk in frames:
+            out.writeframes(chunk)
+    return buf.getvalue()
+
+
+def _phone_reply_sink() -> bool:
+    try:
+        from app_status import reply_sink
+
+        return reply_sink() == "phone"
+    except Exception:
+        return False
+
+
 def play_wav(
     wav_bytes: bytes,
     *,
@@ -300,9 +339,20 @@ def play_wav(
     """
     Play WAV bytes. On macOS defaults to afplay (ignores force_rate).
 
+    When the current turn came from the phone, skip Mac speakers and publish
+    the WAV for ``GET /v1/speech`` instead.
+
     Returns True if interrupted via interrupt_event.
     """
     del force_rate  # afplay plays native WAV rate; kept for call-site compat
+    if _phone_reply_sink():
+        try:
+            from app_status import write_phone_speech
+
+            write_phone_speech(wav_bytes)
+        except Exception as exc:
+            print(f"[tts] phone speech publish failed ({exc})", flush=True)
+        return False
     with _PLAYBACK_LOCK:
         if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
             return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
@@ -323,9 +373,11 @@ def speak(
     Uses the persistent wake monitor when mic barge-in is enabled (armed before
     synthesis so listening covers the full speak path). Keyboard barge-in works
     even when mic barge-in is off, as long as the terminal is focused.
+    Phone-sink replies skip Mac playback and barge-in (the phone is the speaker).
     """
     print(f"[tts] {text}")
-    enable = BARGE_IN_DEFAULT if barge_in is None else bool(barge_in)
+    phone = _phone_reply_sink()
+    enable = False if phone else (BARGE_IN_DEFAULT if barge_in is None else bool(barge_in))
     if enable:
         try:
             from wake import text_mentions_wake_phrase

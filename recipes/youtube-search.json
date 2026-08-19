@@ -1,0 +1,22 @@
+{
+  "name": "youtube-search",
+  "match": ["youtube"],
+  "match_templates": [
+    "play {{query}} on youtube",
+    "{{query}} on youtube",
+    "youtube {{query}}",
+    "search youtube for {{query}}"
+  ],
+  "params": ["query"],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.youtube.com/results?search_query={{query}}"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": ""
+}

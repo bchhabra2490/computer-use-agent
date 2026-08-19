@@ -621,6 +621,7 @@ def run(
     message_inbox=None,
     ask_user_bridge=None,
     status_agent_id: str | None = None,
+    user_said: str | None = None,
 ) -> str:
     """Run the computer-use loop. Returns a status string for the orchestrator.
 
@@ -628,7 +629,8 @@ def run(
     directives are drained at the start of each turn and injected into context.
     If `ask_user_bridge` is provided, ask_user is routed through the orchestrator
     (main-thread TTS/STT) instead of capturing the mic from this worker thread.
-    `status_agent_id` ties this run to the menu-bar "In Progress" list.
+    `user_said` is the spoken request used to match recipes/traces. `task` is
+    the goal (user words or a short leftover step), never a UI screenplay.
     """
     client = OpenAI()
     ensure_tray_running()
@@ -730,7 +732,8 @@ def run(
         }
 
     try:
-        recipe_result = try_recipe(task, client=client)
+        recipe_match = (user_said or task).strip() or task
+        recipe_result = try_recipe(recipe_match, client=client)
         if isinstance(recipe_result, str):
             log.record("recipe", recipe_result.split("\n", 1)[0], {"result": recipe_result})
             log.finish("completed", "Ran saved recipe.")
@@ -750,7 +753,7 @@ def run(
                     "opened": recipe_result.opened,
                 },
             )
-            model_task = handoff_prompt(task, recipe_result)
+            model_task = handoff_prompt(user_said or task, recipe_result)
             try:
                 shot = desktop.capture_screenshot()
                 handoff_shot_b64 = base64.b64encode(shot).decode("utf-8")
@@ -762,7 +765,7 @@ def run(
             except Exception as e:
                 print(f"[recipe] handoff screenshot failed ({e})", flush=True)
         else:
-            replayed = try_replay(task, desktop=desktop)
+            replayed = try_replay(recipe_match, desktop=desktop)
             if replayed:
                 log.record("trace_replay", replayed.split("\n", 1)[0], {"result": replayed})
                 log.finish("completed", "Replayed saved action trace.")
@@ -789,6 +792,7 @@ def run(
                 "(skill read-memory).\n"
                 "1b. After a recipe handoff (or whenever the target UI may already "
                 "be visible), look at the screenshot and occupancy before any click. "
+                "The goal is what the user asked, not a click-by-click script. "
                 "Skills are a checklist: skip steps that are already done. Never "
                 "replay a skill from the first step when the page/app is already open.\n"
                 "2. If they ask who you are, what you can do, or about this agent, "

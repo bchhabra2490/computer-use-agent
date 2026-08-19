@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from task_log import TaskLog, _slugify
+from task_spec import is_procedure_brief
 from traces import (
     _HARD_TASK,
     _extract_urls,
@@ -373,6 +374,44 @@ def _valid_slot(name: str, value: str) -> bool:
     return True
 
 
+def slot_grounded_in_utterance(utterance: str, value: str) -> bool:
+    """True when the slot is actually present in this request (not a prior place)."""
+    text = _norm(utterance)
+    slot = _norm(value).replace(",", " ")
+    if not text or not slot:
+        return False
+    if slot in text:
+        return True
+    words = [w for w in slot.split() if len(w) > 1]
+    if not words:
+        return False
+    hay = set(text.split())
+    return all(w in hay or w in text for w in words)
+
+
+def params_grounded(utterance: str, params: dict[str, str]) -> bool:
+    return all(slot_grounded_in_utterance(utterance, value) for value in params.values())
+
+
+_MAPS_PLACE_TOO_NARROW = re.compile(
+    r"national parks|wildlife sanctuary|openstreetmap|\bosm\b|"
+    r"search for ['\"]|search for national",
+    re.I,
+)
+
+
+def _has_map_word(text: str) -> bool:
+    return bool(re.search(r"\bmaps?\b", text or "", re.I))
+
+
+def recipe_covers_request(recipe: Recipe, utterance: str) -> bool:
+    """False when this recipe would swallow a larger task (fall through to skills)."""
+    if _prelude_is_maps(recipe) and recipe.params == ["place"]:
+        if _MAPS_PLACE_TOO_NARROW.search(utterance or ""):
+            return False
+    return True
+
+
 def extract_maps_place(utterance: str) -> str | None:
     found = _MAPS_PLACE_URL.search(utterance or "")
     if found:
@@ -444,15 +483,7 @@ def _vision_leftover(utterance: str) -> str:
 
 
 def _looks_like_agent_brief(text: str) -> bool:
-    return bool(
-        re.search(
-            r"create a new tab|navigate to https?://|wait for the page to finish loading|"
-            r"open google chrome,|ensure the map is centered|"
-            r"youtube is not playable|if that fails|apple music",
-            text or "",
-            re.I,
-        )
-    )
+    return is_procedure_brief(text)
 
 
 def _bind_recipe(recipe: Recipe, utterance: str) -> tuple[dict[str, str], str] | None:
@@ -577,8 +608,7 @@ def recipe_match_score(recipe: Recipe, utterance: str) -> float:
     text = utterance or ""
     if _prelude_is_maps(recipe) and (
         extract_maps_place(text)
-        or _phrase_in(text, "map")
-        or _phrase_in(text, "maps")
+        or _has_map_word(text)
     ):
         return 2.0
     if _prelude_is_youtube(recipe) and _phrase_in(text, "youtube"):
@@ -636,6 +666,9 @@ Task:
 
 Rules:
 - Each placeholder value is SHORT: a place name, a song plus artist, or an http(s) URL.
+- Use ONLY the Task text below. Do not reuse a place, song, or URL from a
+  previous turn or from the desktop.
+- If a placeholder value is not clearly present in the Task, do not guess.
 - Do not copy fallback/instruction clauses ("is not playable", "create a new tab",
   "wait for the page", "if that fails").
 - leftover is only UI work AFTER the URL/app is already open (zoom, click the
@@ -645,7 +678,11 @@ Rules:
 JSON only (no markdown):
 {{"params": {{"{names[0] if names else "query"}": "..."}}, "leftover": ""}}
 """
-    response = client.responses.create(model=EVAL_MODEL, input=prompt)
+    response = client.responses.create(
+        model=EVAL_MODEL,
+        input=prompt,
+        store=False,
+    )
     text = ""
     for item in response.output:
         if item.type == "message":
@@ -664,6 +701,12 @@ JSON only (no markdown):
         if not params.get(name) or not _valid_slot(name, params[name]):
             print(f"[recipe] LLM fill rejected slot {name}={params.get(name)!r}", flush=True)
             return None
+    if not params_grounded(utterance, {n: params[n] for n in names}):
+        print(
+            f"[recipe] LLM fill not in task params={params} task={utterance[:120]!r}",
+            flush=True,
+        )
+        return None
     if _looks_like_agent_brief(leftover):
         leftover = _vision_leftover(utterance)
     print(f"[recipe] LLM fill {recipe.name} params={params} leftover={leftover!r}", flush=True)
@@ -684,7 +727,14 @@ def fill_recipe_slots(
                 return filled
         except Exception as e:
             print(f"[recipe] LLM fill failed ({e}) — regex fallback", flush=True)
-    return _bind_recipe(recipe, utterance)
+    bound = _bind_recipe(recipe, utterance)
+    if bound is None:
+        return None
+    params, leftover = bound
+    if params and not params_grounded(utterance, params):
+        print(f"[recipe] regex fill not in task params={params}", flush=True)
+        return None
+    return bound
 
 
 def leftover_text(recipe: Recipe, leftover: str, params: dict[str, str]) -> str:
@@ -736,6 +786,12 @@ def try_recipe(
     recipes = load_recipes(recipes_dir)
     recipe = pick_matching_recipe(task, recipes)
     if recipe is None:
+        return None
+    if not recipe_covers_request(recipe, task):
+        print(
+            f"[recipe] {recipe.name} too narrow for this request — falling back to agent",
+            flush=True,
+        )
         return None
     bound = fill_recipe_slots(recipe, task, client=client)
     if bound is None:

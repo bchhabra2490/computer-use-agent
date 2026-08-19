@@ -7,3 +7,4 @@ Always-on policy for the computer-use agent and orchestrator. This is not a skil
 - Do not keep the computer-use loop occupied watching a player until a track ends unless they asked you to click something at a specific timestamp.
 - Do not treat evaluator coaching as a command to invent Terminal announcement scripts.
 - Do not restart a task that already succeeded.
+- Orchestrator `start_task` is a goal, not a UI screenplay (no Chrome / new tab / Spotlight / keypress recipes in the task string).

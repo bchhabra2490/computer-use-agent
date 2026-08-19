@@ -284,6 +284,53 @@ class LlmFillTests(unittest.TestCase):
         self.assertIsInstance(result, rc.RecipeHit)
 
 
+class GroundingTests(unittest.TestCase):
+    def test_tokyo_not_grounded_in_india_request(self) -> None:
+        self.assertTrue(rc.slot_grounded_in_utterance("Open a map of India", "India"))
+        self.assertFalse(
+            rc.slot_grounded_in_utterance("Open a map of India", "Tokyo, Japan")
+        )
+
+    def test_stale_llm_tokyo_falls_back_to_india(self) -> None:
+        client = _FakeResponsesClient(
+            {"params": {"place": "Tokyo, Japan"}, "leftover": "zoom Tokyo"}
+        )
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(
+                "Open a map of India",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+                client=client,
+            )
+        opener.assert_called_once()
+        self.assertIn("India", opener.call_args[0][0])
+        self.assertNotIn("Tokyo", opener.call_args[0][0])
+        self.assertIsInstance(result, str)
+
+    def test_national_parks_skips_place_recipe(self) -> None:
+        with patch.object(rc, "open_url") as opener:
+            result = rc.try_recipe(
+                "Open a map of India and show all national parks",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+            )
+        opener.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_openstreetmap_does_not_match_google_maps_recipe(self) -> None:
+        with patch.object(rc, "open_url") as opener:
+            result = rc.try_recipe(
+                "Open OpenStreetMap and search for 'National parks in India'",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+            )
+        opener.assert_not_called()
+        self.assertIsNone(result)
+
+
 class ProposeTests(unittest.TestCase):
     def tearDown(self) -> None:
         for name in list(self.__dict__):

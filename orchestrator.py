@@ -95,6 +95,7 @@ from session import Session, bind_session, get_session
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
 from stt import POST_TTS_COOLDOWN, ask_user, listen_once
+from task_spec import resolve_agent_task
 from tools_registry import orchestrator_tools, run_shared_tool
 from wake import (
     format_wake_phrases,
@@ -158,6 +159,10 @@ Rules:
   when the hardware MCP can perform the action.
 - Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
   Not for timers or reminders — those are set_timer.
+  start_task.task is the GOAL only (what they asked). Never narrate how: no
+  “open Chrome, new tab, wait for load, press Cmd+L”. If they said “show Togo
+  on a map”, pass that. After a prior task, pass only the leftover goal
+  (“screenshot the map”), not a restart of Chrome.
 - Call read_memory before ask_user when the missing detail may already be stored
   (name, usernames, usual apps, what was on screen). save_memory for durable
   facts they state. save_screen_memory when they want the current display stored.
@@ -202,8 +207,9 @@ Available desktop skills the computer agent can load:
 class AgentJob:
     """Background computer-agent run + ZeroMQ inbox handle."""
 
-    def __init__(self, task: str, call_id: str):
+    def __init__(self, task: str, call_id: str, *, match_text: str | None = None):
         self.task = task
+        self.match_text = (match_text or task).strip() or task
         self.call_id = call_id
         self.done = threading.Event()
         self.result: str | None = None
@@ -548,6 +554,7 @@ def _start_agent_thread(
                 message_inbox=inbox,
                 ask_user_bridge=ask_bridge,
                 status_agent_id=job.call_id,
+                user_said=job.match_text,
             )
         except BaseException as e:  # noqa: BLE001 — capture for main thread
             job.error = e
@@ -1000,6 +1007,7 @@ def _handle_tool(
     ask_bridge: AskUserBridge,
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
+    user_said: str = "",
 ) -> tuple[dict | None, bool, AgentJob | None]:
     """
     Execute one tool call.
@@ -1108,9 +1116,26 @@ def _handle_tool(
         if not task:
             output = "Error: empty task"
         else:
-            print(f"\n[orchestrator] start_task: {task}")
-            get_session().enter_and_log("agent", f"Starting task: {task[:120]}", task=task)
-            job = AgentJob(task=task, call_id=call.call_id)
+            spec = resolve_agent_task(
+                user_said=user_said or ((turn.user_input if turn else "") or ""),
+                planner_task=task,
+            )
+            if spec.goal != task:
+                print(
+                    f"[orchestrator] dropped procedure brief; goal={spec.goal!r}",
+                    flush=True,
+                )
+            print(f"\n[orchestrator] start_task: {spec.goal}")
+            get_session().enter_and_log(
+                "agent",
+                f"Starting task: {spec.goal[:120]}",
+                task=spec.goal,
+            )
+            job = AgentJob(
+                task=spec.goal,
+                call_id=call.call_id,
+                match_text=spec.match_text,
+            )
             _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
             _speak_later(client, "Starting that now.")
             # Defer function_call_output until the agent thread finishes.
@@ -1156,6 +1181,7 @@ def _process_response(
     ask_bridge: AskUserBridge,
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
+    user_said: str = "",
 ) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -1225,6 +1251,7 @@ def _process_response(
                 ask_bridge=ask_bridge,
                 llm_tts=llm_tts,
                 turn=turn,
+                user_said=user_said,
             )
             end_session = end_session or stop
             if job is not None:
@@ -1260,7 +1287,7 @@ def _process_response(
                         "(titles/names, not raw URLs), then stop. Do not recap "
                         "again in a message.\n"
                         "- If distinct work remains, call start_task with only "
-                        "the remaining step.\n"
+                        "the remaining GOAL (not a Chrome/new-tab screenplay).\n"
                         "- Do not redo a task that already succeeded."
                     ),
                 }
@@ -1485,6 +1512,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 ask_bridge=ask_bridge,
                 llm_tts=llm_tts,
                 turn=turn,
+                user_said=utterance,
             )
             previous_id = response.id
             maybe_extract_run_memories(

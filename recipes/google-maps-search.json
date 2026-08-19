@@ -1,0 +1,29 @@
+{
+  "name": "google-maps-search",
+  "match": [
+    "national parks in {{place}}",
+    "show all {{query}} in {{place}} on Google Maps",
+    "search {{query}} in {{place}} on Google Maps",
+    "maps search {{query}} {{place}}"
+  ],
+  "params": [
+    "query",
+    "place"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/maps/search/{{query}}+in+{{place}}"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Show all national parks of India in Google Maps",
+  "match_templates": [
+    "maps/search/{{query}}+in+{{place}}",
+    "https://www.google.com/maps/search/{{query}}+in+{{place}}"
+  ],
+  "leftover": "After the map opens, scroll the left results panel to load the full list and zoom or pan the map so all markers are visible."
+}

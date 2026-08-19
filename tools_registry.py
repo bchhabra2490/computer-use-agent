@@ -34,9 +34,10 @@ START_TASK_TOOL = {
             "task": {
                 "type": "string",
                 "description": (
-                    "Clear natural-language instructions for the computer agent. "
-                    "If continuing after a prior task, state only the remaining work "
-                    "and do not redo completed steps."
+                    "The user's goal in their words (or a short leftover step). "
+                    "Do not write a UI screenplay: no Chrome/Spotlight/new-tab/"
+                    "keypress steps, no 'wait for the page', no fallback apps. "
+                    "Recipes and the computer agent decide how."
                 ),
             },
         },

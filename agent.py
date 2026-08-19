@@ -52,6 +52,7 @@ from evaluator import (
     EVAL_EVERY,
     EVAL_MODEL,
     coach_agent,
+    model_for_recipe_handoff,
     resolve_agent_model,
     screenshot_b64_from_computer_output,
 )
@@ -80,6 +81,31 @@ from tts import speak, speak_later
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
 # Used when routing is disabled / skill review fallback.
 MODEL = MODEL_OVERRIDE or os.environ.get("AGENT_MODEL_HARD", "gpt-5.6")
+
+_RECIPE_SKILL = {
+    "google-maps-place": "google-maps-open-place",
+    "youtube-search": "youtube-search-and-play-long-music",
+    "open-http-url": "chrome-open-url-and-screenshot",
+}
+
+
+def _handoff_skill_blurb(recipe_name: str) -> str:
+    hint = _RECIPE_SKILL.get(recipe_name or "")
+    if not hint:
+        return (
+            "Recipe leftover only. Do not load the skill catalog. "
+            "Finish the remaining visual work, then mark_done."
+        )
+    skill = get_skill(hint)
+    if skill is None:
+        return (
+            f"If needed, call read_skill for {hint}. Skip steps already done on screen."
+        )
+    return (
+        f"Relevant skill: {skill.name} — {skill.description}\n"
+        f"Call read_skill only if you need the remaining checklist. "
+        "Skip every step whose outcome is already on screen."
+    )
 
 
 class TaskMarkedDone(Exception):
@@ -733,6 +759,7 @@ def run(
 
     try:
         recipe_match = (user_said or task).strip() or task
+        recipe_handoff = False
         recipe_result = try_recipe(recipe_match, client=client)
         if isinstance(recipe_result, str):
             log.record("recipe", recipe_result.split("\n", 1)[0], {"result": recipe_result})
@@ -744,6 +771,7 @@ def run(
         model_task = task
         handoff_shot_b64: str | None = None
         if isinstance(recipe_result, RecipeHit):
+            recipe_handoff = True
             log.record(
                 "recipe_handoff",
                 recipe_result.recipe.name,
@@ -773,12 +801,27 @@ def run(
                     speak_later(client, "Done.")
                 return replayed
 
-        model = resolve_agent_model(client, task, log)
+        if recipe_handoff:
+            model = model_for_recipe_handoff(log)
+        else:
+            model = resolve_agent_model(client, task, log)
         print(f"[agent] model={model} eval_every={EVAL_EVERY}")
         if message_inbox is not None:
             print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
 
-        prompt_body = (
+        if recipe_handoff:
+            skill_block = _handoff_skill_blurb(recipe_result.recipe.name)
+            prompt_body = (
+                f"{model_task}\n\n"
+                f"Desktop occupancy:\n{display_ctx}\n\n"
+                f"{skill_block}\n\n"
+                f"{not_to_do}\n\n"
+                "The URL/app prefix already ran. Do not Spotlight, do not open a new "
+                "tab, do not retype the URL. Use the screenshot. Call read_skill only "
+                "for leftover visual steps. Then mark_done."
+            )
+        else:
+            prompt_body = (
                 f"{model_task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
@@ -840,7 +883,7 @@ def run(
                 "advisory guidance and adapt.\n"
                 "12. When the request is complete and no other action is required, "
                 "call mark_done (do not keep using the computer tool)."
-        )
+            )
         if handoff_shot_b64:
             api_input: str | list = [
                 {

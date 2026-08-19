@@ -1,0 +1,30 @@
+{
+  "name": "youtube-music-search-playlist",
+  "match": [
+    "Check YouTube Music",
+    "open YouTube Music and play",
+    "old Hindi playlist",
+    "start or resume playback of {{query}} on YouTube Music",
+    "play {{query}} on YouTube Music"
+  ],
+  "params": [
+    "query"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://music.youtube.com/search?q={{query}}"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Check YouTube Music in Chrome and start or resume playback of the old Hindi playlist; unmute or raise system audio if it's muted so the song plays.",
+  "match_templates": [
+    "search for {{query}} on YouTube Music",
+    "play {{query}} on YouTube Music",
+    "open music.youtube.com and search for {{query}}"
+  ],
+  "leftover": "Click the desired playlist or track from the search results to start/resume playback; unmute or raise system volume if needed."
+}

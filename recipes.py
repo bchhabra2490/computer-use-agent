@@ -2,8 +2,8 @@
 
 A recipe opens a URL or app (with ``{{placeholders}}``), then either finishes
 or hands leftover work to the vision agent. Matching recipes run before traces
-and before the screenshot loop. Slot values are filled with EVAL_MODEL; regex
-is only a fallback.
+and before the screenshot loop. Slot values are filled with regex first; EVAL_MODEL
+only runs if bind fails. Screenshot-only leftover is saved here (no CU loop).
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ RECIPE_RECORD = os.environ.get("RECIPE_RECORD", "1").strip().lower() not in {
     "no",
     "off",
 }
-RECIPE_SETTLE_SEC = float(os.environ.get("RECIPE_SETTLE_SEC", "1.5"))
+RECIPE_SETTLE_SEC = float(os.environ.get("RECIPE_SETTLE_SEC", "0.8"))
 RECIPE_AUTO_SAVE = os.environ.get("RECIPE_AUTO_SAVE", "1").strip().lower() not in {
     "0",
     "false",
@@ -298,21 +298,34 @@ def run_prelude(
         opened.append(bound_app)
     wait = RECIPE_SETTLE_SEC if settle is None else float(settle)
     if wait > 0 and opened:
-        time.sleep(wait)
+        _settle_open(recipe, timeout=wait)
     return opened
 
 
-def verify_recipe(recipe: Recipe) -> bool:
+def verify_recipe(recipe: Recipe, *, quiet: bool = False) -> bool:
     want = str((recipe.verify or {}).get("ax_app") or "").strip()
     if not want:
         return True
     got = frontmost_app_name() or ""
     if not got:
-        print("[recipe] verify skipped (no frontmost app name)", flush=True)
+        if not quiet:
+            print("[recipe] verify skipped (no frontmost app name)", flush=True)
         return True
     ok = want.lower() in got.lower() or got.lower() in want.lower()
-    print(f"[recipe] verify ax_app={want!r} frontmost={got!r} ok={ok}", flush=True)
+    if not quiet:
+        print(f"[recipe] verify ax_app={want!r} frontmost={got!r} ok={ok}", flush=True)
     return ok
+
+
+def _settle_open(recipe: Recipe, *, timeout: float) -> None:
+    """Poll until the target app is frontmost, instead of a fixed sleep."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if verify_recipe(recipe, quiet=True):
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.12)
 
 
 def load_recipes(recipes_dir: Path | None = None) -> list[Recipe]:
@@ -394,8 +407,7 @@ def params_grounded(utterance: str, params: dict[str, str]) -> bool:
 
 
 _MAPS_PLACE_TOO_NARROW = re.compile(
-    r"national parks|wildlife sanctuary|openstreetmap|\bosm\b|"
-    r"search for ['\"]|search for national",
+    r"national parks|wildlife sanctuary|openstreetmap|\bosm\b|" r"search for ['\"]|search for national",
     re.I,
 )
 
@@ -440,9 +452,7 @@ def extract_media_query(utterance: str) -> str | None:
             combined = f"{title} {artist}".strip()
             if _valid_slot("query", combined):
                 return combined
-        if _valid_slot("query", inner) and not re.search(
-            r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I
-        ):
+        if _valid_slot("query", inner) and not re.search(r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I):
             return inner
     return None
 
@@ -606,10 +616,7 @@ def recipe_match_score(recipe: Recipe, utterance: str) -> float:
     if not recipe.prelude:
         return 0.0
     text = utterance or ""
-    if _prelude_is_maps(recipe) and (
-        extract_maps_place(text)
-        or _has_map_word(text)
-    ):
+    if _prelude_is_maps(recipe) and (extract_maps_place(text) or _has_map_word(text)):
         return 2.0
     if _prelude_is_youtube(recipe) and _phrase_in(text, "youtube"):
         return 2.0
@@ -719,22 +726,21 @@ def fill_recipe_slots(
     *,
     client: Any | None = None,
 ) -> tuple[dict[str, str], str] | None:
-    """Fill {{placeholders}}. Prefer the LLM; regex is only a fallback."""
+    """Fill {{placeholders}}. Regex first; EVAL_MODEL only if bind fails."""
+    bound = _bind_recipe(recipe, utterance)
+    if bound is not None:
+        params, leftover = bound
+        if not params or params_grounded(utterance, params):
+            return bound
+        print(f"[recipe] regex fill not in task params={params}", flush=True)
     if client is not None and RECIPE_LLM_FILL and _recipe_slot_names(recipe):
         try:
             filled = fill_recipe_slots_llm(client, recipe, utterance)
             if filled is not None:
                 return filled
         except Exception as e:
-            print(f"[recipe] LLM fill failed ({e}) — regex fallback", flush=True)
-    bound = _bind_recipe(recipe, utterance)
-    if bound is None:
-        return None
-    params, leftover = bound
-    if params and not params_grounded(utterance, params):
-        print(f"[recipe] regex fill not in task params={params}", flush=True)
-        return None
-    return bound
+            print(f"[recipe] LLM fill failed ({e})", flush=True)
+    return None
 
 
 def leftover_text(recipe: Recipe, leftover: str, params: dict[str, str]) -> str:
@@ -745,6 +751,27 @@ def leftover_text(recipe: Recipe, leftover: str, params: dict[str, str]) -> str:
             return f"{filled} {extra}".strip()
         return filled or extra
     return extra
+
+
+def leftover_is_screenshot_only(text: str) -> bool:
+    """True when leftover is capture-the-window, not zoom/play/click."""
+    blob = (text or "").strip().lower()
+    if not blob or not re.search(r"\b(screenshot|capture)\b", blob):
+        return False
+    if re.search(r"\b(zoom|pan|play|click|unmute|search|type)\b", blob):
+        return False
+    return True
+
+
+def save_recipe_screenshot(*, dest: Path | None = None) -> Path:
+    from actions import DesktopController
+
+    png = DesktopController().capture_screenshot()
+    path = dest or (Path.home() / "Desktop" / f"jarvis-{int(time.time())}.png")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
+    print(f"[recipe] saved screenshot {path}", flush=True)
+    return path
 
 
 def handoff_prompt(task: str, hit: RecipeHit) -> str:
@@ -824,8 +851,12 @@ def try_recipe(
             )
     hit = RecipeHit(recipe=recipe, params=params, leftover=leftover, opened=opened)
     extra = leftover_text(recipe, leftover, params)
-    # Leftover work always continues. handoff=true means the prelude is never the
-    # whole job (e.g. YouTube search still needs a video click).
+    if leftover_is_screenshot_only(extra) and not recipe.handoff:
+        try:
+            shot = save_recipe_screenshot()
+            return f"completed\nResult:\nOpened {opened[0] if opened else recipe.name}. " f"Saved screenshot {shot}."
+        except Exception as e:
+            print(f"[recipe] screenshot leftover failed ({e}) — handing off", flush=True)
     if extra or recipe.handoff:
         return hit
     return f"completed\nResult:\nOpened {opened[0] if opened else recipe.name}."

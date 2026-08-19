@@ -4,7 +4,8 @@ Opt-in: ``PHONE_GATEWAY=1``. Off by default so CUA does not bind a port.
 
 The phone never drives the desktop. It queues text (same path as STT),
 accepts a short audio clip (``POST /v1/audio``) that the Mac transcribes,
-accepts a camera still (``POST /v1/photo``) for the orchestrator to look at,
+accepts a camera still (``POST /v1/photo``) for the orchestrator to look at
+(optional mic clip is transcribed as the caption),
 toggles tray flags (send / mark done / quit), and streams ``status.json``.
 
 Auth: Bearer token in ``Authorization`` or ``?token=`` (SSE). Token lives in
@@ -163,6 +164,13 @@ def _is_wav(data: bytes) -> bool:
     return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
 
 
+_AUDIO_EXTS = (".wav", ".m4a", ".mp4", ".aac", ".mp3", ".caf", ".webm", ".ogg", ".flac")
+_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff")
+_PHOTO_FIELD_NAMES = {"photo", "image", "camera", "picture"}
+_AUDIO_FIELD_NAMES = {"audio", "voice", "recording", "caption_audio", "mic"}
+_TEXT_FIELD_NAMES = {"text", "command", "caption", "prompt", "transcript"}
+
+
 def _suffix_for_audio(*, filename: str = "", content_type: str = "") -> str:
     name = (filename or "").lower()
     for ext in (".wav", ".m4a", ".mp4", ".aac", ".mp3", ".caf", ".webm", ".ogg", ".flac"):
@@ -211,6 +219,63 @@ def audio_to_wav(audio: bytes, *, filename: str = "", content_type: str = "") ->
         if proc.returncode == 0 and dst.is_file() and dst.stat().st_size > 44:
             return dst.read_bytes()
     return audio
+
+
+def _part_payload(part) -> bytes:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        return b""
+    if isinstance(payload, str):
+        return payload.encode("utf-8")
+    return payload
+
+
+def _is_audio_part(*, name: str = "", filename: str = "", content_type: str = "") -> bool:
+    if (name or "").lower() in _AUDIO_FIELD_NAMES:
+        return True
+    fname = (filename or "").lower()
+    if any(fname.endswith(ext) for ext in _AUDIO_EXTS):
+        return True
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    return ctype.startswith("audio/")
+
+
+def _is_photo_part(*, name: str = "", filename: str = "", content_type: str = "") -> bool:
+    if (name or "").lower() in _PHOTO_FIELD_NAMES:
+        return True
+    fname = (filename or "").lower()
+    if any(fname.endswith(ext) for ext in _PHOTO_EXTS):
+        return True
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    return ctype.startswith("image/")
+
+
+def transcribe_phone_audio(
+    audio: bytes,
+    *,
+    filename: str = "",
+    content_type: str = "",
+) -> dict[str, Any]:
+    """Transcribe a phone clip. Does not enqueue. ``{ok, text}`` or ``{ok: False, error}``."""
+    if not audio:
+        return {"ok": False, "error": "audio required"}
+    if len(audio) > AUDIO_MAX_BYTES:
+        return {"ok": False, "error": "audio too large"}
+    wav = audio_to_wav(audio, filename=filename, content_type=content_type)
+    try:
+        from stt import NoSpeechError, transcribe
+    except Exception as e:
+        return {"ok": False, "error": f"stt unavailable: {e}"}
+    try:
+        heard = transcribe(None, wav)
+    except NoSpeechError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": f"transcription failed: {e}"}
+    heard = (heard or "").strip()
+    if not heard:
+        return {"ok": False, "error": "empty transcript"}
+    return {"ok": True, "text": heard}
 
 
 def parse_audio_body(
@@ -280,24 +345,10 @@ def ingest_phone_audio(
     if text:
         enqueue_utterance(text, source="phone")
         return {"ok": True, "queued": True, "text": text, "source": "text"}
-    if not audio:
-        return {"ok": False, "error": "audio required"}
-    if len(audio) > AUDIO_MAX_BYTES:
-        return {"ok": False, "error": "audio too large"}
-    wav = audio_to_wav(audio, filename=filename, content_type=content_type)
-    try:
-        from stt import NoSpeechError, transcribe
-    except Exception as e:
-        return {"ok": False, "error": f"stt unavailable: {e}"}
-    try:
-        heard = transcribe(None, wav)
-    except NoSpeechError as e:
-        return {"ok": False, "error": str(e)}
-    except Exception as e:
-        return {"ok": False, "error": f"transcription failed: {e}"}
-    heard = (heard or "").strip()
-    if not heard:
-        return {"ok": False, "error": "empty transcript"}
+    result = transcribe_phone_audio(audio, filename=filename, content_type=content_type)
+    if not result.get("ok"):
+        return result
+    heard = str(result.get("text") or "").strip()
     enqueue_utterance(heard, source="phone")
     return {"ok": True, "queued": True, "text": heard, "source": "audio"}
 
@@ -397,8 +448,17 @@ def parse_photo_body(
     *,
     content_type: str = "",
 ) -> dict[str, Any]:
-    """Extract image bytes + optional text from JSON, multipart, or raw body."""
+    """Extract image + optional caption text or mic audio from JSON, multipart, or raw body."""
     ctype = (content_type or "").split(";")[0].strip().lower()
+    empty = {
+        "photo": b"",
+        "filename": "",
+        "text": "",
+        "content_type": ctype,
+        "audio": b"",
+        "audio_filename": "",
+        "audio_content_type": "",
+    }
     if "multipart/form-data" in (content_type or "").lower():
         preamble = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
         msg = message_from_bytes(preamble + body, policy=default)
@@ -406,26 +466,47 @@ def parse_photo_body(
         filename = ""
         text = ""
         part_type = ""
+        audio = b""
+        audio_filename = ""
+        audio_type = ""
         if msg.is_multipart():
             for part in msg.iter_parts():
                 name = str(part.get_param("name", header="content-disposition") or "")
                 fn = part.get_filename() or ""
-                payload = part.get_payload(decode=True)
-                if payload is None:
+                payload = _part_payload(part)
+                if not payload:
                     continue
-                if isinstance(payload, str):
-                    payload = payload.encode("utf-8")
-                if name in {"text", "command", "caption", "prompt"}:
+                ptype = part.get_content_type() or ""
+                key = name.lower()
+                if key in _TEXT_FIELD_NAMES:
                     text = payload.decode("utf-8", errors="replace").strip()
-                elif name in {"photo", "image", "camera", "file", "picture"} or fn:
+                    continue
+                if _is_photo_part(name=name, filename=fn, content_type=ptype):
                     photo = payload
                     filename = fn
-                    part_type = part.get_content_type() or ""
+                    part_type = ptype
+                    continue
+                if _is_audio_part(name=name, filename=fn, content_type=ptype):
+                    audio = payload
+                    audio_filename = fn
+                    audio_type = ptype
+                    continue
+                if fn and not photo:
+                    photo = payload
+                    filename = fn
+                    part_type = ptype
+                elif fn and not audio:
+                    audio = payload
+                    audio_filename = fn
+                    audio_type = ptype
         return {
             "photo": photo,
             "filename": filename,
             "text": text,
             "content_type": part_type or ctype,
+            "audio": audio,
+            "audio_filename": audio_filename,
+            "audio_content_type": audio_type,
         }
     if ctype in {"application/json", "text/json"}:
         data = json.loads(body.decode("utf-8") or "{}")
@@ -433,18 +514,20 @@ def parse_photo_body(
             raise ValueError("JSON object required")
         b64 = str(data.get("photo") or data.get("image") or data.get("data") or "").strip()
         photo = base64.b64decode(b64) if b64 else b""
+        audio_b64 = str(data.get("audio") or data.get("voice") or "").strip()
+        audio = base64.b64decode(audio_b64) if audio_b64 else b""
         return {
             "photo": photo,
             "filename": str(data.get("filename") or data.get("name") or ""),
             "text": str(data.get("text") or data.get("command") or data.get("caption") or "").strip(),
             "content_type": str(data.get("mime") or data.get("content_type") or ctype),
+            "audio": audio,
+            "audio_filename": str(data.get("audio_filename") or ""),
+            "audio_content_type": str(
+                data.get("audio_mime") or data.get("audio_content_type") or ""
+            ),
         }
-    return {
-        "photo": body,
-        "filename": "",
-        "text": "",
-        "content_type": ctype,
-    }
+    return empty | {"photo": body, "content_type": ctype}
 
 
 def ingest_phone_photo(
@@ -453,9 +536,30 @@ def ingest_phone_photo(
     filename: str = "",
     content_type: str = "",
     text: str = "",
+    audio: bytes = b"",
+    audio_filename: str = "",
+    audio_content_type: str = "",
 ) -> dict[str, Any]:
-    """Resize a phone still, store it, and queue a vision request."""
-    text = (text or "").strip() or DEFAULT_PHOTO_PROMPT
+    """Resize a phone still, store it, and queue a vision request.
+
+    Caption order: explicit ``text``, else transcribed ``audio``, else the
+    default explain-this-photo prompt.
+    """
+    text = (text or "").strip()
+    caption_source = "text" if text else ""
+    if not text and audio:
+        heard = transcribe_phone_audio(
+            audio,
+            filename=audio_filename,
+            content_type=audio_content_type,
+        )
+        if not heard.get("ok"):
+            return heard
+        text = str(heard.get("text") or "").strip()
+        caption_source = "audio"
+    if not text:
+        text = DEFAULT_PHOTO_PROMPT
+        caption_source = "default"
     if not photo:
         return {"ok": False, "error": "photo required"}
     if len(photo) > PHOTO_MAX_BYTES:
@@ -475,6 +579,7 @@ def ingest_phone_photo(
         "queued": True,
         "text": text,
         "source": "photo",
+        "caption_source": caption_source,
         "width": width,
         "height": height,
     }
@@ -671,7 +776,7 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
             return
         if path in {"/v1/photo", "/v1/image", "/v1/camera"}:
             try:
-                raw = self._read_body(max(PHOTO_MAX_BYTES * 2, PHOTO_MAX_BYTES))
+                raw = self._read_body(max(PHOTO_MAX_BYTES * 2 + AUDIO_MAX_BYTES * 2, PHOTO_MAX_BYTES))
                 parsed = parse_photo_body(
                     raw,
                     content_type=self.headers.get("Content-Type") or "",
@@ -687,6 +792,9 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
                 filename=str(parsed.get("filename") or ""),
                 content_type=str(parsed.get("content_type") or ""),
                 text=str(parsed.get("text") or ""),
+                audio=parsed.get("audio") or b"",
+                audio_filename=str(parsed.get("audio_filename") or ""),
+                audio_content_type=str(parsed.get("audio_content_type") or ""),
             )
             code = 200 if result.get("ok") else 400
             self._send_json(code, result)

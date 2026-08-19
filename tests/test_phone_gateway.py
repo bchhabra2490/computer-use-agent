@@ -342,6 +342,7 @@ class PhonePhotoIngestTests(unittest.TestCase):
     def test_default_prompt_when_no_text(self) -> None:
         result = pg.ingest_phone_photo(self._jpeg())
         self.assertEqual(result["text"], pg.DEFAULT_PHOTO_PROMPT)
+        self.assertEqual(result["caption_source"], "default")
 
     def test_rejects_empty(self) -> None:
         result = pg.ingest_phone_photo(b"")
@@ -377,6 +378,59 @@ class PhonePhotoIngestTests(unittest.TestCase):
         )
         self.assertEqual(parsed["text"], "read this")
         self.assertTrue(parsed["photo"].startswith(b"\xff\xd8"))
+        self.assertEqual(parsed["audio"], b"")
+
+    def test_audio_caption_is_transcribed(self) -> None:
+        wav = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 20
+        with patch("stt.transcribe", return_value="  what does this label say  "):
+            result = pg.ingest_phone_photo(
+                self._jpeg(),
+                audio=wav,
+                audio_content_type="audio/wav",
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["caption_source"], "audio")
+        self.assertEqual(result["text"], "what does this label say")
+        self.assertEqual(st.consume_utterance(), "what does this label say")
+
+    def test_text_caption_skips_photo_audio_stt(self) -> None:
+        with patch("stt.transcribe") as transcribe:
+            result = pg.ingest_phone_photo(
+                self._jpeg(),
+                text="read the ingredients",
+                audio=b"not-audio",
+            )
+        transcribe.assert_not_called()
+        self.assertEqual(result["caption_source"], "text")
+        self.assertEqual(result["text"], "read the ingredients")
+
+    def test_audio_stt_failure_does_not_queue(self) -> None:
+        with patch("stt.transcribe", return_value="   "):
+            result = pg.ingest_phone_photo(
+                self._jpeg(),
+                audio=b"RIFF" + b"xxxx" + b"WAVE",
+                audio_content_type="audio/wav",
+            )
+        self.assertFalse(result["ok"])
+        self.assertIsNone(st.consume_utterance())
+        self.assertFalse(self.photo.is_file())
+
+    def test_json_includes_audio(self) -> None:
+        raw = self._jpeg()
+        wav = b"RIFF" + b"xxxx" + b"WAVE"
+        parsed = pg.parse_photo_body(
+            json.dumps(
+                {
+                    "photo": __import__("base64").b64encode(raw).decode(),
+                    "mime": "image/jpeg",
+                    "audio": __import__("base64").b64encode(wav).decode(),
+                    "audio_mime": "audio/wav",
+                }
+            ).encode(),
+            content_type="application/json",
+        )
+        self.assertEqual(parsed["audio"], wav)
+        self.assertEqual(parsed["audio_content_type"], "audio/wav")
 
 
 class EnsureGatewayTests(unittest.TestCase):

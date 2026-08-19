@@ -296,11 +296,15 @@ Cap is ~30s / `PHONE_AUDIO_MAX_BYTES` (default 2.5MB). Response:
 `POST /v1/photo` is a camera still from the phone. Send a JPEG/PNG/HEIC body
 (`Content-Type: image/jpeg`), multipart `photo` file, or JSON
 `{ "photo": "<base64>", "mime": "image/jpeg" }`. Optional `text` / `caption`
-is the question ("what does this label say?"). With no text, Jarvis explains
-the photo and waits for follow-ups. The Mac resizes it, attaches it to the
+is the question ("what does this label say?"). Optional mic clip is transcribed
+on the Mac and used as that caption: multipart field `audio`, or JSON
+`{ "photo": "<base64>", "audio": "<base64>", "audio_mime": "audio/m4a" }`.
+Explicit `text` wins over audio. With neither, Jarvis explains the photo and
+waits for follow-ups. The Mac resizes the still, attaches it to the
 orchestrator vision turn, and keeps it for later questions in the same
-session. Cap `PHONE_PHOTO_MAX_BYTES` (default 6MB). Response:
-`{ "ok": true, "queued": true, "text": "…", "source": "photo", "width": 1280, "height": 960 }`.
+session. Cap `PHONE_PHOTO_MAX_BYTES` (default 6MB) plus `PHONE_AUDIO_MAX_BYTES`
+for the clip. Response:
+`{ "ok": true, "queued": true, "text": "…", "source": "photo", "caption_source": "audio", "width": 1280, "height": 960 }`.
 Status includes `photo_at` when a still is stored.
 
 ```bash

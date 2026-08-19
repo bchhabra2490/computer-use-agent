@@ -72,6 +72,19 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+def model_for_recipe_handoff(log: TaskLog | None = None) -> str:
+    """Leftover zoom/click after a recipe — always the cheap CU model."""
+    override = (os.environ.get("AGENT_MODEL") or "").strip()
+    if override:
+        if log is not None:
+            log.record("router", f"override {override}", {"model": override})
+        return override
+    print(f"[router] recipe leftover → {MODEL_EASY}")
+    if log is not None:
+        log.record("router", f"recipe-handoff → {MODEL_EASY}", {"model": MODEL_EASY})
+    return MODEL_EASY
+
+
 def resolve_agent_model(client: OpenAI, task: str, log: TaskLog | None = None) -> str:
     """
     Choose the computer-agent model.

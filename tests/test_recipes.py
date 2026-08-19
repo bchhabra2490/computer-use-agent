@@ -251,13 +251,30 @@ class LlmFillTests(unittest.TestCase):
                 settle=0,
                 client=client,
             )
-        self.assertEqual(client.calls, 1)
-        self.assertIn("Togo", client.last_input)
+        self.assertEqual(client.calls, 0)
         opener.assert_called_once()
         self.assertIn("query=Togo", opener.call_args[0][0])
-        self.assertIsInstance(result, rc.RecipeHit)
-        assert isinstance(result, rc.RecipeHit)
-        self.assertEqual(result.params["place"], "Togo")
+        self.assertIsInstance(result, str)
+        self.assertIn("Togo", result)
+
+    def test_llm_used_when_regex_cannot_bind(self) -> None:
+        client = _FakeResponsesClient(
+            {"params": {"place": "India"}, "leftover": ""}
+        )
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(
+                "show india on google maps",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+                client=client,
+            )
+        self.assertEqual(client.calls, 1)
+        opener.assert_called_once()
+        self.assertIn("India", opener.call_args[0][0])
+        self.assertIsInstance(result, str)
 
     def test_bad_llm_slot_falls_back_to_regex(self) -> None:
         prompt = (
@@ -277,7 +294,7 @@ class LlmFillTests(unittest.TestCase):
                 settle=0,
                 client=client,
             )
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 0)
         opener.assert_called_once()
         self.assertIn("Thunderstruck", opener.call_args[0][0])
         self.assertNotIn("playable", opener.call_args[0][0])
@@ -308,6 +325,7 @@ class GroundingTests(unittest.TestCase):
         opener.assert_called_once()
         self.assertIn("India", opener.call_args[0][0])
         self.assertNotIn("Tokyo", opener.call_args[0][0])
+        self.assertEqual(client.calls, 0)
         self.assertIsInstance(result, str)
 
     def test_national_parks_skips_place_recipe(self) -> None:
@@ -329,6 +347,31 @@ class GroundingTests(unittest.TestCase):
             )
         opener.assert_not_called()
         self.assertIsNone(result)
+
+    def test_screenshot_only_completes_without_handoff(self) -> None:
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+            patch.object(rc, "save_recipe_screenshot", return_value=Path("/tmp/india.png")),
+        ):
+            result = rc.try_recipe(
+                "Open a map of India and capture a screenshot",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+            )
+        opener.assert_called_once()
+        self.assertIsInstance(result, str)
+        self.assertIn("india.png", result.lower())
+
+    def test_screenshot_leftover_helper(self) -> None:
+        self.assertTrue(
+            rc.leftover_is_screenshot_only(
+                "If a screenshot file was requested, capture the existing Chrome window."
+            )
+        )
+        self.assertFalse(
+            rc.leftover_is_screenshot_only("Adjust zoom or pan. Capture a screenshot.")
+        )
 
 
 class ProposeTests(unittest.TestCase):

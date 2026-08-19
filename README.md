@@ -95,6 +95,7 @@ then transcribes your request and lets an LLM choose tools:
 |------|------|
 | `who_am_i` | Read `README.md` and answer who this agent is / what it can do |
 | `start_task` | Run the computer-use agent on a concrete UI task |
+| `set_timer` | Native countdown / reminder (notification; TTS if they asked to be reminded) |
 
 Easy tasks that succeed are saved as **action traces** under `traces/`. The next matching request (e.g. “open Chrome, go to …”) replays those keypresses/types with no screenshot loop. Wake word during replay falls back to the vision agent. Set `TRACE_REPLAY=0` / `TRACE_RECORD=0` to disable.
 | `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |

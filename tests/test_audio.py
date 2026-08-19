@@ -45,6 +45,7 @@ class AudioSessionTests(unittest.TestCase):
             patch("audio.listen_for_utterance", return_value="open notes"),
             patch("audio.consume_utterance", return_value=None),
             patch("audio.utterance_pending", return_value=False),
+            patch("audio.speak_pending", return_value=False),
         ):
             cmd = self.audio.listen_command()
         self.assertEqual(cmd, "open notes")
@@ -54,6 +55,7 @@ class AudioSessionTests(unittest.TestCase):
         with (
             patch("audio.consume_utterance", return_value="play lag ja gale"),
             patch("audio.wait_for_wake") as wake,
+            patch("audio.speak_pending", return_value=False),
         ):
             cmd = self.audio.listen_command()
         self.assertEqual(cmd, "play lag ja gale")
@@ -63,6 +65,7 @@ class AudioSessionTests(unittest.TestCase):
         with (
             patch("audio.consume_utterance", side_effect=[None, "from phone"]),
             patch("audio.utterance_pending", return_value=True),
+            patch("audio.speak_pending", return_value=False),
             patch("audio.wait_for_wake", return_value=False),
         ):
             cmd = self.audio.listen_command()

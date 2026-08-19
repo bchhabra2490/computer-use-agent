@@ -8,6 +8,7 @@ Tools:
   - give_response_to_user — speak a reply (optionally end the session)
   - list_memories / read_memory / save_memory / save_screen_memory — notes + screen snapshots
   - list_open_apps — running apps, windows by display, and open browser tabs
+  - set_timer / list_timers / cancel_timer — native countdown (no Clock UI)
   - mcp_call — tools from servers in mcp.json (when configured)
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
@@ -64,6 +65,8 @@ from app_status import (
     request_mark_done,
     request_quit,
     set_last_spoken,
+    speak_pending,
+    consume_speak,
     unregister_orchestrator,
     upsert_agent,
     utterance_pending,
@@ -132,6 +135,11 @@ will not open):
   (titles + URLs). Occupancy below is a snapshot; call this for a fresh list.
   Prefer this (and give_response_to_user) over start_task when they only ask
   what is open / which tabs they have.
+- set_timer / list_timers / cancel_timer — native countdown (no Clock app).
+  Use set_timer for “set a 5 minute timer” and reminders (“remind me in 5 minutes
+  to check the oven”). Convert to seconds. speak=true plus message when they
+  asked to be reminded of something; otherwise notification only. Then
+  give_response_to_user once. Do not start_task or sleep.
 {mcp_rule}
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
@@ -148,6 +156,7 @@ Rules:
   prefer hardware MCP via mcp_call. Do not use desktop UI clicks as a workaround
   when the hardware MCP can perform the action.
 - Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
+  Not for timers or reminders — those are set_timer.
 - Call read_memory before ask_user when the missing detail may already be stored
   (name, usernames, usual apps, what was on screen). save_memory for durable
   facts they state. save_screen_memory when they want the current display stored.
@@ -224,9 +233,7 @@ def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: 
             "do something on the Mac.\n\n"
         )
     return (
-        prefix
-        + f"User said: {utterance}\n\n"
-        + f"Computer task history so far:\n{_format_task_history(task_history)}"
+        prefix + f"User said: {utterance}\n\n" + f"Computer task history so far:\n{_format_task_history(task_history)}"
     )
 
 
@@ -736,6 +743,15 @@ def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     return True
 
 
+def _service_timer_speech(client: OpenAI) -> str | None:
+    """Speak a due timer reminder. Returns barge-in command, or None if idle/done."""
+    text = consume_speak()
+    if not text:
+        return None
+    print(f"[orchestrator] timer reminder: {text}", flush=True)
+    return _speak(client, text)
+
+
 def _listen_command(
     client: OpenAI,
     *,
@@ -759,6 +775,8 @@ def _listen_command(
 
     def _stop() -> bool:
         if utterance_pending():
+            return True
+        if speak_pending():
             return True
         if quit_requested():
             return True
@@ -824,7 +842,13 @@ def _supervise_agent(
     notified_done = False
 
     def _stop_for_done() -> bool:
-        return job.done.is_set() or ask_bridge.has_pending() or quit_requested() or mark_done_pending(job.call_id)
+        return (
+            job.done.is_set()
+            or ask_bridge.has_pending()
+            or quit_requested()
+            or mark_done_pending(job.call_id)
+            or speak_pending()
+        )
 
     def _signal_agent_done(*, spoken: bool) -> None:
         nonlocal notified_done
@@ -856,6 +880,15 @@ def _supervise_agent(
             time.sleep(0.2)
             continue
         if _service_agent_ask(client, ask_bridge):
+            continue
+        if speak_pending():
+            barged = _service_timer_speech(client)
+            if barged and not is_mark_done_utterance(barged):
+                try:
+                    publisher.send(barged)
+                    print(f"[orchestrator] forwarded to agent: {barged!r}")
+                except Exception as e:
+                    print(f"[orchestrator] bus send failed: {e}")
             continue
 
         command = _listen_command(
@@ -1088,6 +1121,9 @@ def _handle_tool(
         "who_am_i",
         "mcp_call",
         "list_open_apps",
+        "set_timer",
+        "list_timers",
+        "cancel_timer",
     }:
         output = run_shared_tool(call.name, args, client=client)
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
@@ -1346,6 +1382,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 utterance = pending
                 pending = None
             else:
+                if speak_pending():
+                    barged = _service_timer_speech(client)
+                    if barged:
+                        pending = barged
+                    continue
                 utterance = _listen_command(
                     client,
                     should_stop=quit_requested,

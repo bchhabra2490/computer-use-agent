@@ -62,8 +62,7 @@ ASK_USER_TOOL = {
             "question": {
                 "type": "string",
                 "description": (
-                    "One short question to speak. Natural wording; titles "
-                    "instead of raw URLs. Not a numbered list."
+                    "One short question to speak. Natural wording; titles " "instead of raw URLs. Not a numbered list."
                 ),
             },
         },
@@ -102,6 +101,92 @@ GIVE_RESPONSE_TOOL = {
             },
         },
         "required": ["message", "end_session"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+SET_TIMER_TOOL = {
+    "type": "function",
+    "name": "set_timer",
+    "description": (
+        "Start a native countdown (no Clock app, no sleep, no computer-use). "
+        "Use for 'set a 5 minute timer' and for reminders ('remind me in 5 minutes "
+        "to check the oven'). Convert the duration to seconds. Always posts a "
+        "macOS notification when it ends. Set speak=true and message when they "
+        "asked to be reminded of something (Jarvis will say it). Returns immediately; "
+        "do not wait for the timer and do not start_task."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "seconds": {
+                "type": "number",
+                "description": "Duration in seconds (1 to 86400).",
+            },
+            "label": {
+                "type": "string",
+                "description": "Short name, e.g. pasta, oven, tea.",
+            },
+            "speak": {
+                "type": "boolean",
+                "description": (
+                    "True if they asked to be reminded of something (TTS). "
+                    "False for a silent countdown plus notification only."
+                ),
+            },
+            "message": {
+                "type": ["string", "null"],
+                "description": (
+                    "What to say (and show) when it fires if speak is true. "
+                    "Pass null to use '{label} is done.'"
+                ),
+            },
+        },
+        "required": ["seconds", "label", "speak", "message"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+LIST_TIMERS_TOOL = {
+    "type": "function",
+    "name": "list_timers",
+    "description": "List active native timers (id, label, remaining seconds).",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "unused": {
+                "type": "boolean",
+                "description": "Unused. Always pass false.",
+            },
+        },
+        "required": ["unused"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+CANCEL_TIMER_TOOL = {
+    "type": "function",
+    "name": "cancel_timer",
+    "description": (
+        "Cancel a native timer by id (from set_timer / list_timers) or by label. "
+        "Pass null for the unused field."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": ["string", "null"],
+                "description": "Timer id (e.g. t1). Pass null to match by label.",
+            },
+            "label": {
+                "type": ["string", "null"],
+                "description": "Cancel all timers with this label. Pass null if using id.",
+            },
+        },
+        "required": ["id", "label"],
         "additionalProperties": False,
     },
     "strict": True,
@@ -283,6 +368,9 @@ SHARED_TOOL_NAMES = frozenset(
         "save_screen_memory",
         "mcp_call",
         "list_open_apps",
+        "set_timer",
+        "list_timers",
+        "cancel_timer",
     }
 )
 
@@ -305,6 +393,9 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(GIVE_RESPONSE_TOOL, ORCHESTRATOR),
     *(_entry(tool, ORCHESTRATOR, AGENT) for tool in MEMORY_TOOLS),
     _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT),
+    _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT),
+    _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT),
+    _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_SKILLS_TOOL, AGENT),
     _entry(READ_SKILL_TOOL, AGENT),
     _entry(READ_UI_TEXT_TOOL, AGENT),
@@ -363,4 +454,8 @@ def run_shared_tool(
         from displays import format_monitor_occupancy
 
         return format_monitor_occupancy()
+    if name in {"set_timer", "list_timers", "cancel_timer"}:
+        from timers import run_timer_tool
+
+        return run_timer_tool(name, args)
     raise KeyError(f"Not a shared tool: {name}")

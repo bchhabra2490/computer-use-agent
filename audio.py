@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
-from app_status import consume_utterance, utterance_pending
+from app_status import consume_utterance, speak_pending, utterance_pending
 from bus import strip_wake_prefix
 from session import Session, get_session
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
@@ -111,6 +111,8 @@ class AudioSession:
 
         def _stop() -> bool:
             if utterance_pending():
+                return True
+            if speak_pending():
                 return True
             if quit_check is not None:
                 try:

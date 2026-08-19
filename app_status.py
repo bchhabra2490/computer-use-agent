@@ -55,6 +55,7 @@ def _default_state() -> dict[str, Any]:
         "overlay_enabled": True,
         "phone_gateway_pid": None,
         "pending_utterances": [],
+        "pending_speaks": [],
         "last_spoken": None,
         "last_llm": None,
         "screen_at": None,
@@ -86,6 +87,8 @@ def _read() -> dict[str, Any]:
             base["agents"] = []
         if not isinstance(base.get("pending_utterances"), list):
             base["pending_utterances"] = []
+        if not isinstance(base.get("pending_speaks"), list):
+            base["pending_speaks"] = []
         return base
     except Exception:
         return _default_state()
@@ -254,6 +257,44 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
+        _write(data)
+    if isinstance(item, str):
+        text = item.strip()
+        return text or None
+    text = str((item or {}).get("text") or "").strip()
+    return text or None
+
+
+def enqueue_speak(text: str, *, source: str = "timer") -> None:
+    """Queue a line for the orchestrator to speak (timer reminders, not user STT)."""
+    text = (text or "").strip()
+    if not text:
+        return
+    source = (source or "timer").strip() or "timer"
+    with _lock:
+        data = _read()
+        pending = list(data.get("pending_speaks") or [])
+        pending.append({"text": text, "source": source, "ts": time.time()})
+        data["pending_speaks"] = pending[-20:]
+        _write(data)
+    log(f"[{source}] speak: {text[:160]}")
+
+
+def speak_pending() -> bool:
+    with _lock:
+        pending = _read().get("pending_speaks") or []
+        return bool(pending)
+
+
+def consume_speak() -> str | None:
+    """Pop the next queued TTS line, or None."""
+    with _lock:
+        data = _read()
+        pending = list(data.get("pending_speaks") or [])
+        if not pending:
+            return None
+        item = pending.pop(0)
+        data["pending_speaks"] = pending
         _write(data)
     if isinstance(item, str):
         text = item.strip()

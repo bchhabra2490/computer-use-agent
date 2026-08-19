@@ -1,0 +1,27 @@
+{
+  "name": "whatsapp-call-contact",
+  "match": [
+    "Call {{contact}} on WhatsApp",
+    "Start a WhatsApp call with {{contact}}",
+    "Open WhatsApp and call {{contact}}"
+  ],
+  "params": [
+    "contact"
+  ],
+  "prelude": [
+    {
+      "type": "open_app",
+      "app": "WhatsApp"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "WhatsApp"
+  },
+  "source_task": "Call {{contact}} on WhatsApp.",
+  "match_templates": [
+    "call {{contact}} on whatsapp",
+    "open whatsapp and call {{contact}}"
+  ],
+  "leftover": "In WhatsApp: click the left\u2011column Search, type {{contact}}, open their chat, then click the phone icon for a voice call or the camera icon for video."
+}

@@ -18,6 +18,7 @@ from orchestrator import (  # noqa: E402
     _confirm_heard,
     _confirm_heard_enabled,
     _give_response_closes_turn,
+    _listen_for_answer,
     _looks_like_question,
     _strip_wait_filler,
     _turn_already_spoke,
@@ -154,6 +155,21 @@ class ConfirmHeardTests(unittest.TestCase):
                 out = _confirm_heard(SimpleNamespace(), "open a map of India")
         speak.assert_not_called()
         self.assertEqual(out, "open a map of India")
+
+
+class ListenForAnswerTests(unittest.TestCase):
+    def test_empty_stt_does_not_raise(self) -> None:
+        from stt import NoSpeechError
+
+        with (
+            patch("orchestrator.get_audio", return_value=None),
+            patch(
+                "orchestrator.listen_once",
+                side_effect=NoSpeechError("Transcription came back empty — try speaking again."),
+            ),
+        ):
+            out = _listen_for_answer(SimpleNamespace())
+        self.assertIn("No speech was captured", out)
 
 
 if __name__ == "__main__":

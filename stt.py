@@ -1446,16 +1446,28 @@ def listen_and_confirm(
 
 
 def ask_user(client: OpenAI, question: str) -> str:
-    """Speak a question, then capture a free-form spoken answer (no yes/no gate)."""
+    """Speak a question, then capture a free-form spoken answer (no yes/no gate).
+
+    Empty captures return a string the caller can feed back to the model.
+    They must not raise — the orchestrator loop would exit.
+    """
     print(f"\n[ask_user] {question}")
     interrupted = speak(client, question)
     if not interrupted:
         time.sleep(POST_TTS_COOLDOWN)
-    return listen_once(
-        client,
-        mode="freeform",
-        prompt="Listening for your answer… (sends after 3s without new words)",
-    )
+    try:
+        return listen_once(
+            client,
+            mode="freeform",
+            prompt="Listening for your answer… (sends after 3s without new words)",
+        )
+    except NoSpeechError as e:
+        print(f"[ask_user] no speech: {e}", file=sys.stderr)
+        return (
+            "No speech was captured after several attempts. "
+            "Ask again with ask_user if you still need an answer, "
+            "or continue without it."
+        )
 
 
 def listen_for_utterance(

@@ -33,3 +33,19 @@ class ListenOncePhoneTests(unittest.TestCase):
         ):
             heard = stt.listen_once(MagicMock(), max_attempts=1)
         self.assertEqual(heard, "play something else")
+
+
+class AskUserTests(unittest.TestCase):
+    def test_empty_transcription_does_not_raise(self) -> None:
+        with (
+            patch("stt.speak", return_value=False),
+            patch(
+                "stt.listen_once",
+                side_effect=stt.NoSpeechError(
+                    "Transcription came back empty — try speaking again."
+                ),
+            ),
+        ):
+            out = stt.ask_user(MagicMock(), "Which board?")
+        self.assertIn("No speech was captured", out)
+        self.assertIn("ask_user", out)

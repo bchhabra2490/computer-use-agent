@@ -94,7 +94,7 @@ from mcp_client import (
 from session import Session, bind_session, get_session
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
-from stt import POST_TTS_COOLDOWN, ask_user, listen_once
+from stt import POST_TTS_COOLDOWN, NoSpeechError, ask_user, listen_once
 from task_spec import resolve_agent_task
 from tools_registry import orchestrator_tools, run_shared_tool
 from wake import (
@@ -146,7 +146,8 @@ will not open):
 Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
 - When a phone-camera photo is attached, look at it. Explain what you see if they asked,
-  and answer follow-up questions about that same photo. Prefer give_response_to_user.
+  and answer follow-up questions about that same photo with the detail they asked for
+  (not a teaser — include specs or labels when relevant). Prefer give_response_to_user.
   Do not start_task unless they asked you to do something on the Mac with what you saw.
 - If they ask who you are, what you do, how you work, or about this agent / Jarvis /
   Rekha / computer-use-agent, call who_am_i first, then give_response_to_user with a
@@ -169,15 +170,20 @@ Rules:
 - Call ask_user when a required detail is missing (which app, which account, confirm
   destructive work, how to split issues, labels). One short spoken question — never a
   numbered list in a message or in give_response_to_user.
-- Keep spoken messages short. Write as if talking, not as a written report:
-  titles and names instead of raw URLs or https links (those are painful to hear);
-  no markdown, no reading out slugs or file paths unless asked.
+- give_response_to_user: match length to the question — complete but concise for speech.
+  Answer the substance they asked for; never a teaser ("I'll list…" without the list)
+  and never a lecture (no filler, repetition, or off-topic padding).
+  Simple fact or yes/no → one or two sentences. Comparisons, specs, or multi-part
+  questions → cover every part they asked for, briefly. "Go ahead" / "tell me more"
+  → deliver what you offered at that same depth, not longer.
+  Write for speech: natural sentences; titles and names instead of raw URLs or
+  https links (painful to hear); no markdown; no file paths unless asked.
   After give_response_to_user, STOP — do not emit a plain message or speak again.
   Never say “I’ll wait”, “I’m ready”, or repeat that you marked the task done.
 - After each start_task, you receive that task's result plus the full history of tasks
   already run in this session. Use that history to decide:
-  - If the user's request is fully satisfied → give_response_to_user ONCE with the
-    outcome (one or two sentences) and stop. The runtime already listens next.
+  - If the user's request is fully satisfied → give_response_to_user ONCE with an
+    appropriate spoken summary, then stop. The runtime already listens next.
   - If a distinct remaining step is still needed → start_task with only the leftover work.
   - Do not restart a task that already succeeded just to rephrase it.
 - Stay in the conversation after completing work. Only set end_session=true when the
@@ -368,14 +374,20 @@ def _give_response_closes_turn(call, out: dict | None) -> bool:
 
 def _listen_for_answer(client: OpenAI) -> str:
     """Capture a spoken reply without requiring the wake word."""
-    audio = get_audio()
-    if audio is not None:
-        return audio.listen("Listening for your answer…")
-    return listen_once(
-        client,
-        mode="freeform",
-        prompt="Listening for your answer… (sends after 3s without new words)",
-    )
+    try:
+        audio = get_audio()
+        if audio is not None:
+            return audio.listen("Listening for your answer…")
+        return listen_once(
+            client,
+            mode="freeform",
+            prompt="Listening for your answer… (sends after 3s without new words)",
+        )
+    except NoSpeechError as e:
+        print(f"[orchestrator] no answer heard: {e}", flush=True)
+        return (
+            "No speech was captured. Ask again with ask_user if you still " "need an answer, or continue without it."
+        )
 
 
 def _create_response(
@@ -1283,7 +1295,7 @@ def _process_response(
                         f"{history_blob}\n\n"
                         "Decide next:\n"
                         "- If the user's request is fully satisfied, call "
-                        "give_response_to_user ONCE with a short spoken summary "
+                        "give_response_to_user ONCE with an appropriate spoken summary "
                         "(titles/names, not raw URLs), then stop. Do not recap "
                         "again in a message.\n"
                         "- If distinct work remains, call start_task with only "

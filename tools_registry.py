@@ -77,7 +77,8 @@ GIVE_RESPONSE_TOOL = {
     "type": "function",
     "name": "give_response_to_user",
     "description": (
-        "Speak the answer once, in one or two short sentences, then stop. "
+        "Speak the answer once at an appropriate length for speech, then stop. "
+        "Complete but concise — not a teaser and not a long lecture. "
         "Do not ask questions here (use ask_user). Do not say you will wait, "
         "that you are ready, or recap the same result a second time. "
         "Set end_session=true ONLY when the user says goodbye / quit."
@@ -88,9 +89,11 @@ GIVE_RESPONSE_TOOL = {
             "message": {
                 "type": "string",
                 "description": (
-                    "What to say aloud. Speak like a person: short natural "
-                    "sentences. Use titles and names, not raw URLs or https "
-                    "links (painful to hear). No markdown."
+                    "What to say aloud. Match depth to the question: one or two "
+                    "sentences for simple facts; brief coverage of each part for "
+                    "comparisons or specs. Natural spoken sentences — no teaser, "
+                    "no filler. Use titles and names, not raw URLs or https links "
+                    "(painful to hear). No markdown."
                 ),
             },
             "end_session": {

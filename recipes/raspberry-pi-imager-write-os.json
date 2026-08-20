@@ -1,0 +1,31 @@
+{
+  "name": "raspberry-pi-imager-write-os",
+  "match": [
+    "Finish downloading and writing the latest Raspberry Pi OS to the attached SD card",
+    "write raspberry pi os to sd card",
+    "flash sd card with raspberry pi os",
+    "rpi imager",
+    "raspberry pi imager write"
+  ],
+  "params": [
+    "os",
+    "device"
+  ],
+  "prelude": [
+    {
+      "type": "open_app",
+      "app": "Raspberry Pi Imager"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Raspberry Pi Imager"
+  },
+  "source_task": "Finish downloading and writing the latest Raspberry Pi OS to the attached SD card. If administrative permission, device selection, or confirmation is required, prompt me for that input.",
+  "match_templates": [
+    "write {{os}} to {{device}}",
+    "flash {{os}} to {{device}}",
+    "write {{os}} image to {{device}}"
+  ],
+  "leftover": "In Raspberry Pi Imager choose OS \u2192 {{os}} (e.g., 'Raspberry Pi OS (32-bit, Latest)'), choose target device \u2192 {{device}}, click Write and enter admin password if prompted. If the app crashes, force-quit any 'rpi-imager' processes and relaunch. If the SD card isn\u2019t mounted, remove and reinsert the card/reader so it appears in device selection."
+}

@@ -53,7 +53,8 @@ from evaluator import (
     EVAL_MODEL,
     coach_agent,
     model_for_recipe_handoff,
-    resolve_agent_model,
+    plan_complex_task,
+    resolve_agent_route,
     screenshot_b64_from_computer_output,
 )
 from context import assemble_context
@@ -77,6 +78,11 @@ from recipes import RecipeHit, handoff_prompt, maybe_save_recipe, try_recipe
 from traces import maybe_save_trace, try_replay
 from tts import speak, speak_later
 
+try:
+    from agent_deepseek import run_deepseek_computer_loop, using_deepseek_agent
+except Exception:  # pragma: no cover
+    run_deepseek_computer_loop = None  # type: ignore[assignment]
+    using_deepseek_agent = lambda: False  # type: ignore[assignment]
 # Manual override only — leave unset to let the difficulty router choose.
 MODEL_OVERRIDE = (os.environ.get("AGENT_MODEL") or "").strip() or None
 # Used when routing is disabled / skill review fallback.
@@ -803,11 +809,25 @@ def run(
 
         if recipe_handoff:
             model = model_for_recipe_handoff(log)
+            difficulty = "recipe"
         else:
-            model = resolve_agent_model(client, task, log)
-        print(f"[agent] model={model} eval_every={EVAL_EVERY}")
+            route = resolve_agent_route(client, task, log)
+            model = route.model
+            difficulty = route.difficulty
+        print(f"[agent] model={model} difficulty={difficulty} eval_every={EVAL_EVERY}")
         if message_inbox is not None:
             print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
+
+        complex_plan = None
+        if difficulty == "hard" and not recipe_handoff:
+            complex_plan = plan_complex_task(
+                task,
+                skill_catalog=skill_catalog,
+                memory_catalog=memory_catalog,
+                mcp_catalog=mcp_catalog,
+                display_ctx=display_ctx,
+                log=log,
+            )
 
         if recipe_handoff:
             skill_block = _handoff_skill_blurb(recipe_result.recipe.name)
@@ -821,8 +841,16 @@ def run(
                 "for leftover visual steps. Then mark_done."
             )
         else:
+            plan_block = ""
+            if complex_plan:
+                plan_block = (
+                    "DeepSeek plan for this hard task (follow unless the screen "
+                    "clearly shows a better path):\n"
+                    f"{complex_plan}\n\n"
+                )
             prompt_body = (
                 f"{model_task}\n\n"
+                f"{plan_block}"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
                 f"{memory_catalog}\n\n"
@@ -884,6 +912,90 @@ def run(
                 "12. When the request is complete and no other action is required, "
                 "call mark_done (do not keep using the computer tool)."
             )
+
+        backend = (os.environ.get("AGENT_BACKEND") or "openai").strip().lower()
+        if backend in {"deepseek", "ds"} and not using_deepseek_agent():
+            print(
+                "[agent] AGENT_BACKEND=deepseek but DEEPSEEK_API_KEY missing — "
+                "falling back to OpenAI computer tool",
+                flush=True,
+            )
+
+        if using_deepseek_agent() and run_deepseek_computer_loop is not None:
+            ds_prompt = prompt_body.replace(
+                "6. Use the computer tool for UI actions on this real desktop. "
+                "The screenshot shows every monitor, labeled screen N.",
+                "6. Use the computer tool for UI actions on this real desktop. "
+                "You never receive raw images — after each computer call, OpenAI "
+                "vision describes the screenshot (monitors labeled screen N) with "
+                "(x,y) centers.",
+            )
+
+            def _ds_handle(c, call, lg, auto=False, voice=False):
+                return _handle_function_call(
+                    c,
+                    call,
+                    lg,
+                    ask_user_bridge=ask_user_bridge,
+                    auto=auto,
+                    voice=voice,
+                )
+
+            def _ds_abort() -> None:
+                if consume_mark_done(agent_id):
+                    raise TaskMarkedDone("User marked the task done.")
+
+            def _ds_coach(shot_b64: str | None, step_n: int = 0) -> str | None:
+                if EVAL_EVERY <= 0:
+                    return None
+                live_desktop = ""
+                try:
+                    live_desktop = assemble_context(
+                        monitors=monitors,
+                        include_geometry=False,
+                        persist=False,
+                    ).displays
+                except Exception as e:
+                    print(f"[eval] occupancy refresh failed: {e}", flush=True)
+                return coach_agent(
+                    client,
+                    task=task,
+                    log=log,
+                    screenshot_b64=shot_b64,
+                    step_n=step_n,
+                    user_said=user_said or "",
+                    display_context=live_desktop,
+                )
+
+            _status, last_messages = run_deepseek_computer_loop(
+                openai_client=client,
+                desktop=desktop,
+                task=task,
+                prompt_body=ds_prompt,
+                log=log,
+                max_steps=max_steps,
+                auto=auto,
+                handle_function_call=_ds_handle,
+                pending_user_context=_pending_user_context,
+                coach=_ds_coach if EVAL_EVERY > 0 else None,
+                shot_w=shot_w,
+                shot_h=shot_h,
+                consume_mark_done=_ds_abort,
+                voice=voice,
+            )
+            print("\nDone — no further actions.")
+            if voice:
+                speak_later(client, "Done.")
+            log.finish("completed")
+            maybe_create_skill(client, log, voice=voice)
+            maybe_save_recipe(client, log, task)
+            maybe_save_trace(log, task)
+            _extract_memories_from_log(client, log, task)
+            summary = "\n".join(last_messages).strip()
+            if summary:
+                return f"completed\nResult:\n{summary}"
+            return "completed"
+
         if handoff_shot_b64:
             api_input: str | list = [
                 {

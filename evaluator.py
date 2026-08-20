@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
@@ -38,6 +39,15 @@ DIFFICULTY_MODELS = {
     "medium": MODEL_MEDIUM,
     "hard": MODEL_HARD,
 }
+
+
+@dataclass(frozen=True)
+class AgentRoute:
+    """Computer-agent model choice + difficulty label for optional planners."""
+
+    model: str
+    difficulty: str  # easy | medium | hard | override | disabled | recipe | error
+    reason: str = ""
 
 
 def _response_text(response) -> str:
@@ -74,22 +84,21 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 def model_for_recipe_handoff(log: TaskLog | None = None) -> str:
     """Leftover zoom/click after a recipe — always the cheap CU model."""
-    override = (os.environ.get("AGENT_MODEL") or "").strip()
-    if override:
-        if log is not None:
-            log.record("router", f"override {override}", {"model": override})
-        return override
-    print(f"[router] recipe leftover → {MODEL_EASY}")
-    if log is not None:
-        log.record("router", f"recipe-handoff → {MODEL_EASY}", {"model": MODEL_EASY})
-    return MODEL_EASY
+    return resolve_agent_route(None, "", log=log, recipe_handoff=True).model
 
 
-def resolve_agent_model(client: OpenAI, task: str, log: TaskLog | None = None) -> str:
+def resolve_agent_route(
+    client: OpenAI | None,
+    task: str,
+    log: TaskLog | None = None,
+    *,
+    recipe_handoff: bool = False,
+) -> AgentRoute:
     """
-    Choose the computer-agent model.
+    Choose the computer-agent model (+ difficulty).
 
     If AGENT_MODEL is set, use it (manual override).
+    Else if recipe_handoff, use the easy CU model.
     Else if AGENT_ROUTE is on, classify difficulty with ROUTER_MODEL.
     Else fall back to AGENT_MODEL_HARD.
     """
@@ -98,13 +107,23 @@ def resolve_agent_model(client: OpenAI, task: str, log: TaskLog | None = None) -
         print(f"[router] AGENT_MODEL override → {override}")
         if log is not None:
             log.record("router", f"override {override}", {"model": override})
-        return override
+        return AgentRoute(model=override, difficulty="override")
+
+    if recipe_handoff:
+        print(f"[router] recipe leftover → {MODEL_EASY}")
+        if log is not None:
+            log.record("router", f"recipe-handoff → {MODEL_EASY}", {"model": MODEL_EASY})
+        return AgentRoute(model=MODEL_EASY, difficulty="recipe")
 
     if not AGENT_ROUTE:
         print(f"[router] routing disabled → {MODEL_HARD}")
         if log is not None:
             log.record("router", f"disabled {MODEL_HARD}", {"model": MODEL_HARD})
-        return MODEL_HARD
+        return AgentRoute(model=MODEL_HARD, difficulty="disabled")
+
+    if client is None:
+        print(f"[router] no client — using {MODEL_HARD}", flush=True)
+        return AgentRoute(model=MODEL_HARD, difficulty="error", reason="no client")
 
     prompt = f"""Classify this desktop computer-use task difficulty.
 
@@ -137,12 +156,101 @@ Reply JSON only:
                 f"{difficulty} → {model}",
                 {"difficulty": difficulty, "model": model, "reason": reason},
             )
-        return model
+        return AgentRoute(model=model, difficulty=difficulty, reason=reason)
     except Exception as e:
         print(f"[router] failed ({e}) — using {MODEL_HARD}", flush=True)
         if log is not None:
             log.record("router", f"error → {MODEL_HARD}", {"error": str(e)})
-        return MODEL_HARD
+        return AgentRoute(model=MODEL_HARD, difficulty="error", reason=str(e))
+
+
+def resolve_agent_model(client: OpenAI, task: str, log: TaskLog | None = None) -> str:
+    """Back-compat wrapper: model id only."""
+    return resolve_agent_route(client, task, log).model
+
+
+def plan_complex_task(
+    task: str,
+    *,
+    skill_catalog: str = "",
+    memory_catalog: str = "",
+    mcp_catalog: str = "",
+    display_ctx: str = "",
+    log: TaskLog | None = None,
+) -> str | None:
+    """
+    Ask DeepSeek for a short execution plan when the router labeled the task hard.
+    Returns plain text for injection into the CU prompt, or None if skipped/failed.
+    """
+    try:
+        import deepseek as ds
+    except Exception as e:  # pragma: no cover
+        print(f"[complex] deepseek import failed: {e}", flush=True)
+        return None
+
+    if not ds.planning_enabled():
+        return None
+
+    skills = (skill_catalog or "").strip()
+    if len(skills) > 4_000:
+        skills = skills[:4_000] + "\n… (truncated)"
+    memories = (memory_catalog or "").strip()
+    if len(memories) > 2_000:
+        memories = memories[:2_000] + "\n… (truncated)"
+    mcp = (mcp_catalog or "").strip()
+    if len(mcp) > 2_000:
+        mcp = mcp[:2_000] + "\n… (truncated)"
+    display = (display_ctx or "").strip()
+    if len(display) > 2_000:
+        display = display[:2_000] + "\n… (truncated)"
+
+    system = (
+        "You are a planning advisor for a desktop computer-use agent on macOS. "
+        "The agent can click, type, use skills, memories, MCP tools, and a computer "
+        "screenshot loop. You do NOT control the desktop — write a concise plan only. "
+        "Prefer skills and MCP over pixel-guessing. Call out risks and verification. "
+        "Do not invent UI that is not implied by the goal or catalogs. "
+        "Output 5–10 short bullet steps, then one line 'Done when: …'. No preamble."
+    )
+    user = f"Goal:\n{task}\n"
+    if display:
+        user += f"\nDesktop occupancy:\n{display}\n"
+    if skills:
+        user += f"\n{skills}\n"
+    if memories:
+        user += f"\n{memories}\n"
+    if mcp:
+        user += f"\n{mcp}\n"
+
+    print(f"[complex] planning with {ds.COMPLEX_MODEL}…", flush=True)
+    try:
+        plan = ds.chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            model=ds.COMPLEX_MODEL,
+        )
+    except Exception as e:
+        print(f"[complex] plan failed: {e}", flush=True)
+        if log is not None:
+            log.record("complex_plan_error", str(e), {"error": str(e)})
+        return None
+
+    plan = (plan or "").strip()
+    if not plan:
+        print("[complex] empty plan — skipping", flush=True)
+        return None
+
+    preview = plan.replace("\n", " ")[:160]
+    print(f"[complex] plan ready ({len(plan)} chars): {preview}", flush=True)
+    if log is not None:
+        log.record(
+            "complex_plan",
+            preview,
+            {"model": ds.COMPLEX_MODEL, "chars": len(plan), "plan": plan},
+        )
+    return plan
 
 
 def coach_agent(
@@ -170,9 +278,7 @@ def coach_agent(
     if highlights.get("recipes"):
         highlight_lines.append("Recipe / handoff:\n- " + "\n- ".join(highlights["recipes"]))
     if highlights.get("user_midtask"):
-        highlight_lines.append(
-            "User mid-task updates:\n- " + "\n- ".join(highlights["user_midtask"])
-        )
+        highlight_lines.append("User mid-task updates:\n- " + "\n- ".join(highlights["user_midtask"]))
     if highlights.get("ask_user"):
         highlight_lines.append("ask_user so far:\n- " + "\n- ".join(highlights["ask_user"]))
     highlight_blob = "\n".join(highlight_lines).strip()

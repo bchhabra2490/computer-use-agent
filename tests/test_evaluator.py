@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import json
+import importlib
+import os
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,11 @@ class EvalContextTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+        # Restore modules after env-driven reloads in complex-plan tests.
+        import deepseek as ds
+
+        importlib.reload(ds)
+        importlib.reload(ev)
 
     def test_steps_for_eval_keeps_head_and_tail(self) -> None:
         self.log.record("read_skill", "esp32-s3-enter-download-mode", {"name": "esp32-s3-enter-download-mode"})
@@ -75,6 +81,45 @@ class EvalContextTests(unittest.TestCase):
         self.assertIn("esp32-probe", prompt)
         self.assertIn("put the ESP32 in flash mode", prompt)
         self.assertIn("Terminal", prompt)
+
+    def test_plan_complex_task_skips_without_key(self) -> None:
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "", "COMPLEX_PLAN": "1"}, clear=False):
+            import deepseek as ds
+
+            importlib.reload(ds)
+            importlib.reload(ev)
+            self.assertIsNone(ev.plan_complex_task("route a PCB in EasyEDA"))
+
+    def test_plan_complex_task_injects(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_API_KEY": "sk-test",
+                "COMPLEX_PLAN": "1",
+                "COMPLEX_THINKING": "0",
+            },
+            clear=False,
+        ):
+            import deepseek as ds
+
+            importlib.reload(ds)
+            importlib.reload(ev)
+            with patch.object(ds, "chat", return_value="- Open EasyEDA\nDone when: routed"):
+                plan = ev.plan_complex_task(
+                    "route the board in EasyEDA",
+                    skill_catalog="Skills: use-easyeda",
+                    log=self.log,
+                )
+            self.assertIsNotNone(plan)
+            self.assertIn("EasyEDA", plan or "")
+            lines = self.log.steps_path.read_text(encoding="utf-8")
+            self.assertIn("complex_plan", lines)
+
+    def test_resolve_route_override(self) -> None:
+        with patch.dict(os.environ, {"AGENT_MODEL": "gpt-test"}, clear=False):
+            route = ev.resolve_agent_route(MagicMock(), "anything", self.log)
+        self.assertEqual(route.model, "gpt-test")
+        self.assertEqual(route.difficulty, "override")
 
 
 if __name__ == "__main__":

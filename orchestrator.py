@@ -97,16 +97,6 @@ from mcp_client import (
     stop_mcp,
 )
 from midtask import MIDTASK_ROUTE, classify_midtask
-
-try:
-    from fastlane import FASTLANE, FASTLANE_LOCAL, FASTLANE_MODEL, try_fastlane, execute_hit, warmup_local
-except Exception:  # pragma: no cover - import safety
-    FASTLANE = False
-    FASTLANE_LOCAL = False
-    FASTLANE_MODEL = ""
-    try_fastlane = None  # type: ignore[assignment]
-    execute_hit = None  # type: ignore[assignment]
-    warmup_local = None  # type: ignore[assignment]
 from session import Session, bind_session, get_session
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
@@ -118,13 +108,24 @@ from wake import (
 )
 
 try:
+    import ollama_orchestrator as ollama_brain
+except Exception:  # pragma: no cover - optional
+    ollama_brain = None  # type: ignore[assignment]
+
+try:
     from low_latency_tts import LowLatencyTTS, decoded_message_prefix, extract_message_field
 except Exception:  # pragma: no cover - optional at import time
     LowLatencyTTS = None  # type: ignore[misc, assignment]
     decoded_message_prefix = None  # type: ignore[misc, assignment]
     extract_message_field = None  # type: ignore[misc, assignment]
 
-MODEL = os.environ.get("ORCHESTRATOR_MODEL", "gpt-5-mini")
+_DEFAULT_MODEL = (
+    "qwen3:8b"
+    if (ollama_brain is not None and ollama_brain.using_ollama())
+    else "gpt-5-mini"
+)
+MODEL = os.environ.get("ORCHESTRATOR_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+USING_OLLAMA = bool(ollama_brain is not None and ollama_brain.using_ollama())
 TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "0",
     "false",
@@ -492,12 +493,16 @@ def _create_response(
     **kwargs: Any,
 ):
     """
-    Create a Responses API turn.
+    Create a Responses API turn (OpenAI) or a compatible Ollama chat+tools turn.
 
-    When streaming TTS is enabled, partial ``give_response_to_user`` message
-    arguments are fed into LowLatencyTTS as they arrive. Falls back to a
-    non-streaming create on error.
+    When streaming TTS is enabled on OpenAI, partial ``give_response_to_user``
+    message arguments are fed into LowLatencyTTS as they arrive. Falls back to a
+    non-streaming create on error. Local Ollama uses sync turns only.
     """
+    if USING_OLLAMA and ollama_brain is not None:
+        session = ollama_brain.get_session(str(kwargs.get("model") or MODEL))
+        return session.create(**kwargs)
+
     use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
     if not use_stream:
         return client.responses.create(**kwargs)
@@ -802,7 +807,6 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
 
 def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | None:
     """Look at a phone photo while a computer task is running (no start_task)."""
-    b64 = base64.b64encode(jpeg).decode("ascii")
     prompt = (
         "Look at this photo from the user's phone. "
         f"They said: {utterance}\n"
@@ -810,22 +814,36 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | 
     )
     get_session().enter("thinking", "Looking at phone photo")
     try:
-        response = client.responses.create(
-            model=MODEL,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{b64}",
-                            "detail": "high",
-                        },
-                    ],
-                }
-            ],
-        )
+        if USING_OLLAMA:
+            response = _create_response(
+                client,
+                model=MODEL,
+                instructions=(
+                    "You are a voice assistant. A photo was attached but you cannot "
+                    "see images. Tell the user briefly that the local model cannot "
+                    "view photos and ask them to describe what they see if needed."
+                ),
+                input=prompt,
+                tools=[],
+            )
+        else:
+            b64 = base64.b64encode(jpeg).decode("ascii")
+            response = client.responses.create(
+                model=MODEL,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{b64}",
+                                "detail": "high",
+                            },
+                        ],
+                    }
+                ],
+            )
     except Exception as e:
         print(f"[orchestrator] phone photo vision failed: {e}", flush=True)
         return _speak(client, "I could not look at that photo.")
@@ -939,33 +957,6 @@ def _listen_command(
             return None
     set_reply_sink("mac")
     return command or None
-
-
-def _try_fastlane_utterance(client: OpenAI, utterance: str) -> str | None:
-    """
-    Accuracy-first smart-home fast path.
-    Returns barge-in text if speech was interrupted, "" if handled, None to use cloud.
-    """
-    if not FASTLANE or try_fastlane is None or execute_hit is None:
-        return None
-    if phone_photo_pending() or _phone_photo_in_session:
-        return None
-    hit = try_fastlane(utterance)
-    if hit is None:
-        return None
-    print(
-        f"[fastlane] lane {hit.lane}: {hit.node}/{hit.component} {hit.action}"
-        + (f" ({hit.detail})" if hit.detail else ""),
-        flush=True,
-    )
-    get_session().enter("thinking", f"fastlane {hit.lane}")
-    ok, spoken = execute_hit(hit)
-    if not ok:
-        # Do not invent success — fall through so cloud can diagnose / retry.
-        print(f"[fastlane] execute failed — cloud fallback: {spoken}", flush=True)
-        return None
-    barged = _speak(client, spoken)
-    return barged if barged else ""
 
 
 def _queue_after_current(client: OpenAI, goal: str, *, user_said: str = "") -> None:
@@ -1276,26 +1267,6 @@ def _supervise_agent(
             if job.done.is_set():
                 break
             continue
-
-        # Deterministic hardware only while CU runs (no local LLM — keep CU path clean).
-        if FASTLANE and try_fastlane is not None and execute_hit is not None:
-            busy_hit = try_fastlane(command, allow_local=False)
-            if busy_hit is not None:
-                print(
-                    f"[fastlane] lane {busy_hit.lane} (busy): "
-                    f"{busy_hit.node}/{busy_hit.component} {busy_hit.action}",
-                    flush=True,
-                )
-                ok, spoken = execute_hit(busy_hit)
-                if ok:
-                    barged = _speak(client, spoken)
-                    if barged:
-                        try:
-                            publisher.send(barged)
-                        except Exception as e:
-                            print(f"[orchestrator] bus send failed: {e}")
-                    continue
-                print(f"[fastlane] busy execute failed — midtask fallback: {spoken}", flush=True)
 
         _dispatch_busy_utterance(
             client,
@@ -1733,10 +1704,18 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pass
 
     client = OpenAI()
+    if USING_OLLAMA and ollama_brain is not None:
+        threading.Thread(
+            target=ollama_brain.warmup,
+            args=(MODEL,),
+            name="ollama-warmup",
+            daemon=True,
+        ).start()
     audio = AudioSession(client, session=sess)
     bind_audio(audio)
     llm_tts = None
-    if TTS_STREAM and LowLatencyTTS is not None:
+    # Streaming TTS hooks into Responses token deltas — not available on Ollama.
+    if not USING_OLLAMA and TTS_STREAM and LowLatencyTTS is not None:
         try:
             llm_tts = LowLatencyTTS(client, Path(__file__).resolve().parent)
             print("[orchestrator] low-latency TTS workers started", flush=True)
@@ -1749,9 +1728,6 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     except BaseException as e:
         print(f"[orchestrator] MCP start error: {e}", flush=True)
 
-    if FASTLANE and FASTLANE_LOCAL and warmup_local is not None:
-        threading.Thread(target=warmup_local, name="fastlane-warmup", daemon=True).start()
-
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
     jobq.reset()
@@ -1759,15 +1735,12 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     try:
         sess.enter_and_log("ready", "Orchestrator starting")
         print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
+        brain = f"ollama/{MODEL}" if USING_OLLAMA else f"openai/{MODEL}"
         print(
-            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} "
+            f"[orchestrator] brain={brain}; "
+            f"I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} "
             "(TTS_CONFIRM_HEARD); "
-            f"mid-task route={'on' if MIDTASK_ROUTE else 'off'} (MIDTASK_ROUTE); "
-            f"fastlane={'on' if FASTLANE else 'off'}"
-            + (
-                f"/local={FASTLANE_MODEL}" if FASTLANE and FASTLANE_LOCAL else ""
-            )
-            + " (FASTLANE)",
+            f"mid-task route={'on' if MIDTASK_ROUTE else 'off'} (MIDTASK_ROUTE)",
             flush=True,
         )
         # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
@@ -1848,16 +1821,6 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 _phone_photo_in_session = False
                 sess.enter_and_log("done", "Session ended")
                 return
-
-            fast = _try_fastlane_utterance(client, utterance)
-            if fast is not None:
-                if fast:
-                    pending = fast
-                else:
-                    print("[orchestrator] ready for next task.")
-                    sess.enter("ready", "Waiting for next request")
-                    audio.cooldown()
-                continue
 
             sess.enter("thinking", utterance[:100])
             jpeg = None

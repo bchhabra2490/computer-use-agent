@@ -57,7 +57,7 @@ def run_command(
             executable=shell,
             cwd=workdir,
             capture_output=True,
-            text=True,
+            text=False,  # decode ourselves — OCR/cat of images must not crash the agent
             timeout=timeout,
             env=os.environ.copy(),
         )
@@ -80,8 +80,8 @@ def run_command(
         command=command,
         cwd=workdir,
         exit_code=completed.returncode,
-        stdout=completed.stdout or "",
-        stderr=completed.stderr or "",
+        stdout=_decode(completed.stdout),
+        stderr=_decode(completed.stderr),
         limit=limit,
         note=None,
     )
@@ -90,9 +90,15 @@ def run_command(
 def _decode(data: str | bytes | None) -> str:
     if data is None:
         return ""
-    if isinstance(data, bytes):
-        return data.decode("utf-8", errors="replace")
-    return data
+    if isinstance(data, str):
+        return data
+    # PNG/JPEG dumps and odd OCR bytes are common; never raise into the agent loop.
+    if data[:4] == b"\x89PNG" or data[:3] == b"\xff\xd8\xff":
+        return (
+            f"(binary image data, {len(data)} bytes — not shown as text. "
+            "Do not cat/dump image files; use the computer tool + vision instead.)"
+        )
+    return data.decode("utf-8", errors="replace")
 
 
 def _truncate(text: str, limit: int) -> tuple[str, bool]:

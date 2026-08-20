@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import os
 from typing import Any
@@ -14,6 +15,8 @@ SARVAM_LANGUAGE = os.environ.get("SARVAM_STT_LANGUAGE", "unknown").strip() or "u
 
 # REST sync API rejects clips longer than ~30s.
 SARVAM_MAX_SECONDS = float(os.environ.get("SARVAM_STT_MAX_SECONDS", "28"))
+# Hard cap so a hung Saaras upload cannot freeze the orchestrator forever.
+SARVAM_STT_TIMEOUT = float(os.environ.get("SARVAM_STT_TIMEOUT", "45"))
 
 _client: Any | None = None
 
@@ -63,7 +66,25 @@ def transcribe_wav(wav_bytes: bytes, *, model: str | None = None, mode: str | No
     if lang and lang.lower() not in {"unknown", "auto", ""}:
         kwargs["language_code"] = lang
 
-    response = client.speech_to_text.transcribe(**kwargs)
+    timeout = max(5.0, SARVAM_STT_TIMEOUT)
+    print(
+        f"[stt] Sarvam upload starting (model={model} mode={mode} "
+        f"bytes={len(wav_bytes)} timeout={timeout:g}s)…",
+        flush=True,
+    )
+
+    def _call() -> Any:
+        return client.speech_to_text.transcribe(**kwargs)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_call)
+            response = fut.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as e:
+        raise TimeoutError(
+            f"Sarvam STT timed out after {timeout:g}s — check network / SARVAM_API_KEY"
+        ) from e
+
     text = (getattr(response, "transcript", None) or "").strip()
     if not text and isinstance(response, dict):
         text = str(response.get("transcript") or "").strip()

@@ -738,6 +738,10 @@ def _listen_sarvam(
     finally:
         if watch is not None:
             watch.stop()
+    print(
+        f"[stt] recording done ({len(wav)} bytes) — sending to Sarvam {SARVAM_STT_MODEL}…",
+        flush=True,
+    )
     try:
         text = transcribe_wav(wav)
     except Exception as e:
@@ -838,7 +842,8 @@ def _listen_realtime_body(
                     if wake_spotter is not None:
                         try:
                             if wake_spotter.feed(cleaned, capture_rate):
-                                print("[stt] wake word — processing audio.")
+                                # listen-end ONNX (over and out), not Hey Jarvis.
+                                print("[stt] listen-end — stopping record.", flush=True)
                                 wake_send.set()
                                 from wake import play_over_and_out_chime
 
@@ -1081,7 +1086,8 @@ def record_until_silence(
             if wake_spotter is not None:
                 try:
                     if wake_spotter.feed(cleaned, capture_rate):
-                        print("[stt] wake word — processing audio.")
+                        # listen-end ONNX (over and out), not Hey Jarvis.
+                        print("[stt] listen-end — stopping record.", flush=True)
                         from wake import play_over_and_out_chime
 
                         play_over_and_out_chime()

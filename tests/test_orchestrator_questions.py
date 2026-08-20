@@ -21,9 +21,11 @@ from orchestrator import (  # noqa: E402
     _listen_for_answer,
     _looks_like_question,
     _strip_wait_filler,
+    _summarize_sidekick_steps,
     _turn_already_spoke,
     _user_turn_input,
 )
+import jobs as jobq  # noqa: E402
 
 
 PLAN_MD_CLARIFIERS = """\
@@ -137,6 +139,30 @@ class UserTurnInputTests(unittest.TestCase):
         url = next(p["image_url"] for p in content if p["type"] == "input_image")
         self.assertTrue(url.startswith("data:image/jpeg;base64,"))
         self.assertIn("image attached", content[0]["text"])
+
+    def test_includes_sidequest_log(self) -> None:
+        jobq.reset()
+        jobq.record_sidequest(
+            "what's the weather today",
+            "Tool: web_search → No search results.",
+        )
+        try:
+            inp = _user_turn_input("Which weather API you used", [])
+        finally:
+            jobq.reset()
+        self.assertIn("Side quests this session", inp)
+        self.assertIn("what's the weather today", inp)
+        self.assertIn("web_search", inp)
+
+    def test_summarize_sidekick_steps(self) -> None:
+        text = _summarize_sidekick_steps(
+            [
+                ("tool_result", "web_search: No search results."),
+                ("spoken", "I tried to fetch live weather but got nothing."),
+            ]
+        )
+        self.assertIn("web_search", text)
+        self.assertIn("Spoken:", text)
 
 
 class ConfirmHeardTests(unittest.TestCase):

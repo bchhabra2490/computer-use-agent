@@ -351,13 +351,13 @@ def ingest_phone_audio(
     """Transcribe phone audio (unless ``text`` is already set) and queue it."""
     text = (text or "").strip()
     if text:
-        enqueue_utterance(text, source="phone")
+        enqueue_utterance(text, source="phone", input_kind="text")
         return {"ok": True, "queued": True, "text": text, "source": "text"}
     result = transcribe_phone_audio(audio, filename=filename, content_type=content_type)
     if not result.get("ok"):
         return result
     heard = str(result.get("text") or "").strip()
-    enqueue_utterance(heard, source="phone")
+    enqueue_utterance(heard, source="phone", input_kind="mic")
     return {"ok": True, "queued": True, "text": heard, "source": "audio"}
 
 
@@ -581,7 +581,7 @@ def ingest_phone_photo(
     except Exception as e:
         return {"ok": False, "error": f"unsupported image: {e}"}
     write_phone_photo(jpeg, width=width, height=height)
-    enqueue_utterance(text, source="phone", photo=True)
+    enqueue_utterance(text, source="phone", photo=True, input_kind="photo")
     return {
         "ok": True,
         "queued": True,
@@ -836,7 +836,7 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
             if not text:
                 self._send_json(400, {"ok": False, "error": "text required"})
                 return
-            enqueue_utterance(text, source="phone")
+            enqueue_utterance(text, source="phone", input_kind="text")
             self._send_json(200, {"ok": True, "queued": True, "text": text})
             return
         if path == "/v1/control":

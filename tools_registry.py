@@ -247,6 +247,56 @@ READ_SKILL_TOOL = {
     "strict": True,
 }
 
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "name": "web_search",
+    "description": (
+        "Search the public web and return titles, snippets, and links. Use this "
+        "for live facts (weather, news, who/what/when) when no MCP search tool "
+        "fits. Pass a normal search query, not a URL. Then give_response_to_user "
+        "from the results — do not ask permission to look it up. Follow a "
+        "specific result URL with http_get only if you need the page body."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query, e.g. Mohali weather today.",
+            },
+            "max_results": {
+                "type": "number",
+                "description": "How many results to return (1–8). Use 5 if unsure.",
+            },
+        },
+        "required": ["query", "max_results"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+HTTP_GET_TOOL = {
+    "type": "function",
+    "name": "http_get",
+    "description": (
+        "Fetch a public https URL and return text (HTML stripped). Use when you "
+        "already have a specific URL (from web_search or the user). Not a search "
+        "box — for a query, call web_search first. Do not use for localhost."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "Full https URL to GET.",
+            },
+        },
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 LIST_OPEN_APPS_TOOL = {
     "type": "function",
     "name": "list_open_apps",
@@ -371,6 +421,8 @@ SHARED_TOOL_NAMES = frozenset(
         "save_memory",
         "save_screen_memory",
         "mcp_call",
+        "web_search",
+        "http_get",
         "list_open_apps",
         "set_timer",
         "list_timers",
@@ -397,6 +449,8 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(GIVE_RESPONSE_TOOL, ORCHESTRATOR),
     *(_entry(tool, ORCHESTRATOR, AGENT) for tool in MEMORY_TOOLS),
     _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT),
+    _entry(WEB_SEARCH_TOOL, ORCHESTRATOR, AGENT),
+    _entry(HTTP_GET_TOOL, ORCHESTRATOR, AGENT),
     _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT),
     _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT),
@@ -408,22 +462,27 @@ REGISTRY: tuple[RegisteredTool, ...] = (
 )
 
 
-def openai_tools(brain: Brain) -> list[dict[str, Any]]:
+def openai_tools(
+    brain: Brain,
+    *,
+    exclude: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
     """OpenAI Responses tool list for one brain, plus MCP when connected."""
     from mcp_client import mcp_openai_tools
 
+    skip = exclude or frozenset()
     tools: list[dict[str, Any]] = []
     if brain == AGENT:
         tools.append(COMPUTER_TOOL)
     for item in REGISTRY:
-        if brain in item.brains:
+        if brain in item.brains and item.name not in skip:
             tools.append(item.schema)
     tools.extend(mcp_openai_tools(for_agent=(brain == AGENT)))
     return tools
 
 
-def orchestrator_tools() -> list[dict[str, Any]]:
-    return openai_tools(ORCHESTRATOR)
+def orchestrator_tools(*, exclude: frozenset[str] | None = None) -> list[dict[str, Any]]:
+    return openai_tools(ORCHESTRATOR, exclude=exclude)
 
 
 def agent_tools() -> list[dict[str, Any]]:
@@ -458,6 +517,14 @@ def run_shared_tool(
         from displays import format_monitor_occupancy
 
         return format_monitor_occupancy()
+    if name == "http_get":
+        from http_get import run_http_get
+
+        return run_http_get(args)
+    if name == "web_search":
+        from web_search import run_web_search
+
+        return run_web_search(args)
     if name in {"set_timer", "list_timers", "cancel_timer"}:
         from timers import run_timer_tool
 

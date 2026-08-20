@@ -139,6 +139,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         self.assertEqual(h._code, 401)
 
     def test_command_enqueues(self) -> None:
+        st.set_reply_sink("mac")
         h = self._handler(
             "POST",
             "/v1/command",
@@ -147,6 +148,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         )
         self.assertEqual(h._code, 200)
         self.assertEqual(st.consume_utterance(), "open notes")
+        self.assertEqual(st.reply_sink(), "mac")
 
     def test_control_mark_done(self) -> None:
         h = self._handler(
@@ -239,6 +241,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
     def test_post_audio_json(self) -> None:
         wav = b"RIFF" + b"xxxx" + b"WAVE"
         with patch("stt.transcribe", return_value="skip ads"):
+            st.set_reply_sink("mac")
             h = self._handler(
                 "POST",
                 "/v1/audio",
@@ -250,6 +253,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
             )
         self.assertEqual(h._code, 200)
         self.assertEqual(st.consume_utterance(), "skip ads")
+        self.assertEqual(st.reply_sink(), "phone")
 
     def test_post_photo_jpeg(self) -> None:
         from PIL import Image
@@ -262,6 +266,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
             patch.object(st, "PHONE_PHOTO_PATH", photo_path),
             patch.object(st, "RUNTIME_DIR", Path(self.tmp.name)),
         ):
+            st.set_reply_sink("mac")
             h = self._handler(
                 "POST",
                 "/v1/photo",
@@ -274,6 +279,7 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["source"], "photo")
         self.assertEqual(st.consume_utterance(), pg.DEFAULT_PHOTO_PROMPT)
+        self.assertEqual(st.reply_sink(), "mac")
         self.assertTrue(photo_path.is_file())
         self.assertTrue(st.read_status().get("phone_photo_at"))
 
@@ -291,20 +297,24 @@ class PhoneAudioIngestTests(unittest.TestCase):
 
     def test_text_override_skips_stt(self) -> None:
         with patch("stt.transcribe") as transcribe:
+            st.set_reply_sink("mac")
             result = pg.ingest_phone_audio(b"not-audio", text="open notes")
         transcribe.assert_not_called()
         self.assertEqual(result["text"], "open notes")
         self.assertEqual(result["source"], "text")
         self.assertEqual(st.consume_utterance(), "open notes")
+        self.assertEqual(st.reply_sink(), "mac")
 
     def test_transcribes_and_enqueues(self) -> None:
         wav = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 20
         with patch("stt.transcribe", return_value="  play lag ja gale  "):
+            st.set_reply_sink("mac")
             result = pg.ingest_phone_audio(wav, content_type="audio/wav")
         self.assertTrue(result["ok"])
         self.assertEqual(result["source"], "audio")
         self.assertEqual(result["text"], "play lag ja gale")
         self.assertEqual(st.consume_utterance(), "play lag ja gale")
+        self.assertEqual(st.reply_sink(), "phone")
 
     def test_rejects_empty_audio(self) -> None:
         result = pg.ingest_phone_audio(b"")
@@ -350,11 +360,13 @@ class PhonePhotoIngestTests(unittest.TestCase):
         return buf.getvalue()
 
     def test_ingest_stores_and_queues(self) -> None:
+        st.set_reply_sink("mac")
         result = pg.ingest_phone_photo(self._jpeg(), text="what is this label?")
         self.assertTrue(result["ok"])
         self.assertEqual(result["source"], "photo")
         self.assertEqual(result["text"], "what is this label?")
         self.assertEqual(st.consume_utterance(), "what is this label?")
+        self.assertEqual(st.reply_sink(), "mac")
         self.assertTrue(self.photo.is_file())
         self.assertTrue(st.phone_photo_pending())
         jpeg = st.phone_photo_jpeg(consume_pending=True)
@@ -405,6 +417,7 @@ class PhonePhotoIngestTests(unittest.TestCase):
     def test_audio_caption_is_transcribed(self) -> None:
         wav = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 20
         with patch("stt.transcribe", return_value="  what does this label say  "):
+            st.set_reply_sink("mac")
             result = pg.ingest_phone_photo(
                 self._jpeg(),
                 audio=wav,
@@ -414,6 +427,7 @@ class PhonePhotoIngestTests(unittest.TestCase):
         self.assertEqual(result["caption_source"], "audio")
         self.assertEqual(result["text"], "what does this label say")
         self.assertEqual(st.consume_utterance(), "what does this label say")
+        self.assertEqual(st.reply_sink(), "mac")
 
     def test_text_caption_skips_photo_audio_stt(self) -> None:
         with patch("stt.transcribe") as transcribe:

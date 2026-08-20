@@ -223,12 +223,47 @@ def set_phone_gateway_pid(pid: int | None) -> None:
         _write(data)
 
 
-def enqueue_utterance(text: str, *, source: str = "phone", photo: bool = False) -> None:
+def _normalize_input_kind(kind: str | None, *, photo: bool = False) -> str:
+    if photo:
+        return "photo"
+    value = (kind or "text").strip().lower()
+    if value in {"mic", "audio", "voice"}:
+        return "mic"
+    if value in {"photo", "image", "camera"}:
+        return "photo"
+    return "text"
+
+
+def _utterance_routes_reply_to_phone(item: str | dict[str, Any]) -> bool:
+    """True when TTS should follow the phone mic (different capture device)."""
+    if isinstance(item, str):
+        return True
+    row = item or {}
+    if row.get("photo"):
+        return False
+    kind = str(row.get("input_kind") or "").strip().lower()
+    if kind == "mic":
+        return True
+    if kind in {"text", "photo"}:
+        return False
+    # Legacy queued items without input_kind: phone source implied mic capture.
+    src = str(row.get("source") or "phone").strip().lower()
+    return src == "phone"
+
+
+def enqueue_utterance(
+    text: str,
+    *,
+    source: str = "phone",
+    photo: bool = False,
+    input_kind: str = "text",
+) -> None:
     """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
     text = (text or "").strip()
     if not text:
         return
     source = (source or "phone").strip() or "phone"
+    kind = _normalize_input_kind(input_kind, photo=photo)
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
@@ -238,6 +273,7 @@ def enqueue_utterance(text: str, *, source: str = "phone", photo: bool = False) 
                 "source": source,
                 "ts": time.time(),
                 "photo": bool(photo),
+                "input_kind": kind,
             }
         )
         data["pending_utterances"] = pending[-20:]
@@ -279,11 +315,8 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
-        if isinstance(item, str):
+        if _utterance_routes_reply_to_phone(item):
             data["reply_sink"] = "phone"
-        else:
-            src = str((item or {}).get("source") or "phone").strip().lower()
-            data["reply_sink"] = "phone" if src == "phone" else "mac"
         _write(data)
     if isinstance(item, str):
         text = item.strip()

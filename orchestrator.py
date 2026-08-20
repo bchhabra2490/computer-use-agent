@@ -12,6 +12,10 @@ Tools:
   - mcp_call — tools from servers in mcp.json (when configured)
 
 Idle and mid-task listening use local openWakeWord detection ("Hey Jarvis").
+Cloud STT only runs after the wake word. While a computer-use job is running,
+Hey Jarvis lines are classified: related updates go to that agent; unrelated
+Q&A uses a sidekick turn (CU does not see it); new UI work is queued until
+the current job finishes.
 Cloud STT only runs after the wake word. While Jarvis is speaking, say
 "Hey Jarvis" again (or press Space / Esc / Enter in the terminal) to interrupt
 TTS and give a new command (barge-in).
@@ -80,6 +84,7 @@ from bus import (
 )
 from audio import AudioSession, bind_audio, get_audio
 from context import assemble_context
+import jobs as jobq
 from memory import (
     TurnTrace,
     capture_and_save_screen,
@@ -91,6 +96,7 @@ from mcp_client import (
     start_mcp,
     stop_mcp,
 )
+from midtask import MIDTASK_ROUTE, classify_midtask
 from session import Session, bind_session, get_session
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
@@ -137,6 +143,11 @@ will not open):
   (titles + URLs). Occupancy below is a snapshot; call this for a fresh list.
   Prefer this (and give_response_to_user) over start_task when they only ask
   what is open / which tabs they have.
+- web_search — look up live facts on the public web (weather, news, who/what).
+  Prefer mcp_call if a search MCP is connected; otherwise call this instead of
+  opening a browser. Do not claim you lack internet before trying it.
+- http_get — fetch one https URL when you already have the link (from web_search
+  or the user). Not a substitute for web_search.
 - set_timer / list_timers / cancel_timer — native countdown (no Clock app).
   Use set_timer for “set a 5 minute timer” and reminders (“remind me in 5 minutes
   to check the oven”). Convert to seconds. speak=true plus message when they
@@ -147,8 +158,10 @@ Rules:
 - Prefer give_response_to_user for questions you can answer without touching the computer.
 - When a phone-camera photo is attached, look at it. Explain what you see if they asked,
   and answer follow-up questions about that same photo with the detail they asked for
-  (not a teaser — include specs or labels when relevant). Prefer give_response_to_user.
-  Do not start_task unless they asked you to do something on the Mac with what you saw.
+  (not a teaser — include specs or labels when relevant). Prefer give_response_to_user
+  for identification and coaching from the photo alone.
+  If they want something opened or shown on the Mac (desktop, browser, Preview, a file,
+  an image, a pin diagram) — call start_task immediately; do not say you lack access.
 - If they ask who you are, what you do, how you work, or about this agent / Jarvis /
   Rekha / computer-use-agent, call who_am_i first, then give_response_to_user with a
   short spoken summary from the README (do not read it verbatim, no markdown).
@@ -188,9 +201,10 @@ Rules:
   - Do not restart a task that already succeeded just to rephrase it.
 - Stay in the conversation after completing work. Only set end_session=true when the
   user clearly says goodbye, quit, stop listening, or similar.
-- While a computer task is running, the user can interrupt/update by saying
-  the wake word ("Hey Jarvis") then an instruction — those go straight to the
-  agent; you do not need to call tools for them.
+- While a computer task is running, the user can interrupt with the wake word.
+  Related UI instructions go to that agent. Unrelated questions are answered
+  here without the computer agent seeing them. New unrelated UI work is queued
+  until the current job finishes.
 - If they say "mark it done", "that's done", or "no other action is required"
   while a computer task is running, the runtime stops that task — do not
   start_task again for the same work.
@@ -208,6 +222,54 @@ Available desktop skills the computer agent can load:
 
 {not_to_do}
 """
+
+SIDEKICK_ADDENDUM = """
+A computer-use agent is already controlling the desktop for:
+{goal}
+
+You are a sidekick on this turn. That agent will not see this conversation.
+- You have the same tools as idle Jarvis except start_task: give_response_to_user,
+  ask_user, memory, timers, list_open_apps, who_am_i, mcp_call, web_search, http_get.
+  You CAN look things up — do not say you lack internet.
+- For weather or other live facts, call web_search immediately (e.g. "Mohali weather
+  today"). Use memory for a usual city if they omit one; ask_user once only if you
+  truly cannot guess. Do not ask permission to look it up. Use http_get only when
+  you already have a URL.
+- If they asked for new mouse/keyboard work, say you will do it after the
+  current task — the runtime queues start_task if it is called anyway.
+- Do not recap or coach the running computer-use job unless they asked.
+- Keep end_session false unless they clearly say goodbye to the whole session.
+"""
+
+
+def _mcp_rule() -> str:
+    if mcp_openai_tools(for_agent=False):
+        return (
+            "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
+            "Linear, docs, APIs). Prefer this over start_task when it can complete "
+            "the request.\n"
+        )
+    return ""
+
+
+def _orchestrator_system_prompt(*, sidekick_of: str | None = None) -> str:
+    bundle = assemble_context()
+    text = (
+        SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
+        .replace("{not_to_do}", "__NOT_TO_DO__")
+        .format(
+            skills=bundle.skills,
+            memories=bundle.memories,
+            mcp=bundle.mcp,
+            mcp_rule=_mcp_rule(),
+        )
+        .replace("__DISPLAYS__", bundle.displays)
+        .replace("__NOT_TO_DO__", bundle.not_to_do)
+    )
+    goal = (sidekick_of or "").strip()
+    if goal:
+        text = text + "\n" + SIDEKICK_ADDENDUM.format(goal=goal)
+    return text
 
 
 class AgentJob:
@@ -245,9 +307,14 @@ def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: 
             "about this same photo. Do not start_task unless they asked you to "
             "do something on the Mac.\n\n"
         )
-    return (
-        prefix + f"User said: {utterance}\n\n" + f"Computer task history so far:\n{_format_task_history(task_history)}"
-    )
+    parts = [
+        prefix + f"User said: {utterance}",
+        f"Computer task history so far:\n{_format_task_history(task_history)}",
+    ]
+    side = jobq.format_sidequests()
+    if side:
+        parts.append(side)
+    return "\n\n".join(parts)
 
 
 def _user_turn_input(
@@ -580,6 +647,7 @@ def _start_agent_thread(
         name="computer-agent",
         daemon=True,
     )
+    jobq.set_running(job.call_id, job.task)
     job.thread.start()
 
 
@@ -845,15 +913,178 @@ def _listen_command(
     return command or None
 
 
+def _queue_after_current(client: OpenAI, goal: str, *, user_said: str = "") -> None:
+    item = jobq.enqueue_inbox(goal, user_said=user_said or goal)
+    if item is None:
+        return
+    _speak_later(client, "I'll do that after the current task.")
+
+
+def _forward_to_cu(publisher: AgentMessagePublisher, command: str) -> None:
+    try:
+        publisher.send(command)
+        print(f"[orchestrator] forwarded to agent: {command!r}")
+        status_log(f"[bus] → agent: {command[:120]}")
+    except Exception as e:
+        print(f"[orchestrator] bus send failed: {e}")
+
+
+def _summarize_sidekick_steps(steps: list[tuple[str, str]]) -> str:
+    lines: list[str] = []
+    for kind, text in steps:
+        body = " ".join((text or "").split())
+        if not body:
+            continue
+        if kind == "spoken":
+            lines.append(f"Spoken: {body[:500]}")
+        elif kind == "tool_result":
+            lines.append(f"Tool: {body[:500]}")
+        elif kind == "ask_user":
+            lines.append(f"Asked: {body[:400]}")
+    return "\n".join(lines) if lines else "(no spoken result recorded)"
+
+
+def _run_sidekick(
+    client: OpenAI,
+    utterance: str,
+    *,
+    cu_goal: str,
+    auto: bool,
+    max_steps: int,
+    task_history: list[dict[str, str]],
+    publisher: AgentMessagePublisher,
+    ask_bridge: AskUserBridge,
+    llm_tts: Any | None,
+    turn: TurnTrace | None,
+) -> None:
+    """Answer an unrelated Jarvis line without the CU agent seeing it."""
+    print(f"[orchestrator] sidekick (CU running {cu_goal[:80]!r})", flush=True)
+    mark = len(turn.steps) if turn is not None else 0
+    response = _create_response(
+        client,
+        llm_tts=llm_tts,
+        model=MODEL,
+        tools=orchestrator_tools(exclude=frozenset({"start_task"})),
+        instructions=_orchestrator_system_prompt(sidekick_of=cu_goal),
+        input=_user_turn_input(utterance, task_history),
+    )
+    _process_response(
+        client,
+        response,
+        auto=auto,
+        max_steps=max_steps,
+        task_history=task_history,
+        publisher=publisher,
+        ask_bridge=ask_bridge,
+        llm_tts=llm_tts,
+        turn=turn,
+        user_said=utterance,
+        allow_start_task=False,
+    )
+    extra = turn.steps[mark:] if turn is not None else []
+    jobq.record_sidequest(utterance, _summarize_sidekick_steps(extra))
+
+
+def _dispatch_busy_utterance(
+    client: OpenAI,
+    command: str,
+    *,
+    job: AgentJob,
+    publisher: AgentMessagePublisher,
+    auto: bool,
+    max_steps: int,
+    task_history: list[dict[str, str]],
+    ask_bridge: AskUserBridge,
+    llm_tts: Any | None,
+    turn: TurnTrace | None,
+) -> None:
+    if not MIDTASK_ROUTE:
+        _forward_to_cu(publisher, command)
+        return
+    route = classify_midtask(job.task, command, client=client)
+    if route == "cu_update":
+        _forward_to_cu(publisher, command)
+        return
+    if route == "cu_new":
+        spec = resolve_agent_task(user_said=command, planner_task=command)
+        _queue_after_current(client, spec.goal, user_said=spec.match_text)
+        jobq.record_sidequest(
+            command,
+            f"Queued new desktop work for after the current job: {spec.goal}",
+        )
+        print(f"[orchestrator] queued CU work: {spec.goal!r}", flush=True)
+        return
+    _run_sidekick(
+        client,
+        command,
+        cu_goal=job.task,
+        auto=auto,
+        max_steps=max_steps,
+        task_history=task_history,
+        publisher=publisher,
+        ask_bridge=ask_bridge,
+        llm_tts=llm_tts,
+        turn=turn,
+    )
+
+
+def _run_inbox_followups(
+    client: OpenAI,
+    publisher: AgentMessagePublisher,
+    ask_bridge: AskUserBridge,
+    *,
+    auto: bool,
+    max_steps: int,
+    task_history: list[dict[str, str]],
+    llm_tts: Any | None,
+    turn: TurnTrace | None,
+) -> None:
+    """Start queued CU goals one-by-one after the current job finishes."""
+    while True:
+        item = jobq.pop_inbox()
+        if item is None:
+            return
+        print(f"[orchestrator] starting queued {item.id}: {item.goal}", flush=True)
+        follow = AgentJob(
+            task=item.goal,
+            call_id=f"inbox-{item.id}",
+            match_text=item.user_said,
+        )
+        _start_agent_thread(follow, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
+        _speak_later(client, "Starting the queued task.")
+        result = _supervise_agent(
+            client,
+            follow,
+            publisher,
+            ask_bridge,
+            auto=auto,
+            max_steps=max_steps,
+            task_history=task_history,
+            llm_tts=llm_tts,
+            turn=turn,
+        )
+        task_history.append({"task": follow.task, "result": result})
+        if turn is not None:
+            turn.add("start_task", follow.task)
+            turn.add("start_task_result", result or "", max_len=4000)
+
+
 def _supervise_agent(
     client: OpenAI,
     job: AgentJob,
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
+    *,
+    auto: bool,
+    max_steps: int,
+    task_history: list[dict[str, str]],
+    llm_tts: Any | None = None,
+    turn: TurnTrace | None = None,
 ) -> str:
     """
     Main-thread loop while the agent thread runs.
-    Services agent ask_user; mid-task directives require the Jarvis wake word.
+    Services agent ask_user; mid-task Jarvis lines are classified (related →
+    this agent, unrelated → sidekick, new UI → inbox).
     """
     global _phone_photo_in_session
     print(
@@ -991,12 +1222,18 @@ def _supervise_agent(
                 break
             continue
 
-        try:
-            publisher.send(command)
-            print(f"[orchestrator] forwarded to agent: {command!r}")
-            status_log(f"[bus] → agent: {command[:120]}")
-        except Exception as e:
-            print(f"[orchestrator] bus send failed: {e}")
+        _dispatch_busy_utterance(
+            client,
+            command,
+            job=job,
+            publisher=publisher,
+            auto=auto,
+            max_steps=max_steps,
+            task_history=task_history,
+            ask_bridge=ask_bridge,
+            llm_tts=llm_tts,
+            turn=turn,
+        )
 
     # Drain any last ask that arrived as the agent was finishing.
     while _service_agent_ask(client, ask_bridge):
@@ -1004,6 +1241,8 @@ def _supervise_agent(
 
     if job.thread is not None:
         job.thread.join(timeout=5.0)
+    if jobq.running_id() == job.call_id:
+        jobq.clear_running()
     get_session().enter_and_log("ready", "Computer agent finished")
     return job.result or "failed\nError: no result from agent"
 
@@ -1020,6 +1259,7 @@ def _handle_tool(
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
     user_said: str = "",
+    allow_start_task: bool = True,
 ) -> tuple[dict | None, bool, AgentJob | None]:
     """
     Execute one tool call.
@@ -1068,7 +1308,9 @@ def _handle_tool(
                     if barge:
                         output = (
                             f"Speech interrupted. User then said: {barge}. "
-                            "Act on that instruction next (do not assume the spoken reply finished)."
+                            "Act on that instruction next (do not assume the spoken reply finished). "
+                            "If they want something opened or shown on the Mac/desktop/browser, "
+                            "call start_task — do not explain that you cannot."
                         )
                     else:
                         output = (
@@ -1088,7 +1330,9 @@ def _handle_tool(
                     end_session = False
                     output = (
                         f"Speech interrupted. User then said: {barge}. "
-                        "Act on that instruction next (do not assume the spoken reply finished)."
+                        "Act on that instruction next (do not assume the spoken reply finished). "
+                        "If they want something opened or shown on the Mac/desktop/browser, "
+                        "call start_task — do not explain that you cannot."
                     )
                 else:
                     output = f"Spoke to user. end_session={end_session}"
@@ -1127,6 +1371,17 @@ def _handle_tool(
         task = (args.get("task") or "").strip()
         if not task:
             output = "Error: empty task"
+        elif not allow_start_task:
+            spec = resolve_agent_task(
+                user_said=user_said or ((turn.user_input if turn else "") or ""),
+                planner_task=task,
+            )
+            _queue_after_current(client, spec.goal, user_said=spec.match_text)
+            output = (
+                "Queued to run after the current computer-use task finishes. "
+                "Do not call start_task again. Call give_response_to_user to confirm."
+            )
+            print(f"[orchestrator] sidekick queued start_task: {spec.goal!r}", flush=True)
         else:
             spec = resolve_agent_task(
                 user_said=user_said or ((turn.user_input if turn else "") or ""),
@@ -1160,7 +1415,9 @@ def _handle_tool(
         "save_screen_memory",
         "who_am_i",
         "mcp_call",
+        "web_search",
         "list_open_apps",
+        "http_get",
         "set_timer",
         "list_timers",
         "cancel_timer",
@@ -1194,6 +1451,7 @@ def _process_response(
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
     user_said: str = "",
+    allow_start_task: bool = True,
 ) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -1204,6 +1462,11 @@ def _process_response(
     next user turn when we already spoke and skipped a recap model call.
     """
     end_session = False
+    tools = (
+        orchestrator_tools()
+        if allow_start_task
+        else orchestrator_tools(exclude=frozenset({"start_task"}))
+    )
     while True:
         _print_messages(response)
         _record_llm_step(turn, response)
@@ -1224,7 +1487,7 @@ def _process_response(
                     client,
                     llm_tts=llm_tts,
                     model=MODEL,
-                    tools=orchestrator_tools(),
+                    tools=tools,
                     previous_response_id=response.id,
                     input=(
                         f"User answered: {answer}\n\n"
@@ -1264,6 +1527,7 @@ def _process_response(
                 llm_tts=llm_tts,
                 turn=turn,
                 user_said=user_said,
+                allow_start_task=allow_start_task,
             )
             end_session = end_session or stop
             if job is not None:
@@ -1279,11 +1543,33 @@ def _process_response(
                     close_after_speech = True
 
         if deferred_job is not None:
-            result = _supervise_agent(client, deferred_job, publisher, ask_bridge)
+            result = _supervise_agent(
+                client,
+                deferred_job,
+                publisher,
+                ask_bridge,
+                auto=auto,
+                max_steps=max_steps,
+                task_history=task_history,
+                llm_tts=llm_tts,
+                turn=turn,
+            )
             task_history.append({"task": deferred_job.task, "result": result})
             if turn is not None:
                 turn.add("start_task_result", result or "", max_len=4000)
+            _run_inbox_followups(
+                client,
+                publisher,
+                ask_bridge,
+                auto=auto,
+                max_steps=max_steps,
+                task_history=task_history,
+                llm_tts=llm_tts,
+                turn=turn,
+            )
             history_blob = _format_task_history(task_history)
+            side = jobq.format_sidequests()
+            side_block = f"\n\n{side}\n" if side else ""
             outputs.append(
                 {
                     "type": "function_call_output",
@@ -1292,13 +1578,16 @@ def _process_response(
                         f"Computer agent finished this task.\n"
                         f"Latest result:\n{result}\n\n"
                         f"Session task history (use this to decide next action):\n"
-                        f"{history_blob}\n\n"
+                        f"{history_blob}\n"
+                        f"{side_block}"
                         "Decide next:\n"
                         "- If the user's request is fully satisfied, call "
                         "give_response_to_user ONCE with an appropriate spoken summary "
                         "(titles/names, not raw URLs), then stop. Do not recap "
                         "again in a message.\n"
-                        "- If distinct work remains, call start_task with only "
+                        "- If they also had a side quest (weather, timers, facts), "
+                        "you already handled it — answer follow-ups from that log.\n"
+                        "- If distinct desktop work remains, call start_task with only "
                         "the remaining GOAL (not a Chrome/new-tab screenplay).\n"
                         "- Do not redo a task that already succeeded."
                     ),
@@ -1324,7 +1613,7 @@ def _process_response(
             client,
             llm_tts=llm_tts,
             model=MODEL,
-            tools=orchestrator_tools(),
+            tools=tools,
             previous_response_id=response.id,
             input=outputs,
         )
@@ -1369,38 +1658,18 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         start_mcp()
     except BaseException as e:
         print(f"[orchestrator] MCP start error: {e}", flush=True)
-    mcp_rule = ""
-    if mcp_openai_tools(for_agent=False):
-        mcp_rule = (
-            "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
-            "Linear, docs, APIs). Prefer this over start_task when it can complete "
-            "the request.\n"
-        )
-
-    def _system_prompt() -> str:
-        bundle = assemble_context()
-        # Occupancy text can contain `{` from window titles; inject after format.
-        return (
-            SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
-            .replace("{not_to_do}", "__NOT_TO_DO__")
-            .format(
-                skills=bundle.skills,
-                memories=bundle.memories,
-                mcp=bundle.mcp,
-                mcp_rule=mcp_rule,
-            )
-            .replace("__DISPLAYS__", bundle.displays)
-            .replace("__NOT_TO_DO__", bundle.not_to_do)
-        )
 
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
+    jobq.reset()
 
     try:
         sess.enter_and_log("ready", "Orchestrator starting")
         print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
         print(
-            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} " "(TTS_CONFIRM_HEARD)",
+            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} "
+            "(TTS_CONFIRM_HEARD); "
+            f"mid-task route={'on' if MIDTASK_ROUTE else 'off'} (MIDTASK_ROUTE)",
             flush=True,
         )
         # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
@@ -1496,7 +1765,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             )
             pending_fn_outputs = []
             turn = TurnTrace(utterance)
-            system = _system_prompt()
+            system = _orchestrator_system_prompt()
 
             if previous_id is None:
                 response = _create_response(

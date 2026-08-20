@@ -22,6 +22,8 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("who_am_i", names)
         self.assertIn("ask_user", names)
         self.assertIn("list_open_apps", names)
+        self.assertIn("http_get", names)
+        self.assertIn("web_search", names)
         self.assertIn("set_timer", names)
         self.assertNotIn("computer", names)
         self.assertNotIn("mark_done", names)
@@ -36,6 +38,17 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("set_timer", names)
         self.assertNotIn("start_task", names)
         self.assertNotIn("give_response_to_user", names)
+
+    def test_orchestrator_can_omit_start_task(self) -> None:
+        with patch("mcp_client.mcp_openai_tools", return_value=[]):
+            names = [
+                t.get("name") or t.get("type")
+                for t in tr.orchestrator_tools(exclude=frozenset({"start_task"}))
+            ]
+        self.assertNotIn("start_task", names)
+        self.assertIn("give_response_to_user", names)
+        self.assertIn("http_get", names)
+        self.assertIn("web_search", names)
 
     def test_shared_list_open_apps(self) -> None:
         with patch(

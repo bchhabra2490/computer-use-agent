@@ -79,12 +79,25 @@ class FlagTests(unittest.TestCase):
 
     def test_enqueue_and_consume_utterance(self) -> None:
         self.assertFalse(st.utterance_pending())
+        st.set_reply_sink("mac")
         st.enqueue_utterance("  play a song  ")
         self.assertTrue(st.utterance_pending())
         self.assertEqual(st.consume_utterance(), "play a song")
-        self.assertEqual(st.reply_sink(), "phone")
+        self.assertEqual(st.reply_sink(), "mac")
         self.assertFalse(st.utterance_pending())
         self.assertIsNone(st.consume_utterance())
+
+    def test_phone_mic_routes_reply_to_phone(self) -> None:
+        st.set_reply_sink("mac")
+        st.enqueue_utterance("hello", input_kind="mic")
+        self.assertEqual(st.consume_utterance(), "hello")
+        self.assertEqual(st.reply_sink(), "phone")
+
+    def test_photo_utterance_keeps_mac_sink(self) -> None:
+        st.set_reply_sink("mac")
+        st.enqueue_utterance("describe this", photo=True, input_kind="photo")
+        self.assertEqual(st.consume_utterance(), "describe this")
+        self.assertEqual(st.reply_sink(), "mac")
 
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")

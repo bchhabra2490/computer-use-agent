@@ -1,0 +1,29 @@
+{
+  "name": "raspberry-pi-gpio-pinout",
+  "match": [
+    "raspberry pi gpio 40-pin pinout diagram",
+    "raspberry pi gpio pinout",
+    "gpio 40-pin header pinout",
+    "raspberry pi 40 pin pinout diagram"
+  ],
+  "params": [
+    "query"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/search?q={{query}}"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Pull up the Raspberry Pi GPIO 40-pin header pinout diagram",
+  "match_templates": [
+    "search for {{query}} on Google",
+    "{{query}} pinout diagram",
+    "raspberry pi {{query}}"
+  ],
+  "leftover": "Click a search result (e.g., pinout.xyz or SparkFun) to open the full diagram, then open the image in a new tab or save it if needed."
+}

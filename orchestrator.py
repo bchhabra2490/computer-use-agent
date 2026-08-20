@@ -97,6 +97,16 @@ from mcp_client import (
     stop_mcp,
 )
 from midtask import MIDTASK_ROUTE, classify_midtask
+
+try:
+    from fastlane import FASTLANE, FASTLANE_LOCAL, FASTLANE_MODEL, try_fastlane, execute_hit, warmup_local
+except Exception:  # pragma: no cover - import safety
+    FASTLANE = False
+    FASTLANE_LOCAL = False
+    FASTLANE_MODEL = ""
+    try_fastlane = None  # type: ignore[assignment]
+    execute_hit = None  # type: ignore[assignment]
+    warmup_local = None  # type: ignore[assignment]
 from session import Session, bind_session, get_session
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
@@ -931,6 +941,33 @@ def _listen_command(
     return command or None
 
 
+def _try_fastlane_utterance(client: OpenAI, utterance: str) -> str | None:
+    """
+    Accuracy-first smart-home fast path.
+    Returns barge-in text if speech was interrupted, "" if handled, None to use cloud.
+    """
+    if not FASTLANE or try_fastlane is None or execute_hit is None:
+        return None
+    if phone_photo_pending() or _phone_photo_in_session:
+        return None
+    hit = try_fastlane(utterance)
+    if hit is None:
+        return None
+    print(
+        f"[fastlane] lane {hit.lane}: {hit.node}/{hit.component} {hit.action}"
+        + (f" ({hit.detail})" if hit.detail else ""),
+        flush=True,
+    )
+    get_session().enter("thinking", f"fastlane {hit.lane}")
+    ok, spoken = execute_hit(hit)
+    if not ok:
+        # Do not invent success — fall through so cloud can diagnose / retry.
+        print(f"[fastlane] execute failed — cloud fallback: {spoken}", flush=True)
+        return None
+    barged = _speak(client, spoken)
+    return barged if barged else ""
+
+
 def _queue_after_current(client: OpenAI, goal: str, *, user_said: str = "") -> None:
     item = jobq.enqueue_inbox(goal, user_said=user_said or goal)
     if item is None:
@@ -1239,6 +1276,26 @@ def _supervise_agent(
             if job.done.is_set():
                 break
             continue
+
+        # Deterministic hardware only while CU runs (no local LLM — keep CU path clean).
+        if FASTLANE and try_fastlane is not None and execute_hit is not None:
+            busy_hit = try_fastlane(command, allow_local=False)
+            if busy_hit is not None:
+                print(
+                    f"[fastlane] lane {busy_hit.lane} (busy): "
+                    f"{busy_hit.node}/{busy_hit.component} {busy_hit.action}",
+                    flush=True,
+                )
+                ok, spoken = execute_hit(busy_hit)
+                if ok:
+                    barged = _speak(client, spoken)
+                    if barged:
+                        try:
+                            publisher.send(barged)
+                        except Exception as e:
+                            print(f"[orchestrator] bus send failed: {e}")
+                    continue
+                print(f"[fastlane] busy execute failed — midtask fallback: {spoken}", flush=True)
 
         _dispatch_busy_utterance(
             client,
@@ -1692,6 +1749,9 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     except BaseException as e:
         print(f"[orchestrator] MCP start error: {e}", flush=True)
 
+    if FASTLANE and FASTLANE_LOCAL and warmup_local is not None:
+        threading.Thread(target=warmup_local, name="fastlane-warmup", daemon=True).start()
+
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
     jobq.reset()
@@ -1702,7 +1762,12 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         print(
             f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} "
             "(TTS_CONFIRM_HEARD); "
-            f"mid-task route={'on' if MIDTASK_ROUTE else 'off'} (MIDTASK_ROUTE)",
+            f"mid-task route={'on' if MIDTASK_ROUTE else 'off'} (MIDTASK_ROUTE); "
+            f"fastlane={'on' if FASTLANE else 'off'}"
+            + (
+                f"/local={FASTLANE_MODEL}" if FASTLANE and FASTLANE_LOCAL else ""
+            )
+            + " (FASTLANE)",
             flush=True,
         )
         # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
@@ -1783,6 +1848,16 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 _phone_photo_in_session = False
                 sess.enter_and_log("done", "Session ended")
                 return
+
+            fast = _try_fastlane_utterance(client, utterance)
+            if fast is not None:
+                if fast:
+                    pending = fast
+                else:
+                    print("[orchestrator] ready for next task.")
+                    sess.enter("ready", "Waiting for next request")
+                    audio.cooldown()
+                continue
 
             sess.enter("thinking", utterance[:100])
             jpeg = None

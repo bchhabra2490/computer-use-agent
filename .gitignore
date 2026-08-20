@@ -14,3 +14,4 @@ memory/screens/*
 traces/*.json
 !traces/.gitkeep
 mcp.json
+mqtt.log

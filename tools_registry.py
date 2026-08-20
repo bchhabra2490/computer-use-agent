@@ -77,11 +77,14 @@ GIVE_RESPONSE_TOOL = {
     "type": "function",
     "name": "give_response_to_user",
     "description": (
-        "Speak the answer once at an appropriate length for speech, then stop. "
-        "Complete but concise — not a teaser and not a long lecture. "
-        "Do not ask questions here (use ask_user). Do not say you will wait, "
-        "that you are ready, or recap the same result a second time. "
-        "Set end_session=true ONLY when the user says goodbye / quit."
+        "Speak to the user. You may call this more than once in a turn: set "
+        "final=false for a short preface or partial chunk when more speech will "
+        "follow immediately; set final=true only when this message fully answers "
+        "their ask (then stop). Prefer one final call with the full answer when you "
+        "can. Complete but concise — not a long lecture. Do not ask questions here "
+        "(use ask_user). Do not say you will wait, that you are ready, or recap the "
+        "same result a second time. Set end_session=true ONLY when the user says "
+        "goodbye / quit."
     ),
     "parameters": {
         "type": "object",
@@ -91,9 +94,17 @@ GIVE_RESPONSE_TOOL = {
                 "description": (
                     "What to say aloud. Match depth to the question: one or two "
                     "sentences for simple facts; brief coverage of each part for "
-                    "comparisons or specs. Natural spoken sentences — no teaser, "
-                    "no filler. Use titles and names, not raw URLs or https links "
+                    "comparisons or specs. Natural spoken sentences — no filler. "
+                    "Use titles and names, not raw URLs or https links "
                     "(painful to hear). No markdown."
+                ),
+            },
+            "final": {
+                "type": "boolean",
+                "description": (
+                    "False if another give_response_to_user will follow with more "
+                    "of the answer. True when this speech completes the user's ask "
+                    "and the turn should stop."
                 ),
             },
             "end_session": {
@@ -104,7 +115,7 @@ GIVE_RESPONSE_TOOL = {
                 ),
             },
         },
-        "required": ["message", "end_session"],
+        "required": ["message", "final", "end_session"],
         "additionalProperties": False,
     },
     "strict": True,

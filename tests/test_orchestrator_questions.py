@@ -103,7 +103,10 @@ class RepeatSpeechTests(unittest.TestCase):
         self.assertTrue(_turn_already_spoke(turn))
 
     def test_give_response_closes_turn(self) -> None:
-        call = SimpleNamespace(name="give_response_to_user")
+        call = SimpleNamespace(
+            name="give_response_to_user",
+            arguments='{"message":"Done.","final":true,"end_session":false}',
+        )
         self.assertTrue(
             _give_response_closes_turn(
                 call, {"output": "Spoke to user. end_session=False"}
@@ -118,6 +121,31 @@ class RepeatSpeechTests(unittest.TestCase):
         self.assertFalse(
             _give_response_closes_turn(
                 call, {"output": "Speech interrupted. User then said: stop."}
+            )
+        )
+        partial = SimpleNamespace(
+            name="give_response_to_user",
+            arguments='{"message":"Listing next.","final":false,"end_session":false}',
+        )
+        self.assertFalse(
+            _give_response_closes_turn(
+                partial,
+                {
+                    "output": (
+                        "Spoke to user (more coming). final=false — call "
+                        "give_response_to_user again now"
+                    )
+                },
+            )
+        )
+        # Missing final defaults to close (backward compatible).
+        legacy = SimpleNamespace(
+            name="give_response_to_user",
+            arguments='{"message":"Done.","end_session":false}',
+        )
+        self.assertTrue(
+            _give_response_closes_turn(
+                legacy, {"output": "Spoke to user. end_session=False"}
             )
         )
 

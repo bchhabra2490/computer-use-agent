@@ -183,20 +183,24 @@ Rules:
 - Call ask_user when a required detail is missing (which app, which account, confirm
   destructive work, how to split issues, labels). One short spoken question — never a
   numbered list in a message or in give_response_to_user.
-- give_response_to_user: match length to the question — complete but concise for speech.
-  Answer the substance they asked for; never a teaser ("I'll list…" without the list)
-  and never a lecture (no filler, repetition, or off-topic padding).
+- give_response_to_user: speak to the user. Use final=false for a short preface or
+  partial chunk when another give_response will follow immediately with the rest;
+  set final=true only when this speech fully answers their ask (then stop).
+  Match length to the question — complete but concise for speech. Prefer putting the
+  full answer in one final call when you can. Never a lecture (no filler or padding).
   Simple fact or yes/no → one or two sentences. Comparisons, specs, or multi-part
   questions → cover every part they asked for, briefly. "Go ahead" / "tell me more"
   → deliver what you offered at that same depth, not longer.
   Write for speech: natural sentences; titles and names instead of raw URLs or
   https links (painful to hear); no markdown; no file paths unless asked.
-  After give_response_to_user, STOP — do not emit a plain message or speak again.
-  Never say “I’ll wait”, “I’m ready”, or repeat that you marked the task done.
+  After give_response_to_user with final=true, STOP — do not emit a plain message
+  or speak again. Never say “I’ll wait”, “I’m ready”, or repeat that you marked the
+  task done.
 - After each start_task, you receive that task's result plus the full history of tasks
   already run in this session. Use that history to decide:
-  - If the user's request is fully satisfied → give_response_to_user ONCE with an
-    appropriate spoken summary, then stop. The runtime already listens next.
+  - If the user's request is fully satisfied → give_response_to_user ONCE with
+    final=true and an appropriate spoken summary, then stop. The runtime already
+    listens next.
   - If a distinct remaining step is still needed → start_task with only the leftover work.
   - Do not restart a task that already succeeded just to rephrase it.
 - Stay in the conversation after completing work. Only set end_session=true when the
@@ -429,15 +433,29 @@ def _turn_already_spoke(turn: TurnTrace | None) -> bool:
     return any(kind == "spoken" for kind, _ in turn.steps)
 
 
+def _give_response_final_flag(call) -> bool:
+    """Whether this give_response should end the tool loop (default True if omitted)."""
+    try:
+        args = json.loads(getattr(call, "arguments", None) or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return True
+    if "final" not in args:
+        return True
+    return bool(args.get("final"))
+
+
 def _give_response_closes_turn(call, out: dict | None) -> bool:
-    """True when a statement was spoken and the model must not talk again."""
+    """True when a final spoken answer was delivered and the model must stop."""
     if getattr(call, "name", None) != "give_response_to_user" or not out:
         return False
     text = str(out.get("output") or "")
     if "captured their answer" in text or text.startswith("Speech interrupted"):
         return False
-    return text.startswith("Spoke to user")
-
+    if "more coming" in text:
+        return False
+    if not text.startswith("Spoke to user"):
+        return False
+    return _give_response_final_flag(call)
 
 def _listen_for_answer(client: OpenAI) -> str:
     """Capture a spoken reply without requiring the wake word."""
@@ -1274,6 +1292,7 @@ def _handle_tool(
         if turn is not None and message:
             turn.add("spoken", message)
         end_session = bool(args.get("end_session"))
+        speech_final = _give_response_final_flag(call)
         farewell = bool(
             re.search(
                 r"\b(goodbye|good bye|bye|quit|exit|stop listening|see you)\b",
@@ -1341,6 +1360,20 @@ def _handle_tool(
                 output = f"Spoke to user. end_session={end_session}"
         else:
             output = f"Spoke to user. end_session={end_session}"
+
+        if (
+            not handled_barge
+            and not end_session
+            and message
+            and output.startswith("Spoke to user")
+            and not speech_final
+        ):
+            output = (
+                "Spoke to user (more coming). final=false — call give_response_to_user "
+                "again now with the next chunk or the full remaining answer; set "
+                "final=true when the user's ask is fully answered."
+            )
+            print("[orchestrator] give_response final=false — continuing for more speech", flush=True)
 
         # give_response does not open the mic. If the model asked a question
         # here anyway, listen without a wake word so the user can answer.
@@ -1582,9 +1615,9 @@ def _process_response(
                         f"{side_block}"
                         "Decide next:\n"
                         "- If the user's request is fully satisfied, call "
-                        "give_response_to_user ONCE with an appropriate spoken summary "
-                        "(titles/names, not raw URLs), then stop. Do not recap "
-                        "again in a message.\n"
+                        "give_response_to_user ONCE with final=true and an appropriate "
+                        "spoken summary (titles/names, not raw URLs), then stop. Do not "
+                        "recap again in a message.\n"
                         "- If they also had a side quest (weather, timers, facts), "
                         "you already handled it — answer follow-ups from that log.\n"
                         "- If distinct desktop work remains, call start_task with only "
@@ -1601,7 +1634,7 @@ def _process_response(
 
         if close_after_speech:
             print(
-                "[orchestrator] already spoke — not asking the model to recap",
+                "[orchestrator] give_response final=true — not asking the model to recap",
                 flush=True,
             )
             return response, end_session, outputs

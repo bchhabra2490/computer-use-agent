@@ -14,6 +14,11 @@ import tools_registry as tr  # noqa: E402
 
 
 class ToolRegistryTests(unittest.TestCase):
+    def test_give_response_requires_final(self) -> None:
+        props = tr.GIVE_RESPONSE_TOOL["parameters"]["properties"]
+        self.assertIn("final", props)
+        self.assertIn("final", tr.GIVE_RESPONSE_TOOL["parameters"]["required"])
+
     def test_orchestrator_has_start_task_not_computer(self) -> None:
         with patch("mcp_client.mcp_openai_tools", return_value=[]):
             names = [t.get("name") or t.get("type") for t in tr.orchestrator_tools()]

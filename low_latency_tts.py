@@ -46,9 +46,12 @@ from tts import (
     synthesize,
 )
 
-# Lower defaults = sooner first audio; still large enough for natural clauses.
-_MIN_CHARS = int(os.environ.get("TTS_CHUNK_MIN_CHARS", "20"))
-_MAX_CHARS = int(os.environ.get("TTS_CHUNK_MAX_CHARS", "100"))
+# Prefer fewer, longer chunks: each Sarvam/OpenAI synth call pays RTT.
+# Sentence boundaries first; commas only when a chunk is already long.
+_MIN_CHARS = int(os.environ.get("TTS_CHUNK_MIN_CHARS", "40"))
+_MAX_CHARS = int(os.environ.get("TTS_CHUNK_MAX_CHARS", "220"))
+# Soft floor before allowing comma/semicolon cuts (avoids "Safety notes," spam).
+_COMMA_MIN_CHARS = int(os.environ.get("TTS_CHUNK_COMMA_MIN_CHARS", "120"))
 _WARMUP = os.environ.get("TTS_WARMUP", "1").strip().lower() not in {
     "0",
     "false",
@@ -56,6 +59,8 @@ _WARMUP = os.environ.get("TTS_WARMUP", "1").strip().lower() not in {
     "off",
 }
 _STOP = object()
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_BREAK = re.compile(r"(?<=[,;:])\s+")
 
 
 def _timestamp() -> str:
@@ -348,10 +353,15 @@ class LowLatencyTTS:
             cut = -1
             if len(text) >= _MIN_CHARS:
                 window = text[:_MAX_CHARS]
-                matches = list(re.finditer(r"(?<=[.!?])\s+|(?<=[,;:])\s+", window))
-                if matches:
-                    cut = matches[-1].end()
-                elif len(text) >= _MAX_CHARS:
+                # Prefer end of sentence so we don't pay one synth RTT per comma.
+                sentence = list(_SENTENCE_BREAK.finditer(window))
+                if sentence:
+                    cut = sentence[-1].end()
+                elif len(window) >= _COMMA_MIN_CHARS:
+                    clause = list(_CLAUSE_BREAK.finditer(window))
+                    if clause:
+                        cut = clause[-1].end()
+                if cut < 0 and len(text) >= _MAX_CHARS:
                     space = window.rfind(" ")
                     cut = space + 1 if space >= _MIN_CHARS else _MAX_CHARS
             if cut < 0:

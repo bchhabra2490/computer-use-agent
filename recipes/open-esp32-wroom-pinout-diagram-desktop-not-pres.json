@@ -1,0 +1,25 @@
+{
+  "name": "open-esp32-wroom-pinout-diagram-desktop-not-pres",
+  "match": [
+    "open",
+    "esp32",
+    "wroom",
+    "pinout",
+    "diagram",
+    "desktop",
+    "not",
+    "present"
+  ],
+  "params": [],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32_datasheet_en.pdf"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Open the ESP32-WROOM-32 pinout diagram on the Desktop (or, if not present, download the Espressif ESP32-WROOM-32 datasheet and open the module pin layout/figure)."
+}

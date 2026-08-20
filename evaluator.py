@@ -152,6 +152,8 @@ def coach_agent(
     log: TaskLog,
     screenshot_b64: str | None,
     step_n: int,
+    user_said: str = "",
+    display_context: str = "",
 ) -> str | None:
     """
     Periodic coach. Returns a user-message string to inject, or None.
@@ -160,29 +162,61 @@ def coach_agent(
     if EVAL_EVERY <= 0:
         return None
 
-    recent = log.steps_for_prompt(max_chars=6_000)
+    recent = log.steps_for_eval(max_chars=10_000)
+    highlights = log.eval_highlights()
+    highlight_lines: list[str] = []
+    if highlights.get("skills_loaded"):
+        highlight_lines.append("Skills loaded: " + ", ".join(highlights["skills_loaded"]))
+    if highlights.get("recipes"):
+        highlight_lines.append("Recipe / handoff:\n- " + "\n- ".join(highlights["recipes"]))
+    if highlights.get("user_midtask"):
+        highlight_lines.append(
+            "User mid-task updates:\n- " + "\n- ".join(highlights["user_midtask"])
+        )
+    if highlights.get("ask_user"):
+        highlight_lines.append("ask_user so far:\n- " + "\n- ".join(highlights["ask_user"]))
+    highlight_blob = "\n".join(highlight_lines).strip()
+    original = (user_said or "").strip()
+    occupancy = (display_context or "").strip()
+    if len(occupancy) > 2_500:
+        occupancy = occupancy[:2_500] + "\n… (truncated)"
+
     instructions = (
         "You are a concise coach for a desktop computer-use agent. "
-        "Given the goal, recent steps, and current screenshot, guide the next actions. "
+        "You receive the goal, structured run facts, recent steps, live display "
+        "occupancy when available, and the current screenshot. "
+        "Judge progress against the goal and what is visible now. "
         "Do not invent UI that is not visible. Prefer concrete, short guidance. "
+        "If a skill was loaded, check whether its remaining checklist still applies "
+        "or if the screen already shows those steps done. "
+        "If the user sent mid-task updates, treat them as higher priority than old plan. "
         "If the goal appears satisfied, say so. If the agent is looping or lost, say so. "
         "Starting media playback is done — do not tell the agent to sleep for duration, "
         "use macOS say, or wait in Terminal until a song or video finishes."
     )
+    prompt_parts = [
+        f"Goal:\n{task}\n",
+    ]
+    if original and original != task.strip():
+        prompt_parts.append(f"Original user request:\n{original}\n")
+    if highlight_blob:
+        prompt_parts.append(f"Run facts:\n{highlight_blob}\n")
+    if occupancy:
+        prompt_parts.append(f"Display occupancy (may be slightly stale):\n{occupancy}\n")
+    prompt_parts.append(
+        f"Computer turns so far: {step_n}\n\n"
+        f"Step history (early setup + recent):\n{recent}\n\n"
+        "Reply JSON only:\n"
+        "{\n"
+        '  "status": "on_track" | "drifting" | "stuck" | "likely_done",\n'
+        '  "guidance": ["short bullet", "..."],\n'
+        '  "next_focus": "one sentence priority"\n'
+        "}"
+    )
     content: list[dict[str, Any]] = [
         {
             "type": "input_text",
-            "text": (
-                f"Goal:\n{task}\n\n"
-                f"Computer turns so far: {step_n}\n\n"
-                f"Recent steps:\n{recent}\n\n"
-                "Reply JSON only:\n"
-                "{\n"
-                '  "status": "on_track" | "drifting" | "stuck" | "likely_done",\n'
-                '  "guidance": ["short bullet", "..."],\n'
-                '  "next_focus": "one sentence priority"\n'
-                "}"
-            ),
+            "text": "\n".join(prompt_parts),
         }
     ]
     if screenshot_b64:

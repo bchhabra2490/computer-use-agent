@@ -138,3 +138,122 @@ class TaskLog:
         if len(text) > max_chars:
             return text[:max_chars] + "\n… (truncated)"
         return text
+
+    def iter_entries(self) -> list[dict[str, Any]]:
+        if not self.steps_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in self.steps_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                rows.append(entry)
+        return rows
+
+    def steps_for_eval(
+        self,
+        *,
+        max_chars: int = 10_000,
+        head: int = 12,
+        tail: int = 40,
+        snippet_chars: int = 280,
+    ) -> str:
+        """
+        Compact step history for the periodic coach.
+
+        Keeps early setup (skills/recipes) plus the latest actions so truncation
+        does not drop how the run started.
+        """
+        # Noisy / huge kinds: keep a one-line summary, skip JSON blobs.
+        skip_data = {
+            "screenshot",
+            "recipe_handoff_screenshot",
+            "router",
+            "skill_proposal",
+            "skill_create",
+        }
+        prefer = {
+            "read_skill",
+            "list_skills",
+            "recipe",
+            "recipe_handoff",
+            "trace_replay",
+            "zmq_message",
+            "zmq_context",
+            "ask_user",
+            "computer_actions",
+            "run_terminal",
+            "mark_done",
+            "message",
+            "evaluator",
+        }
+        entries = self.iter_entries()
+        if not entries:
+            return "(no steps recorded)"
+
+        def _line(entry: dict[str, Any]) -> str:
+            kind = str(entry.get("kind") or "")
+            n = entry.get("n", "?")
+            summary = str(entry.get("summary") or "")
+            out = f"{n}. [{kind}] {summary}"
+            data = entry.get("data")
+            if data is None or kind in skip_data:
+                return out
+            if kind not in prefer and not isinstance(data, (dict, list)):
+                return out
+            snippet = json.dumps(data, ensure_ascii=False)
+            if len(snippet) > snippet_chars:
+                snippet = snippet[:snippet_chars] + "…"
+            return f"{out}\n   {snippet}"
+
+        if len(entries) <= head + tail:
+            chosen = entries
+        else:
+            chosen = entries[:head] + entries[-tail:]
+        lines = [_line(e) for e in chosen]
+        if len(entries) > head + tail:
+            omitted = len(entries) - head - tail
+            lines.insert(head, f"… ({omitted} earlier middle steps omitted) …")
+        text = "\n".join(lines)
+        if len(text) > max_chars:
+            # Prefer keeping the tail (recent actions).
+            return "… (truncated)\n" + text[-(max_chars - 16) :]
+        return text
+
+    def eval_highlights(self) -> dict[str, Any]:
+        """Structured facts the coach should see even if step text is truncated."""
+        skills: list[str] = []
+        recipes: list[str] = []
+        user_msgs: list[str] = []
+        asks: list[str] = []
+        for entry in self.iter_entries():
+            kind = str(entry.get("kind") or "")
+            summary = str(entry.get("summary") or "").strip()
+            data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+            if kind == "read_skill" and summary:
+                name = str(data.get("name") or summary).strip()
+                if name and name not in skills:
+                    skills.append(name)
+            elif kind in {"recipe", "recipe_handoff"} and summary:
+                bit = summary
+                leftover = str(data.get("leftover") or "").strip()
+                if leftover:
+                    bit = f"{summary} | leftover: {leftover[:200]}"
+                recipes.append(bit)
+            elif kind == "zmq_message":
+                text = str(data.get("text") or summary).strip()
+                if text:
+                    user_msgs.append(text[:300])
+            elif kind == "ask_user" and summary:
+                asks.append(summary[:300])
+        return {
+            "skills_loaded": skills[-8:],
+            "recipes": recipes[-4:],
+            "user_midtask": user_msgs[-6:],
+            "ask_user": asks[-4:],
+        }

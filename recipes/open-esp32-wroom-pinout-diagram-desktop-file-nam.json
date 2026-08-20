@@ -1,0 +1,25 @@
+{
+  "name": "open-esp32-wroom-pinout-diagram-desktop-file-nam",
+  "match": [
+    "open",
+    "esp32",
+    "wroom",
+    "pinout",
+    "diagram",
+    "desktop",
+    "file",
+    "named"
+  ],
+  "params": [],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://documentation.espressif.com/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Open the ESP32\u2011S3 WROOM-1 pinout diagram on the desktop (file named like ESP32_WROOM_pinout or ESP32\u2011S3_WROOM-1 datasheet). If it's not present, download and open the official Espressif ESP32\u2011S3 WROOM-1 datasheet/pinout PDF."
+}

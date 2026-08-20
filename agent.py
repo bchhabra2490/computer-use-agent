@@ -986,12 +986,23 @@ def run(
 
             # Periodic coach after every EVAL_EVERY computer turns.
             if EVAL_EVERY > 0 and computer_calls and steps % EVAL_EVERY == 0:
+                live_desktop = ""
+                try:
+                    live_desktop = assemble_context(
+                        monitors=monitors,
+                        include_geometry=False,
+                        persist=False,
+                    ).displays
+                except Exception as e:
+                    print(f"[eval] occupancy refresh failed: {e}", flush=True)
                 tip = coach_agent(
                     client,
                     task=task,
                     log=log,
                     screenshot_b64=last_shot_b64,
                     step_n=steps,
+                    user_said=user_said or "",
+                    display_context=live_desktop,
                 )
                 if tip:
                     next_input.append(_user_input_item(tip))

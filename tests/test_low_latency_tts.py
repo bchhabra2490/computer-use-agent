@@ -11,8 +11,9 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-os.environ["TTS_CHUNK_MIN_CHARS"] = "20"
-os.environ["TTS_CHUNK_MAX_CHARS"] = "100"
+os.environ["TTS_CHUNK_MIN_CHARS"] = "40"
+os.environ["TTS_CHUNK_MAX_CHARS"] = "220"
+os.environ["TTS_CHUNK_COMMA_MIN_CHARS"] = "120"
 os.environ["TTS_WARMUP"] = "0"
 os.environ["TTS_KEYBOARD_BARGE"] = "0"
 
@@ -108,6 +109,29 @@ class PublicApiTests(unittest.TestCase):
             text = eng.log_path.read_text(encoding="utf-8")
             self.assertIn("event=chunk_available", text)
             self.assertIn("event=first_audio_play", text)
+        finally:
+            eng.close()
+
+
+    @patch("low_latency_tts.play_wav")
+    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    def test_prefers_sentence_over_comma(self, synth, play) -> None:
+        eng = _engine()
+        try:
+            eng.start_stream("r4")
+            eng.bind_call("r4", "c4")
+            # Many commas; should not emit a tiny chunk at each comma.
+            eng.add_text_chunk(
+                "Safety notes: only short BOOT to GND, never short 5V to GND, "
+                "use insulated jumpers. "
+            )
+            eng.add_text_chunk("You are ready to flash now.")
+            eng.stop_stream()
+            eng.wait_call("c4", timeout=2.0)
+            eng.acknowledge_call("c4")
+            # One or two synths, not one-per-comma.
+            self.assertLessEqual(synth.call_count, 3)
+            self.assertTrue(play.called)
         finally:
             eng.close()
 

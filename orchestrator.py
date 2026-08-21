@@ -102,13 +102,21 @@ from wake import (
 )
 
 try:
+    import smallest_orchestrator as smallest_brain
+except Exception:  # pragma: no cover - optional
+    smallest_brain = None  # type: ignore[assignment]
+
+try:
     from low_latency_tts import LowLatencyTTS, decoded_message_prefix, extract_message_field
 except Exception:  # pragma: no cover - optional at import time
     LowLatencyTTS = None  # type: ignore[misc, assignment]
     decoded_message_prefix = None  # type: ignore[misc, assignment]
     extract_message_field = None  # type: ignore[misc, assignment]
 
-MODEL = os.environ.get("ORCHESTRATOR_MODEL", "gpt-5-mini")
+_USING_SMALLEST = bool(smallest_brain is not None and smallest_brain.using_smallest())
+_DEFAULT_MODEL = "electron" if _USING_SMALLEST else "gpt-5-mini"
+MODEL = os.environ.get("ORCHESTRATOR_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+USING_SMALLEST = _USING_SMALLEST
 TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "0",
     "false",
@@ -186,6 +194,9 @@ Rules:
     appropriate spoken summary, then stop. The runtime already listens next.
   - If a distinct remaining step is still needed → start_task with only the leftover work.
   - Do not restart a task that already succeeded just to rephrase it.
+- The computer-use agent also receives that prior-task history in its prompt, so
+  leftover goals can continue from what already happened (and what is on screen).
+  Still pass only the leftover GOAL in start_task.task — not a full recap.
 - Stay in the conversation after completing work. Only set end_session=true when the
   user clearly says goodbye, quit, stop listening, or similar.
 - While a computer task is running, the user can interrupt/update by saying
@@ -213,9 +224,17 @@ Available desktop skills the computer agent can load:
 class AgentJob:
     """Background computer-agent run + ZeroMQ inbox handle."""
 
-    def __init__(self, task: str, call_id: str, *, match_text: str | None = None):
+    def __init__(
+        self,
+        task: str,
+        call_id: str,
+        *,
+        match_text: str | None = None,
+        prior_tasks: list[dict[str, str]] | None = None,
+    ):
         self.task = task
         self.match_text = (match_text or task).strip() or task
+        self.prior_tasks = list(prior_tasks or [])
         self.call_id = call_id
         self.done = threading.Event()
         self.result: str | None = None
@@ -397,12 +416,17 @@ def _create_response(
     **kwargs: Any,
 ):
     """
-    Create a Responses API turn.
+    Create a Responses API turn (OpenAI) or an Electron chat+tools turn.
 
     When streaming TTS is enabled, partial ``give_response_to_user`` message
-    arguments are fed into LowLatencyTTS as they arrive. Falls back to a
-    non-streaming create on error.
+    arguments (and Electron filler content) are fed into LowLatencyTTS as they
+    arrive. Falls back to a non-streaming create on error.
     """
+    if USING_SMALLEST and smallest_brain is not None:
+        session = smallest_brain.get_session(str(kwargs.get("model") or MODEL))
+        stream_tts = llm_tts if (TTS_STREAM and llm_tts is not None) else None
+        return session.create(llm_tts=stream_tts, **kwargs)
+
     use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
     if not use_stream:
         return client.responses.create(**kwargs)
@@ -567,6 +591,7 @@ def _start_agent_thread(
                 ask_user_bridge=ask_bridge,
                 status_agent_id=job.call_id,
                 user_said=job.match_text,
+                prior_tasks=job.prior_tasks,
             )
         except BaseException as e:  # noqa: BLE001 — capture for main thread
             job.error = e
@@ -1147,6 +1172,7 @@ def _handle_tool(
                 task=spec.goal,
                 call_id=call.call_id,
                 match_text=spec.match_text,
+                prior_tasks=task_history,
             )
             _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
             _speak_later(client, "Starting that now.")
@@ -1354,6 +1380,13 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pass
 
     client = OpenAI()
+    if USING_SMALLEST and smallest_brain is not None:
+        threading.Thread(
+            target=smallest_brain.warmup,
+            args=(MODEL,),
+            name="electron-warmup",
+            daemon=True,
+        ).start()
     audio = AudioSession(client, session=sess)
     bind_audio(audio)
     llm_tts = None
@@ -1399,8 +1432,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     try:
         sess.enter_and_log("ready", "Orchestrator starting")
         print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
+        brain = f"smallest/{MODEL}" if USING_SMALLEST else f"openai/{MODEL}"
         print(
-            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} " "(TTS_CONFIRM_HEARD)",
+            f"[orchestrator] brain={brain}; "
+            f"I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} "
+            "(TTS_CONFIRM_HEARD)",
             flush=True,
         )
         # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.

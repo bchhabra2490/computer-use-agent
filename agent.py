@@ -89,6 +89,39 @@ _RECIPE_SKILL = {
 }
 
 
+def format_prior_tasks(
+    prior_tasks: list[dict[str, str]] | None,
+    *,
+    max_entries: int = 5,
+    max_task_chars: int = 240,
+    max_result_chars: int = 500,
+) -> str:
+    """Compact session history for the computer-use agent's first prompt.
+
+    Empty when there is nothing prior. Truncates so long mark_done text does not
+    dominate the new goal.
+    """
+    if not prior_tasks:
+        return ""
+    entries = list(prior_tasks)[-max(1, max_entries) :]
+    blocks: list[str] = []
+    for i, entry in enumerate(entries, start=1):
+        task = (entry.get("task") or "").strip() or "(unknown)"
+        result = (entry.get("result") or "").strip() or "(no result)"
+        if len(task) > max_task_chars:
+            task = task[: max_task_chars - 1].rstrip() + "…"
+        if len(result) > max_result_chars:
+            result = result[: max_result_chars - 1].rstrip() + "…"
+        blocks.append(f"### Prior task {i}\nRequest:\n{task}\n\nResult:\n{result}")
+    body = "\n\n".join(blocks)
+    return (
+        "Prior computer tasks in this session (context only — do not redo work "
+        "that already succeeded unless the new goal requires it; prefer continuing "
+        "from what is already on screen):\n"
+        f"{body}"
+    )
+
+
 def _handoff_skill_blurb(recipe_name: str) -> str:
     hint = _RECIPE_SKILL.get(recipe_name or "")
     if not hint:
@@ -648,6 +681,7 @@ def run(
     ask_user_bridge=None,
     status_agent_id: str | None = None,
     user_said: str | None = None,
+    prior_tasks: list[dict[str, str]] | None = None,
 ) -> str:
     """Run the computer-use loop. Returns a status string for the orchestrator.
 
@@ -657,6 +691,8 @@ def run(
     (main-thread TTS/STT) instead of capturing the mic from this worker thread.
     `user_said` is the spoken request used to match recipes/traces. `task` is
     the goal (user words or a short leftover step), never a UI screenplay.
+    `prior_tasks` is this session's completed computer tasks (task + result),
+    injected into the first model prompt so follow-ups can continue, not restart.
     """
     client = OpenAI()
     ensure_tray_running()
@@ -711,11 +747,19 @@ def run(
         print(mcp_catalog)
     if not_to_do:
         print(not_to_do)
+    prior_block = format_prior_tasks(prior_tasks)
     log.record(
         "start",
         task,
-        {"display": display_ctx, "skills": [s.name for s in skills], "voice": voice},
+        {
+            "display": display_ctx,
+            "skills": [s.name for s in skills],
+            "voice": voice,
+            "prior_tasks": len(prior_tasks or []),
+        },
     )
+    if prior_block:
+        print(f"[agent] prior tasks in context: {len(prior_tasks or [])}", flush=True)
 
     def _pending_user_context() -> str | None:
         if message_inbox is None:
@@ -809,9 +853,11 @@ def run(
         if message_inbox is not None:
             print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
 
+        prior_prefix = f"{prior_block}\n\n" if prior_block else ""
         if recipe_handoff:
             skill_block = _handoff_skill_blurb(recipe_result.recipe.name)
             prompt_body = (
+                f"{prior_prefix}"
                 f"{model_task}\n\n"
                 f"Desktop occupancy:\n{display_ctx}\n\n"
                 f"{skill_block}\n\n"
@@ -822,6 +868,7 @@ def run(
             )
         else:
             prompt_body = (
+                f"{prior_prefix}"
                 f"{model_task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"

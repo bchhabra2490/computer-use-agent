@@ -1,9 +1,10 @@
 """
-Text-to-speech for agent prompts via OpenAI or Sarvam + local playback.
+Text-to-speech for agent prompts via OpenAI, Sarvam, or Smallest Lightning.
 
 Providers (TTS_PROVIDER):
   - openai — gpt-4o-mini-tts (default voice onyx) with steerable delivery
   - sarvam — Bulbul streaming TTS (default bulbul:v3 / shubh)
+  - smallest — Lightning v3.1 HTTP TTS (default voice magnus; needs SMALLEST_API_KEY)
 
 Playback on macOS uses `afplay` (system audio path) to avoid PortAudio duplex
 crackle. Wake-word barge-in ("Hey Jarvis") and keyboard barge-in (Space / Esc /
@@ -30,7 +31,7 @@ from openai import OpenAI
 # numpy / sounddevice are loaded lazily so afplay-only paths (and streaming TTS
 # workers) do not import PortAudio at module import time.
 
-# openai | sarvam
+# openai | sarvam | smallest
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
 
 TTS_MODEL = "gpt-4o-mini-tts"
@@ -47,6 +48,10 @@ if TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}:
     TTS_VOICE = (
         os.environ.get("TTS_VOICE") or os.environ.get("SARVAM_TTS_VOICE") or "shubh"
     ).strip().lower() or "shubh"
+elif TTS_PROVIDER in {"smallest", "lightning", "waves"}:
+    TTS_VOICE = (
+        os.environ.get("TTS_VOICE") or os.environ.get("SMALLEST_TTS_VOICE") or "magnus"
+    ).strip() or "magnus"
 else:
     TTS_VOICE = (os.environ.get("TTS_VOICE") or "onyx").strip() or "onyx"
 
@@ -72,6 +77,10 @@ _SPEAK_LATER_THREAD: threading.Thread | None = None
 
 def _use_sarvam() -> bool:
     return TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}
+
+
+def _use_smallest() -> bool:
+    return TTS_PROVIDER in {"smallest", "lightning", "waves"}
 
 
 def _wake_blob() -> str:
@@ -101,6 +110,22 @@ def active_tts_voice() -> str:
         jarvis = (
             os.environ.get("TTS_VOICE_JARVIS") or os.environ.get("SARVAM_TTS_VOICE_JARVIS") or "shubh"
         ).strip().lower() or "shubh"
+        if "rekha" in blob:
+            return rekha
+        if "jarvis" in blob:
+            return jarvis
+        return TTS_VOICE
+    if _use_smallest():
+        rekha = (
+            os.environ.get("TTS_VOICE_REKHA")
+            or os.environ.get("SMALLEST_TTS_VOICE_REKHA")
+            or TTS_VOICE
+        ).strip() or TTS_VOICE
+        jarvis = (
+            os.environ.get("TTS_VOICE_JARVIS")
+            or os.environ.get("SMALLEST_TTS_VOICE_JARVIS")
+            or TTS_VOICE
+        ).strip() or TTS_VOICE
         if "rekha" in blob:
             return rekha
         if "jarvis" in blob:
@@ -144,6 +169,11 @@ def synthesize(client: OpenAI, text: str, voice: str | None = None) -> bytes:
         from sarvam_tts import synthesize_wav
 
         return synthesize_wav(text, speaker=voice)
+
+    if _use_smallest():
+        from smallest_tts import synthesize_wav
+
+        return synthesize_wav(text, voice_id=voice)
 
     try:
         speech = client.audio.speech.create(

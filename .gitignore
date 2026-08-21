@@ -16,3 +16,4 @@ traces/*.json
 mcp.json
 .gitignore
 mqtt.log
+docs/

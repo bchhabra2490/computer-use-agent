@@ -43,7 +43,7 @@ import signal
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 from pathlib import Path
 
 from openai import OpenAI
@@ -126,7 +126,7 @@ will not open):
 - give_response_to_user — speak an answer or acknowledgment that does not need a reply
 - who_am_i — read README.md when they ask who you are, what you can do, or about this agent
 - ask_user — ask one short clarifying question aloud, then listen for their answer
-  (no wake word). Use this for any question, confirmation, or choice.
+  (no wake word). **Last resort only** — use after you checked saved memories (below).
 - start_task — run the computer-use agent for real mouse/keyboard/UI work
 - list_memories / read_memory / save_memory — personal facts and per-app notes
   under memory/ (see skill read-memory). Read before asking for a known preference;
@@ -164,12 +164,19 @@ Rules:
   “open Chrome, new tab, wait for load, press Cmd+L”. If they said “show Togo
   on a map”, pass that. After a prior task, pass only the leftover goal
   (“screenshot the map”), not a restart of Chrome.
-- Call read_memory before ask_user when the missing detail may already be stored
-  (name, usernames, usual apps, what was on screen). save_memory for durable
-  facts they state. save_screen_memory when they want the current display stored.
-- Call ask_user when a required detail is missing (which app, which account, confirm
-  destructive work, how to split issues, labels). One short spoken question — never a
-  numbered list in a message or in give_response_to_user.
+- Before ask_user, check whether saved memories already answer the question.
+  The memory catalog below is a preview — contemplate what you need (names, accounts,
+  usual apps, preferences, prior screen context) and whether it might be stored.
+  If it might be, call list_memories and/or read_memory first (personal profile,
+  relevant app notes, screen memories). Only call ask_user when memory cannot
+  supply the answer, or you need live confirmation (destructive work, ambiguous
+  choice between options the user must pick now).
+- save_memory for durable facts they state. save_screen_memory when they want the
+  current display stored.
+- Call ask_user when a required detail is still missing after that memory check
+  (which app, which account, confirm destructive work, how to split issues, labels).
+  One short spoken question — never a numbered list in a message or in
+  give_response_to_user.
 - give_response_to_user: match length to the question — complete but concise for speech.
   Answer the substance they asked for; never a teaser ("I'll list…" without the list)
   and never a lecture (no filler, repetition, or off-topic padding).
@@ -236,6 +243,50 @@ def _format_task_history(history: list[dict[str, str]]) -> str:
     return "\n\n".join(blocks)
 
 
+def _clear_speaker_tag() -> None:
+    """Drop stale voice-ID state when this utterance had no local mic clip."""
+    try:
+        from speaker_id import clear_last_speaker
+
+        clear_last_speaker()
+    except Exception:
+        pass
+
+
+def _log_speaker_round(session_speaker: Any) -> Any:
+    """
+    Read voice ID for this round, update session state, log only (no tool use yet).
+
+    ``session_speaker`` is the last known speaker across orchestrator rounds.
+    Returns the speaker match for this round, or None.
+    """
+    try:
+        from speaker_id import enabled, get_last_speaker
+
+        if not enabled():
+            return session_speaker
+        match = get_last_speaker()
+        if match is None:
+            print("[orchestrator] speaker: unknown", flush=True)
+            status_log("[speaker] unknown")
+            return None
+        if session_speaker is not None and session_speaker.name != match.name:
+            print(
+                f"[orchestrator] speaker changed: "
+                f"{session_speaker.display_name} → {match.display_name}",
+                flush=True,
+            )
+        print(
+            f"[orchestrator] speaker: {match.display_name} ({match.score:.0%})",
+            flush=True,
+        )
+        status_log(f"[speaker] {match.display_name} ({match.score:.0%})")
+        return match
+    except Exception as e:
+        print(f"[orchestrator] speaker: unavailable ({e})", flush=True)
+        return session_speaker
+
+
 def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: bool = False) -> str:
     prefix = ""
     if photo:
@@ -245,18 +296,8 @@ def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: 
             "about this same photo. Do not start_task unless they asked you to "
             "do something on the Mac.\n\n"
         )
-    speaker_line = ""
-    try:
-        from speaker_id import get_last_speaker
-
-        match = get_last_speaker()
-        if match is not None:
-            speaker_line = match.line_for_prompt() + "\n\n"
-    except Exception:
-        pass
     return (
         prefix
-        + speaker_line
         + f"User said: {utterance}\n\n"
         + f"Computer task history so far:\n{_format_task_history(task_history)}"
     )
@@ -821,6 +862,7 @@ def _listen_command(
 
     queued = consume_utterance()
     if queued:
+        _clear_speaker_tag()
         return queued
     if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
         return consume_utterance()
@@ -831,6 +873,7 @@ def _listen_command(
     get_session().enter_and_log("listening", f"{heard} heard — listening")
     remainder = get_wake_remainder()
     if remainder:
+        _clear_speaker_tag()
         set_reply_sink("mac")
         return strip_wake_prefix(remainder).strip() or remainder
     try:
@@ -862,6 +905,8 @@ def _supervise_agent(
     job: AgentJob,
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
+    *,
+    record_speaker: Callable[[], None] | None = None,
 ) -> str:
     """
     Main-thread loop while the agent thread runs.
@@ -955,6 +1000,8 @@ def _supervise_agent(
             command = _confirm_heard(client, command)
             print(f'\n[user] "{command}"')
             status_log(f'[user] "{command}"')
+        if record_speaker is not None:
+            record_speaker()
         low = command.lower().strip()
         if is_mark_done_utterance(command):
             print("[orchestrator] user marked the running task done")
@@ -1121,7 +1168,8 @@ def _handle_tool(
             output = (
                 f"Spoke to user, then captured their answer (no wake word): {answer}. "
                 "Continue with that answer. Further questions must use ask_user "
-                "(one short spoken question, not a numbered list)."
+                "(one short spoken question after checking memories when relevant, "
+                "not a numbered list)."
             )
         print(f"[orchestrator] give_response_to_user → {output}")
 
@@ -1206,6 +1254,7 @@ def _process_response(
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
     user_said: str = "",
+    record_speaker: Callable[[], None] | None = None,
 ) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -1241,7 +1290,8 @@ def _process_response(
                     input=(
                         f"User answered: {answer}\n\n"
                         "Continue the task with this answer. Never put questions in a "
-                        "plain message; call ask_user (one short question) or "
+                        "plain message; call ask_user (one short question, after "
+                        "checking read_memory when relevant) or "
                         "give_response_to_user (statements only)."
                     ),
                 )
@@ -1291,7 +1341,13 @@ def _process_response(
                     close_after_speech = True
 
         if deferred_job is not None:
-            result = _supervise_agent(client, deferred_job, publisher, ask_bridge)
+            result = _supervise_agent(
+                client,
+                deferred_job,
+                publisher,
+                ask_bridge,
+                record_speaker=record_speaker,
+            )
             task_history.append({"task": deferred_job.task, "result": result})
             if turn is not None:
                 turn.add("start_task_result", result or "", max_len=4000)
@@ -1429,6 +1485,19 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         previous_id: str | None = None
         task_history: list[dict[str, str]] = []
         pending_fn_outputs: list[dict] = []
+        session_speaker: Any = None
+
+        def _record_speaker() -> None:
+            nonlocal session_speaker
+            session_speaker = _log_speaker_round(session_speaker)
+
+        try:
+            from speaker_id import enabled as speaker_id_enabled
+
+            if speaker_id_enabled():
+                print("[orchestrator] speaker ID enabled — logging voice each round", flush=True)
+        except Exception:
+            pass
 
         while True:
             if quit_requested():
@@ -1463,6 +1532,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 utterance = _confirm_heard(client, utterance)
             print(f'\n[user] "{utterance}"')
             status_log(f'[user] "{utterance}"')
+            _record_speaker()
             low = utterance.lower().strip()
             if is_mark_done_utterance(utterance):
                 if active_agents():
@@ -1541,6 +1611,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 llm_tts=llm_tts,
                 turn=turn,
                 user_said=utterance,
+                record_speaker=_record_speaker,
             )
             previous_id = response.id
             maybe_extract_run_memories(

@@ -224,7 +224,10 @@ def format_memory_catalog(*, memory_dir: Path | None = None) -> str:
     ]
     if not notes:
         return "No memories saved yet. Use save_memory for facts, or " "save_screen_memory to snapshot the display."
-    lines = ["Saved memories (call read_memory for full text; save_memory / " "save_screen_memory to update):"]
+    lines = [
+        "Saved memories (contemplate whether these answer the user before ask_user; "
+        "call read_memory for full text; save_memory / save_screen_memory to update):"
+    ]
     for note in notes:
         lines.append(f"  - {note.rel}: {_preview(note.text)}")
     return "\n".join(lines)
@@ -929,7 +932,9 @@ READ_MEMORY_TOOL = {
         "(usually name=profile); kind=app is per-application notes "
         "(name=hn, chrome, …); kind=screen is screenshot descriptions. "
         "Pass name=null to load every note of that kind. "
-        "Use before asking the user for a fact that may already be saved."
+        "Use before ask_user — read when a fact you need may already be saved "
+        "(profile, app habits, screen context). Pass name=null to load every note "
+        "of that kind when unsure which file holds the answer."
     ),
     "parameters": {
         "type": "object",

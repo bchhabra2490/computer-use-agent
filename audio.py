@@ -129,6 +129,12 @@ class AudioSession:
 
         queued = consume_utterance()
         if queued:
+            try:
+                from speaker_id import clear_last_speaker
+
+                clear_last_speaker()
+            except Exception:
+                pass
             return queued
 
         if not self.wait_for_wake(should_stop=_stop, prompt=wake_prompt):
@@ -140,6 +146,12 @@ class AudioSession:
         self._phase("listening", f"{heard} heard — listening", log=True)
         remainder = get_wake_remainder()
         if remainder:
+            try:
+                from speaker_id import clear_last_speaker
+
+                clear_last_speaker()
+            except Exception:
+                pass
             set_reply_sink("mac")
             return strip_wake_prefix(remainder).strip() or remainder
         try:

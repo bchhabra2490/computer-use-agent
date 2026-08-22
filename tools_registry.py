@@ -52,10 +52,12 @@ ASK_USER_TOOL = {
     "name": "ask_user",
     "description": (
         "Ask the user a clarifying question aloud and capture their spoken answer "
-        "immediately (no wake word). Required whenever you need a reply — never put "
-        "questions in a plain assistant message or in give_response_to_user. Ask one "
-        "short spoken question, not a numbered list. Under the computer agent the "
-        "orchestrator speaks this so the two loops do not compete for the mic."
+        "immediately (no wake word). **Last resort** — before calling this, contemplate "
+        "whether list_memories / read_memory already has the answer (names, accounts, "
+        "usual apps, preferences, screen context). Only ask when memory cannot supply "
+        "the detail or you need live confirmation (destructive work, ambiguous choice). "
+        "Never put questions in a plain assistant message or in give_response_to_user. "
+        "One short spoken question, not a numbered list."
     ),
     "parameters": {
         "type": "object",

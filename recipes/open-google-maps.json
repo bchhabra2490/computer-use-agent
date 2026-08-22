@@ -1,0 +1,20 @@
+{
+  "name": "open-google-maps",
+  "match": [
+    "open",
+    "google",
+    "maps"
+  ],
+  "params": [],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/maps"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Open Google Maps"
+}

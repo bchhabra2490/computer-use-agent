@@ -1432,9 +1432,22 @@ def listen_once(
         live = ""
         queued = _consume_phone_utterance()
         if queued:
+            try:
+                from speaker_id import clear_last_speaker
+
+                clear_last_speaker()
+            except Exception:
+                pass
             print(f'Heard: "{queued}" (phone)')
             return queued
         try:
+            try:
+                from speaker_id import clear_last_speaker, enabled
+
+                if enabled():
+                    clear_last_speaker()
+            except Exception:
+                pass
             live, wav = listen_realtime(
                 client,
                 prompt=prompt or default_prompt,

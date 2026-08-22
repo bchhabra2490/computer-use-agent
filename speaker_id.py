@@ -110,6 +110,10 @@ def get_last_speaker() -> SpeakerMatch | None:
     return _last_speaker
 
 
+def clear_last_speaker() -> None:
+    set_last_speaker(None)
+
+
 def slug_name(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
     if not slug:

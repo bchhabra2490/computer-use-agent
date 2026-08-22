@@ -22,9 +22,21 @@ Rewrite verbose skill playbooks::
     cua skills condense --name open-app --dry-run
     cua skills merge --dry-run
     cua skills merge
+
+Speaker enrollment (who is talking)::
+
+    cua speaker enroll --name Bharat
+    cua speaker list
+    cua speaker test
+    cua speaker test --verbose
 """
 
 from __future__ import annotations
+
+# Load .env before subcommands read OPENAI_* / TTS_* / etc.
+from envfile import load_dotenv
+
+load_dotenv()
 
 import argparse
 import os
@@ -499,6 +511,41 @@ def main(argv: list[str] | None = None) -> int:
         help="Reject every proposed draft",
     )
 
+    speaker_p = sub.add_parser(
+        "speaker",
+        help="Enroll voices so Jarvis can tell who is speaking",
+    )
+    speaker_sub = speaker_p.add_subparsers(dest="speaker_command", required=True)
+    speaker_enroll_p = speaker_sub.add_parser(
+        "enroll",
+        help="Read three passages aloud to create a voice profile",
+    )
+    speaker_enroll_p.add_argument("--name", default=None, help="Your display name")
+    speaker_enroll_p.add_argument(
+        "--max-seconds",
+        type=float,
+        default=45.0,
+        help="Max seconds per passage recording",
+    )
+    speaker_enroll_p.add_argument(
+        "--speak-prompts",
+        action="store_true",
+        help="Speak brief TTS instructions before each passage",
+    )
+    speaker_sub.add_parser("list", help="List enrolled speakers")
+    speaker_delete_p = speaker_sub.add_parser("delete", help="Remove a speaker profile")
+    speaker_delete_p.add_argument("name", help="Name or slug")
+    speaker_test_p = speaker_sub.add_parser(
+        "test",
+        help="Record once and identify who is speaking",
+    )
+    speaker_test_p.add_argument("--max-seconds", type=float, default=15.0)
+    speaker_test_p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print similarity scores for every enrolled speaker",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
@@ -569,6 +616,22 @@ def main(argv: list[str] | None = None) -> int:
                 memories=args.memories,
                 skills=args.skills,
             )
+        return 2
+    if args.command == "speaker":
+        from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
+
+        if args.speaker_command == "enroll":
+            return cmd_enroll(
+                args.name,
+                max_seconds=args.max_seconds,
+                speak_prompts=args.speak_prompts,
+            )
+        if args.speaker_command == "list":
+            return cmd_list()
+        if args.speaker_command == "delete":
+            return cmd_delete(args.name)
+        if args.speaker_command == "test":
+            return cmd_test(max_seconds=args.max_seconds, verbose=args.verbose)
         return 2
     parser.print_help()
     return 2

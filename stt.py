@@ -15,6 +15,7 @@ import math
 import os
 import queue
 import re
+import select
 import sys
 import threading
 import time
@@ -1031,6 +1032,109 @@ def record_fixed(
     return _float_to_wav(_normalize_peak(pcm), REALTIME_RATE)
 
 
+_ENTER_KEYS = frozenset({b"\n", b"\r"})
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+class _EnterKeyListener:
+    """Background thread: set ``event`` when Enter is pressed on a TTY."""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._old_term = None
+        self._fd: int | None = None
+        self._owned_tty = False
+
+    def start(self) -> None:
+        if sys.platform == "win32":
+            return
+        # Prefer /dev/tty so we do not fight keyboard_barge termios on stdin.
+        try:
+            self._fd = os.open("/dev/tty", os.O_RDONLY)
+            self._owned_tty = True
+        except OSError:
+            if not _stdin_is_tty():
+                return
+            self._fd = sys.stdin.fileno()
+            self._owned_tty = False
+        try:
+            import termios
+            import tty
+
+            self._old_term = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        except Exception:
+            if self._owned_tty and self._fd is not None:
+                os.close(self._fd)
+            self._fd = None
+            self._owned_tty = False
+            self._old_term = None
+            return
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="stt-enter-key",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+        self._thread = None
+        if self._old_term is not None and self._fd is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
+            except Exception:
+                pass
+            self._old_term = None
+        if self._fd is not None:
+            try:
+                while True:
+                    ready, _, _ = select.select([self._fd], [], [], 0)
+                    if not ready:
+                        break
+                    os.read(self._fd, 1024)
+            except Exception:
+                pass
+        if self._owned_tty and self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+        self._fd = None
+        self._owned_tty = False
+
+    def _loop(self) -> None:
+        fd = self._fd
+        if fd is None:
+            return
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.05)
+                if not ready:
+                    continue
+                data = os.read(fd, 32)
+                if not data:
+                    continue
+                if any(data[i : i + 1] in _ENTER_KEYS for i in range(len(data))):
+                    self.event.set()
+                    return
+            except Exception:
+                return
+
+
 def record_until_silence(
     sample_rate: int | None = None,
     *,
@@ -1042,11 +1146,16 @@ def record_until_silence(
     require_speech: bool = False,
     wake_spotter=None,
     end_watch=None,
+    end_on_enter: bool = False,
+    enter_only: bool = False,
 ) -> bytes:
     _prepare_mic()
     capture_rate = int(sample_rate) if sample_rate else _capture_sample_rate()
     _log_mic_settings(capture_rate)
     print(prompt)
+    enter_listener = _EnterKeyListener() if end_on_enter else None
+    if enter_listener is not None:
+        enter_listener.start()
     chunk_frames = int(CHUNK_SECONDS * capture_rate)
     warmup_frames = int(MIC_WARMUP_SECONDS * capture_rate)
     noise = FanNoiseFilter(capture_rate)
@@ -1054,67 +1163,77 @@ def record_until_silence(
     heard = False
     sent = False
     silent_run = waited = total = 0.0
-    with _open_input_stream(capture_rate, chunk_frames) as stream:
-        _cue_listen_start()
-        if warmup_frames:
-            data, _ = stream.read(warmup_frames)
-            cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
-            chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
-            total += warmup_frames / float(capture_rate)
-        while total < max_record_seconds:
-            data, _ = stream.read(chunk_frames)
-            cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
-            pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
-            chunks.append(pcm_24k)
-            total += CHUNK_SECONDS
-            if end_watch is not None:
-                try:
-                    end_watch.feed_pcm24k(pcm_24k)
-                    if end_watch.hit.is_set():
-                        from wake import play_over_and_out_chime
+    try:
+        with _open_input_stream(capture_rate, chunk_frames) as stream:
+            _cue_listen_start()
+            if warmup_frames:
+                data, _ = stream.read(warmup_frames)
+                cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
+                total += warmup_frames / float(capture_rate)
+            while total < max_record_seconds:
+                data, _ = stream.read(chunk_frames)
+                cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
+                chunks.append(pcm_24k)
+                total += CHUNK_SECONDS
+                if end_watch is not None:
+                    try:
+                        end_watch.feed_pcm24k(pcm_24k)
+                        if end_watch.hit.is_set():
+                            from wake import play_over_and_out_chime
 
-                        play_over_and_out_chime()
-                        sent = True
-                        break
-                except Exception:
-                    pass
-            if wake_spotter is not None:
-                try:
-                    if wake_spotter.feed(cleaned, capture_rate):
-                        print("[stt] wake word — processing audio.")
-                        from wake import play_over_and_out_chime
+                            play_over_and_out_chime()
+                            sent = True
+                            break
+                    except Exception:
+                        pass
+                if wake_spotter is not None:
+                    try:
+                        if wake_spotter.feed(cleaned, capture_rate):
+                            print("[stt] wake word — processing audio.")
+                            from wake import play_over_and_out_chime
 
-                        play_over_and_out_chime()
-                        sent = True
+                            play_over_and_out_chime()
+                            sent = True
+                            break
+                    except Exception:
+                        pass
+                if _phone_pending():
+                    print("[stt] phone command — using typed text.", flush=True)
+                    raise PhoneCommandReady()
+                if _send_requested():
+                    print("[stt] menu Send — processing audio.")
+                    sent = True
+                    break
+                if enter_listener is not None and enter_listener.event.is_set():
+                    print("[stt] Enter — processing audio.")
+                    break
+                peak = _peak(cleaned)
+                if peak >= speech_peak:
+                    heard = True
+                    silent_run = 0.0
+                elif heard and not enter_only:
+                    silent_run += CHUNK_SECONDS
+                    if silent_run >= silence_seconds:
                         break
-                except Exception:
-                    pass
-            if _phone_pending():
-                print("[stt] phone command — using typed text.", flush=True)
-                raise PhoneCommandReady()
-            if _send_requested():
-                print("[stt] menu Send — processing audio.")
-                sent = True
-                break
-            peak = _peak(cleaned)
-            if peak >= speech_peak:
-                heard = True
-                silent_run = 0.0
-            elif heard:
-                silent_run += CHUNK_SECONDS
-                if silent_run >= silence_seconds:
-                    break
-            else:
-                waited += CHUNK_SECONDS
-                if waited >= max_wait_for_speech:
-                    break
+                else:
+                    waited += CHUNK_SECONDS
+                    if waited >= max_wait_for_speech:
+                        break
+    finally:
+        if enter_listener is not None:
+            enter_listener.stop()
     if require_speech and not heard and not sent:
         raise NoSpeechError("No speech detected — try again.")
     pcm = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     return _float_to_wav(_normalize_peak(pcm), REALTIME_RATE)
 
 
-record_until_enter = record_until_silence
+def record_until_enter(*args, **kwargs) -> bytes:
+    kwargs.setdefault("end_on_enter", True)
+    kwargs.setdefault("enter_only", True)
+    return record_until_silence(*args, **kwargs)
 
 
 def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str | None = None) -> str:
@@ -1269,6 +1388,20 @@ def classify_yes_no(text: str) -> str | None:
     return None
 
 
+def _tag_speaker(wav_bytes: bytes | None) -> None:
+    if not wav_bytes:
+        return
+    try:
+        from speaker_id import enabled, identify, set_last_speaker
+
+        if not enabled():
+            set_last_speaker(None)
+            return
+        set_last_speaker(identify(wav_bytes))
+    except Exception as e:
+        print(f"[speaker] tag failed ({e})", flush=True)
+
+
 def listen_once(
     client: OpenAI,
     *,
@@ -1316,6 +1449,7 @@ def listen_once(
                 pass
             save_recording(wav, transcript=live, kind=mode, live_transcript=live)
             print(f'Heard: "{live}"')
+            _tag_speaker(wav)
             return live
         except PhoneCommandReady:
             queued = _consume_phone_utterance()

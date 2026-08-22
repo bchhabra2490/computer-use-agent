@@ -245,8 +245,20 @@ def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: 
             "about this same photo. Do not start_task unless they asked you to "
             "do something on the Mac.\n\n"
         )
+    speaker_line = ""
+    try:
+        from speaker_id import get_last_speaker
+
+        match = get_last_speaker()
+        if match is not None:
+            speaker_line = match.line_for_prompt() + "\n\n"
+    except Exception:
+        pass
     return (
-        prefix + f"User said: {utterance}\n\n" + f"Computer task history so far:\n{_format_task_history(task_history)}"
+        prefix
+        + speaker_line
+        + f"User said: {utterance}\n\n"
+        + f"Computer task history so far:\n{_format_task_history(task_history)}"
     )
 
 

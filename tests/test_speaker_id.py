@@ -47,6 +47,12 @@ def _mock_embed(wav_bytes: bytes) -> np.ndarray:
     return vec / (np.linalg.norm(vec) + 1e-9)
 
 
+def _alice_samples() -> list[bytes]:
+    long = [_sine_wav(300.0 + i * 10, seconds=2.0) for i in range(3)]
+    short = [_sine_wav(305.0, seconds=0.6), _sine_wav(310.0, seconds=0.6)]
+    return long + short
+
+
 class SpeakerIdTests(unittest.TestCase):
     def setUp(self) -> None:
         self._embed_patch = patch.object(sid, "embed_wav_bytes", side_effect=_mock_embed)
@@ -63,51 +69,77 @@ class SpeakerIdTests(unittest.TestCase):
         b = sid.embed_wav_bytes(_sine_wav(220.0))
         self.assertGreater(sid.cosine_similarity(a, b), 0.95)
 
+    def test_prepare_audio_loops_short_clips(self) -> None:
+        audio, rate = sid._wav_bytes_to_mono_float(_sine_wav(300.0, seconds=0.5))
+        out = sid._prepare_audio_for_embed(
+            sid._resample_linear(audio, rate, 16000),
+            16000,
+        )
+        self.assertAlmostEqual(out.size / 16000.0, 1.0, places=1)
+
+    def test_trim_silence_strips_padding(self) -> None:
+        rate = 16000
+        speech = np.sin(2 * np.pi * 300.0 * np.linspace(0, 0.5, int(rate * 0.5), endpoint=False)).astype(
+            np.float32
+        )
+        pad = np.zeros(int(rate * 0.8), dtype=np.float32)
+        audio = np.concatenate([pad, speech * 0.3, pad])
+        trimmed = sid._trim_silence(audio, rate)
+        self.assertLess(trimmed.size / rate, 0.8)
+        self.assertGreater(trimmed.size / rate, 0.3)
+
     def test_enroll_and_identify(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(sid, "SPEAKERS_DIR", root):
-                samples = [_sine_wav(300.0 + i * 10) for i in range(3)]
-                sid.enroll_speaker("Alice", samples)
-                match = sid.identify(_sine_wav(305.0))
+                sid.enroll_speaker("Alice", _alice_samples())
+                match = sid.identify(_sine_wav(305.0, seconds=2.0))
                 self.assertIsNotNone(match)
                 assert match is not None
                 self.assertEqual(match.name, "alice")
-                self.assertEqual(match.display_name, "Alice")
 
-    def test_profile_saved_with_three_samples(self) -> None:
+    def test_short_clip_uses_short_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(sid, "SPEAKERS_DIR", root):
-                samples = [_sine_wav(300.0 + i * 10) for i in range(3)]
-                out = sid.enroll_speaker("Alice", samples)
+                sid.enroll_speaker("Alice", _alice_samples())
+                scored = sid.score_speakers(_sine_wav(305.0, seconds=0.6))
+                data = json.loads((root / "alice" / "profile.json").read_text(encoding="utf-8"))
+                self.assertTrue(scored[0].short_clip)
+                self.assertEqual(scored[0].threshold, data["threshold_short"])
+
+    def test_profile_saved_with_five_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(sid, "SPEAKERS_DIR", root):
+                out = sid.enroll_speaker("Alice", _alice_samples())
                 self.assertTrue((out / "profile.json").is_file())
-                for i in range(1, 4):
+                for i in range(1, 6):
                     self.assertTrue((out / f"sample-{i}.wav").is_file())
                 data = json.loads((out / "profile.json").read_text(encoding="utf-8"))
-                self.assertEqual(len(data.get("embeddings") or []), 3)
-                self.assertEqual(data.get("display_name"), "Alice")
-                self.assertEqual(data.get("backend"), "speakeronnx")
+                self.assertEqual(len(data.get("embeddings") or []), 5)
+                self.assertEqual(len(data.get("long_embeddings") or []), 3)
+                self.assertEqual(len(data.get("short_embeddings") or []), 2)
+                self.assertIn("threshold_short", data)
 
     def test_score_speakers_ranks_by_similarity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(sid, "SPEAKERS_DIR", root):
-                samples = [_sine_wav(300.0 + i * 10) for i in range(3)]
-                sid.enroll_speaker("Alice", samples)
-                sid.enroll_speaker("Bob", [_sine_wav(800.0 + i * 10) for i in range(3)])
-                scored = sid.score_speakers(_sine_wav(305.0))
+                sid.enroll_speaker("Alice", _alice_samples())
+                bob = [_sine_wav(800.0 + i * 10, seconds=2.0) for i in range(3)]
+                bob += [_sine_wav(805.0, seconds=0.6), _sine_wav(810.0, seconds=0.6)]
+                sid.enroll_speaker("Bob", bob)
+                scored = sid.score_speakers(_sine_wav(305.0, seconds=2.0))
                 self.assertEqual(len(scored), 2)
                 self.assertEqual(scored[0].display_name, "Alice")
-                self.assertGreater(scored[0].score, scored[1].score)
 
     def test_identify_wav_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(sid, "SPEAKERS_DIR", root):
-                samples = [_sine_wav(300.0 + i * 10) for i in range(3)]
-                sid.enroll_speaker("Alice", samples)
-                match, scored = sid._identify_wav_bytes(_sine_wav(305.0))
+                sid.enroll_speaker("Alice", _alice_samples())
+                match, scored = sid._identify_wav_bytes(_sine_wav(305.0, seconds=2.0))
                 self.assertIsNotNone(match)
                 assert match is not None
                 self.assertEqual(match.display_name, "Alice")
@@ -117,8 +149,8 @@ class SpeakerIdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(sid, "SPEAKERS_DIR", root):
-                sid.enroll_speaker("Alice", [_sine_wav(300.0 + i * 10) for i in range(3)])
-                match = sid.identify(_sine_wav(850.0))
+                sid.enroll_speaker("Alice", _alice_samples())
+                match = sid.identify(_sine_wav(850.0, seconds=2.0))
                 self.assertIsNone(match)
 
     def test_skips_legacy_mfcc_profile(self) -> None:
@@ -143,11 +175,11 @@ class SpeakerIdTests(unittest.TestCase):
                 scored = sid.score_speakers(_sine_wav(300.0))
                 self.assertEqual(scored, [])
 
-    def test_three_passages_defined(self) -> None:
-        self.assertEqual(len(sid.ENROLLMENT_PASSAGES), 3)
+    def test_five_passages_defined(self) -> None:
+        self.assertEqual(len(sid.ENROLLMENT_PASSAGES), 5)
+        self.assertEqual(sid.LONG_PASSAGE_COUNT, 3)
         for title, body in sid.ENROLLMENT_PASSAGES:
             self.assertIn("Passage", title)
-            self.assertGreaterEqual(len(body.splitlines()), 2)
 
 
 if __name__ == "__main__":

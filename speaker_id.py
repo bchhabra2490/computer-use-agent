@@ -29,28 +29,44 @@ SPEAKER_ID_ENABLED = os.environ.get("SPEAKER_ID", "1").strip().lower() not in {
 }
 # Cosine similarity floor; auto-tuned per profile from enrollment if possible.
 DEFAULT_THRESHOLD = float(os.environ.get("SPEAKER_ID_THRESHOLD", "0.55"))
+DEFAULT_SHORT_THRESHOLD = float(os.environ.get("SPEAKER_ID_SHORT_THRESHOLD", "0.35"))
+SHORT_THRESHOLD_FLOOR = float(os.environ.get("SPEAKER_ID_SHORT_THRESHOLD_FLOOR", "0.30"))
+# Clips shorter than this use short embeddings + threshold_short (and 2× loop before embed).
+SHORT_CLIP_SECONDS = float(os.environ.get("SPEAKER_ID_SHORT_SECONDS", "4.0"))
+LOOP_SHORT_BELOW_SECONDS = float(os.environ.get("SPEAKER_ID_LOOP_BELOW_SECONDS", "2.0"))
+MIN_EMBED_SECONDS = float(os.environ.get("SPEAKER_ID_MIN_SECONDS", "0.15"))
+TRIM_TOP_DB = float(os.environ.get("SPEAKER_ID_TRIM_DB", "25"))
+LONG_PASSAGE_COUNT = 3
 # ONNX speaker embedding model (speakeronnx registry alias).
 SPEAKER_ID_MODEL = os.environ.get("SPEAKER_ID_MODEL", "wespeaker-ecapa512").strip()
 EMBED_BACKEND = "speakeronnx"
 
 ENROLLMENT_PASSAGES: list[tuple[str, str]] = [
     (
-        "Passage 1 of 3",
+        "Passage 1 of 5",
         "The morning sun warmed the kitchen as coffee brewed on the counter.\n"
         "I speak clearly so the assistant can learn the sound of my voice.\n"
         "Please read this at your normal pace, not too fast and not too slow.",
     ),
     (
-        "Passage 2 of 3",
+        "Passage 2 of 5",
         "Jarvis, open Google Maps and show Annapurna Base Camp in Nepal.\n"
         "Then remind me to check the print job on the DeskJet printer.\n"
         "I might ask about circuits, diagrams, or the ESP32 on my desk.",
     ),
     (
-        "Passage 3 of 3",
+        "Passage 3 of 5",
         "Numbers mix with names in everyday speech: two monitors, forty percent volume,\n"
         "and a message for Rekha about dinner at seven.\n"
-        "This is the third and final voice sample for speaker enrollment.",
+        "This is the third long voice sample for speaker enrollment.",
+    ),
+    (
+        "Passage 4 of 5 (short)",
+        "Hey Jarvis.",
+    ),
+    (
+        "Passage 5 of 5 (short)",
+        "Yes, go ahead.",
     ),
 ]
 
@@ -61,6 +77,7 @@ class ScoredSpeaker:
     display_name: str
     score: float
     threshold: float
+    short_clip: bool = False
 
     @property
     def matched(self) -> bool:
@@ -74,10 +91,7 @@ class SpeakerMatch:
     score: float
 
     def line_for_prompt(self) -> str:
-        return (
-            f"Speaker (voice ID): {self.display_name} "
-            f"(confidence {self.score:.0%})."
-        )
+        return f"Speaker (voice ID): {self.display_name} " f"(confidence {self.score:.0%})."
 
 
 _last_speaker: SpeakerMatch | None = None
@@ -130,6 +144,53 @@ def _resample_linear(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndar
     return np.interp(x_new, x_old, audio).astype(np.float32)
 
 
+def _trim_silence(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    top_db: float = TRIM_TOP_DB,
+    frame_ms: float = 25.0,
+    hop_ms: float = 10.0,
+) -> np.ndarray:
+    """Drop leading/trailing silence (energy below peak - top_db)."""
+    if audio.size == 0 or sample_rate <= 0:
+        return audio
+    frame = max(1, int(sample_rate * frame_ms / 1000.0))
+    hop = max(1, int(sample_rate * hop_ms / 1000.0))
+    if audio.size <= frame:
+        return audio
+
+    n_frames = 1 + (len(audio) - frame) // hop
+    rms = np.empty(n_frames, dtype=np.float64)
+    for i in range(n_frames):
+        chunk = audio[i * hop : i * hop + frame].astype(np.float64)
+        rms[i] = float(np.sqrt(np.mean(chunk * chunk)) + 1e-12)
+
+    peak = float(rms.max())
+    if peak <= 1e-12:
+        return audio
+    threshold = peak * (10.0 ** (-top_db / 20.0))
+    voiced = np.flatnonzero(rms >= threshold)
+    if voiced.size == 0:
+        return audio
+
+    start = int(voiced[0]) * hop
+    end = min(len(audio), int(voiced[-1]) * hop + frame)
+    trimmed = audio[start:end]
+    min_keep = int(MIN_EMBED_SECONDS * sample_rate)
+    if trimmed.size >= min_keep:
+        return trimmed.astype(np.float32)
+    return audio
+
+
+def _audio_at_embed_rate(wav_bytes: bytes) -> tuple[np.ndarray, int]:
+    audio, rate = _wav_bytes_to_mono_float(wav_bytes)
+    embedder = _get_embedder()
+    if rate != embedder.sample_rate:
+        audio = _resample_linear(audio, rate, embedder.sample_rate)
+    return _trim_silence(audio, embedder.sample_rate), embedder.sample_rate
+
+
 _embedder = None
 
 
@@ -139,11 +200,49 @@ def _get_embedder():
         try:
             from speakeronnx import SpeakerEmbedder
         except ImportError as e:
-            raise RuntimeError(
-                "speakeronnx is required for speaker ID (pip install speakeronnx)"
-            ) from e
+            raise RuntimeError("speakeronnx is required for speaker ID (pip install speakeronnx)") from e
         _embedder = SpeakerEmbedder(SPEAKER_ID_MODEL)
     return _embedder
+
+
+def wav_duration_seconds(wav_bytes: bytes) -> float:
+    """Speech duration after resample + leading/trailing silence trim."""
+    try:
+        audio, rate = _audio_at_embed_rate(wav_bytes)
+    except (ValueError, RuntimeError):
+        return 0.0
+    return audio.size / float(rate) if rate > 0 else 0.0
+
+
+def wav_has_min_speech(
+    wav_bytes: bytes,
+    *,
+    min_seconds: float | None = None,
+    min_rms: float = 0.005,
+) -> bool:
+    """True when trimmed speech has enough duration and energy to embed."""
+    try:
+        audio, rate = _audio_at_embed_rate(wav_bytes)
+    except (ValueError, RuntimeError):
+        return False
+    if rate <= 0 or audio.size == 0:
+        return False
+    floor = MIN_EMBED_SECONDS if min_seconds is None else min_seconds
+    if audio.size / float(rate) < floor:
+        return False
+    rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
+    return rms >= min_rms
+
+
+def _prepare_audio_for_embed(audio: np.ndarray, target_rate: int) -> np.ndarray:
+    audio = _trim_silence(audio, target_rate)
+    dur = audio.size / float(target_rate) if target_rate > 0 else 0.0
+    if 0.0 < dur < LOOP_SHORT_BELOW_SECONDS:
+        audio = np.concatenate([audio, audio])
+    min_samples = int(MIN_EMBED_SECONDS * target_rate)
+    if audio.size < min_samples:
+        raise ValueError("Audio too short for speaker embedding")
+    return audio.astype(np.float32)
 
 
 def embed_wav_bytes(wav_bytes: bytes) -> np.ndarray:
@@ -152,12 +251,10 @@ def embed_wav_bytes(wav_bytes: bytes) -> np.ndarray:
         raise ValueError("Empty audio")
     audio, rate = _wav_bytes_to_mono_float(wav_bytes)
     embedder = _get_embedder()
-    min_samples = int(0.25 * embedder.sample_rate)
-    if audio.size < min_samples:
-        raise ValueError("Audio too short for speaker embedding")
     if rate != embedder.sample_rate:
         audio = _resample_linear(audio, rate, embedder.sample_rate)
-    return np.asarray(embedder.embed(audio.astype(np.float32)), dtype=np.float32)
+    audio = _prepare_audio_for_embed(audio, embedder.sample_rate)
+    return np.asarray(embedder.embed(audio), dtype=np.float32)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -196,16 +293,70 @@ def load_profile(slug: str) -> dict[str, Any] | None:
         return None
 
 
-def _score_profile(embedding: np.ndarray, profile: dict[str, Any]) -> float:
-    centroid = np.asarray(profile.get("centroid") or [], dtype=np.float32)
-    if centroid.size == 0:
-        return 0.0
-    best = cosine_similarity(embedding, centroid)
-    for row in profile.get("embeddings") or []:
+def _best_similarity(
+    embedding: np.ndarray,
+    centroid: np.ndarray | list[float] | None,
+    rows: list[list[float]] | list[np.ndarray],
+) -> float:
+    best = -1.0
+    if centroid is not None:
+        vec = np.asarray(centroid, dtype=np.float32)
+        if vec.size:
+            best = max(best, cosine_similarity(embedding, vec))
+    for row in rows:
         vec = np.asarray(row, dtype=np.float32)
         if vec.size:
             best = max(best, cosine_similarity(embedding, vec))
-    return best
+    return max(best, 0.0)
+
+
+def _pairwise_min(embs: list[np.ndarray]) -> float | None:
+    if len(embs) < 2:
+        return None
+    scores = [cosine_similarity(embs[i], embs[j]) for i in range(len(embs)) for j in range(i + 1, len(embs))]
+    return min(scores) if scores else None
+
+
+def _threshold_from_pairwise(
+    min_pair: float | None,
+    *,
+    default: float,
+    floor: float = 0.45,
+) -> float:
+    if min_pair is None:
+        return default
+    return max(floor, min(default, min_pair * 0.85))
+
+
+def _score_profile(embedding: np.ndarray, profile: dict[str, Any], *, short_clip: bool) -> float:
+    score, _ = _score_and_threshold(embedding, profile, short_clip=short_clip)
+    return score
+
+
+def _score_and_threshold(
+    embedding: np.ndarray,
+    profile: dict[str, Any],
+    *,
+    short_clip: bool,
+) -> tuple[float, float]:
+    short_rows = profile.get("short_embeddings") or []
+    if short_clip and short_rows:
+        score = _best_similarity(
+            embedding,
+            profile.get("short_centroid"),
+            short_rows,
+        )
+        return score, _threshold_short_for_profile(profile)
+
+    long_rows = profile.get("long_embeddings")
+    if not long_rows:
+        long_rows = profile.get("embeddings") or []
+    long_centroid = profile.get("long_centroid") or profile.get("centroid")
+    score = _best_similarity(embedding, long_centroid, long_rows)
+    threshold = _threshold_for_profile(profile)
+    if short_clip and not short_rows:
+        threshold = min(threshold, DEFAULT_SHORT_THRESHOLD)
+    return score, threshold
 
 
 def _threshold_for_profile(profile: dict[str, Any]) -> float:
@@ -213,6 +364,13 @@ def _threshold_for_profile(profile: dict[str, Any]) -> float:
     if isinstance(custom, (int, float)) and custom > 0:
         return float(custom)
     return DEFAULT_THRESHOLD
+
+
+def _threshold_short_for_profile(profile: dict[str, Any]) -> float:
+    custom = profile.get("threshold_short")
+    if isinstance(custom, (int, float)) and custom > 0:
+        return min(float(custom), DEFAULT_SHORT_THRESHOLD)
+    return DEFAULT_SHORT_THRESHOLD
 
 
 def _profile_backend(profile: dict[str, Any]) -> str:
@@ -248,6 +406,8 @@ def _accept_match(scored: list[ScoredSpeaker]) -> SpeakerMatch | None:
 
 def score_speakers(wav_bytes: bytes) -> list[ScoredSpeaker]:
     """Score ``wav_bytes`` against every enrolled profile (best score first)."""
+    clip_seconds = wav_duration_seconds(wav_bytes)
+    short_clip = clip_seconds < SHORT_CLIP_SECONDS
     embedding = embed_wav_bytes(wav_bytes)
     scored: list[ScoredSpeaker] = []
     skipped: list[str] = []
@@ -258,18 +418,28 @@ def score_speakers(wav_bytes: bytes) -> list[ScoredSpeaker]:
         if not _profile_compatible(profile):
             skipped.append(str(profile.get("display_name") or slug))
             continue
+        score, threshold = _score_and_threshold(
+            embedding,
+            profile,
+            short_clip=short_clip,
+        )
         scored.append(
             ScoredSpeaker(
                 slug=slug,
                 display_name=str(profile.get("display_name") or slug),
-                score=_score_profile(embedding, profile),
-                threshold=_threshold_for_profile(profile),
+                score=score,
+                threshold=threshold,
+                short_clip=short_clip,
             )
         )
     if skipped:
         print(
-            "[speaker] skipped stale profile(s) "
-            f"{', '.join(skipped)} — re-run: cua speaker enroll --name …",
+            "[speaker] skipped stale profile(s) " f"{', '.join(skipped)} — re-run: cua speaker enroll --name …",
+            flush=True,
+        )
+    if short_clip:
+        print(
+            f"[speaker] short clip ({clip_seconds:.1f}s < {SHORT_CLIP_SECONDS:g}s) " "— using short-profile scoring",
             flush=True,
         )
     scored.sort(key=lambda row: row.score, reverse=True)
@@ -294,8 +464,9 @@ def identify(wav_bytes: bytes) -> SpeakerMatch | None:
     if match is None:
         top = scored[0]
         if not top.matched:
+            mode = "short" if top.short_clip else "long"
             print(
-                f"[speaker] no match (best={top.score:.3f} < {top.threshold:.3f})",
+                f"[speaker] no match ({mode} best={top.score:.3f} < {top.threshold:.3f})",
                 flush=True,
             )
         return None
@@ -335,26 +506,28 @@ def enroll_speaker(
         (root / f"sample-{i}.wav").write_bytes(wav_bytes)
         embeddings.append(embed_wav_bytes(wav_bytes).tolist())
 
-    mat = np.asarray(embeddings, dtype=np.float32)
-    centroid = mat.mean(axis=0)
-    centroid = centroid / (np.linalg.norm(centroid) + 1e-9)
+    emb_arr = [np.asarray(row, dtype=np.float32) for row in embeddings]
+    long_embs = emb_arr[:LONG_PASSAGE_COUNT]
+    short_embs = emb_arr[LONG_PASSAGE_COUNT:] if len(emb_arr) > LONG_PASSAGE_COUNT else []
 
-    pairwise = []
-    min_pair = None
-    for i in range(len(embeddings)):
-        for j in range(i + 1, len(embeddings)):
-            pairwise.append(
-                cosine_similarity(
-                    np.asarray(embeddings[i], dtype=np.float32),
-                    np.asarray(embeddings[j], dtype=np.float32),
-                )
-            )
-    # Require live utterances to be at least this similar to the enrolled voice.
-    if pairwise:
-        min_pair = min(pairwise)
-        threshold = max(0.45, min(DEFAULT_THRESHOLD, min_pair * 0.85))
-    else:
-        threshold = DEFAULT_THRESHOLD
+    def _centroid(vecs: list[np.ndarray]) -> list[float]:
+        if not vecs:
+            return []
+        mat = np.stack(vecs, axis=0)
+        c = mat.mean(axis=0)
+        c = c / (np.linalg.norm(c) + 1e-9)
+        return c.astype(np.float32).tolist()
+
+    long_centroid = _centroid(long_embs)
+    short_centroid = _centroid(short_embs)
+    centroid = _centroid(emb_arr)
+
+    threshold = _threshold_from_pairwise(_pairwise_min(long_embs), default=DEFAULT_THRESHOLD)
+    threshold_short = _threshold_from_pairwise(
+        _pairwise_min(short_embs),
+        default=DEFAULT_SHORT_THRESHOLD,
+        floor=SHORT_THRESHOLD_FLOOR,
+    )
 
     profile = {
         "slug": slug,
@@ -363,9 +536,16 @@ def enroll_speaker(
         "model": SPEAKER_ID_MODEL,
         "embed_dim": len(embeddings[0]) if embeddings else 0,
         "embeddings": embeddings,
-        "centroid": centroid.tolist(),
+        "centroid": centroid,
+        "long_embeddings": [e.tolist() for e in long_embs],
+        "long_centroid": long_centroid,
+        "short_embeddings": [e.tolist() for e in short_embs],
+        "short_centroid": short_centroid,
+        "short_sample_count": len(short_embs),
         "threshold": round(threshold, 4),
-        "enrollment_min_score": round(min_pair, 4) if pairwise else None,
+        "threshold_short": round(threshold_short, 4),
+        "enrollment_min_score": round(_pairwise_min(long_embs) or 0.0, 4) if long_embs else None,
+        "enrollment_min_score_short": round(_pairwise_min(short_embs) or 0.0, 4) if short_embs else None,
         "enrolled_at": datetime.now(timezone.utc).isoformat(),
         "passages": passages or [p[1] for p in ENROLLMENT_PASSAGES],
         "sample_rate": TARGET_RATE,

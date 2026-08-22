@@ -28,7 +28,7 @@ Speaker enrollment (who is talking)::
     cua speaker enroll --name Bharat
     cua speaker list
     cua speaker test
-    cua speaker test --verbose
+    cua speaker test --speak-prompts
 """
 
 from __future__ import annotations
@@ -518,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     speaker_sub = speaker_p.add_subparsers(dest="speaker_command", required=True)
     speaker_enroll_p = speaker_sub.add_parser(
         "enroll",
-        help="Read three passages aloud to create a voice profile",
+        help="Read five passages (3 long + 2 short) to create a voice profile",
     )
     speaker_enroll_p.add_argument("--name", default=None, help="Your display name")
     speaker_enroll_p.add_argument(
@@ -544,6 +544,11 @@ def main(argv: list[str] | None = None) -> int:
         "--verbose",
         action="store_true",
         help="Print similarity scores for every enrolled speaker",
+    )
+    speaker_test_p.add_argument(
+        "--speak-prompts",
+        action="store_true",
+        help="After identification, speak Hey <name> or Hey Stranger via TTS",
     )
 
     args = parser.parse_args(argv)
@@ -631,7 +636,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.speaker_command == "delete":
             return cmd_delete(args.name)
         if args.speaker_command == "test":
-            return cmd_test(max_seconds=args.max_seconds, verbose=args.verbose)
+            return cmd_test(
+                max_seconds=args.max_seconds,
+                verbose=args.verbose,
+                speak_prompts=args.speak_prompts,
+            )
         return 2
     parser.print_help()
     return 2

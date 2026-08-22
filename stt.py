@@ -23,6 +23,13 @@ import wave
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Before numpy/OpenBLAS (can SIGSEGV if over-threaded on macOS).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import numpy as np
 import sounddevice as sd
 from openai import OpenAI
@@ -784,6 +791,7 @@ def _listen_realtime_body(
     errors: queue.Queue[BaseException] = queue.Queue()
     pcm_24k_chunks: list[np.ndarray] = []
     send_lock = threading.Lock()
+    # "committed" here means "stop appending / finish listen" — not WS commit ack.
     committed = threading.Event()
 
     # Shared transcript state — idle timer arms only after the first word.
@@ -793,25 +801,39 @@ def _listen_realtime_body(
         "last_delta_at": None,
         "first_word_at": None,
         "timer_armed": False,
+        "finish_deadline": None,
     }
     started_at = time.monotonic()
     mic_deadline = started_at + MAX_RECORD_SECONDS
     wake_spotter = _listen_end_spotter()
     wake_send = threading.Event()
+    # After end-listen, use live partials — do not block on input_audio_buffer.completed.
+    # Concurrent WS commit/send from worker threads during recv can wedge the socket.
+    END_FINISH_SECONDS = float(os.environ.get("STT_END_FINISH_SECONDS", "1.5"))
 
-    def _commit_once(connection, reason: str) -> None:
+    def _close_connection(connection) -> None:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    def _finish_listen(connection, reason: str, *, settle: float | None = None) -> None:
+        """Stop capture and unblock the recv loop; keep any live partial transcript."""
         if committed.is_set():
             return
-        print(f"[stt] {reason}")
-        with send_lock:
-            try:
-                connection.input_audio_buffer.commit()
-            except Exception as exc:
-                errors.put(exc)
-                stop.set()
-                return
+        print(f"[stt] {reason}", flush=True)
         committed.set()
         stop.set()
+        wait = END_FINISH_SECONDS if settle is None else max(0.0, float(settle))
+        with state_lock:
+            shared["finish_deadline"] = time.monotonic() + wait
+
+        def _force_close() -> None:
+            # Let trailing deltas arrive, then close so `for event in connection` cannot hang.
+            time.sleep(wait)
+            _close_connection(connection)
+
+        threading.Thread(target=_force_close, name="stt-finish-close", daemon=True).start()
 
     def mic_worker(connection) -> None:
         try:
@@ -839,13 +861,15 @@ def _listen_realtime_body(
                     if wake_spotter is not None:
                         try:
                             if wake_spotter.feed(cleaned, capture_rate):
-                                print("[stt] wake word — processing audio.")
+                                print("[stt] wake word — processing audio.", flush=True)
                                 wake_send.set()
                                 from wake import play_over_and_out_chime
 
                                 play_over_and_out_chime()
                         except Exception:
                             pass
+                    if committed.is_set():
+                        break
                     pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
                     if pcm_24k.size == 0:
                         continue
@@ -874,14 +898,16 @@ def _listen_realtime_body(
                 if _phone_pending():
                     print("[stt] phone command — using typed text.", flush=True)
                     stop.set()
-                    try:
-                        connection.close()
-                    except Exception:
-                        pass
+                    _close_connection(connection)
                     errors.put(PhoneCommandReady())
                     return
                 if wake_send.is_set() or _send_requested():
-                    _commit_once(connection, "Send — processing audio.")
+                    reason = (
+                        "over and out — finishing with live transcript."
+                        if wake_send.is_set()
+                        else "Send — processing audio."
+                    )
+                    _finish_listen(connection, reason)
                     return
                 # No words yet: wait (do not run the 3s send timer).
                 if first is None or not text or last is None:
@@ -889,23 +915,26 @@ def _listen_realtime_body(
                         print(
                             f"[stt] no words after {wait_limit:g}s — aborting listen.",
                             file=sys.stderr,
+                            flush=True,
                         )
                         errors.put(NoSpeechError("No speech transcribed — try again."))
                         stop.set()
-                        try:
-                            connection.close()
-                        except Exception:
-                            pass
+                        _close_connection(connection)
                     continue
                 if (now - last) >= idle:
-                    _commit_once(connection, f"no new words for {idle:g}s — sending.")
+                    _finish_listen(
+                        connection,
+                        f"no new words for {idle:g}s — sending.",
+                        settle=0.4,
+                    )
                     return
                 if now >= mic_deadline:
-                    _commit_once(connection, "max record time — sending.")
+                    _finish_listen(connection, "max record time — sending.", settle=0.4)
                     return
         except BaseException as exc:  # noqa: BLE001
             errors.put(exc)
             stop.set()
+            _close_connection(connection)
 
     # Transcription sessions must use intent=transcription and must NOT pass ?model=.
     with client.realtime.connect(extra_query={"intent": "transcription"}) as connection:
@@ -945,12 +974,18 @@ def _listen_realtime_body(
                             from wake import transcript_has_end_phrase
 
                             if transcript_has_end_phrase(live):
-                                print("\n[stt] over and out — processing audio.")
                                 from wake import play_over_and_out_chime
 
                                 play_over_and_out_chime()
                                 wake_send.set()
-                                _commit_once(connection, "end phrase — processing audio.")
+                                with state_lock:
+                                    final_text = shared["partial"].strip()
+                                sys.stdout.write("\n")
+                                _finish_listen(
+                                    connection,
+                                    "over and out — finishing with live transcript.",
+                                    settle=0.35,
+                                )
                         except Exception:
                             pass
                 elif et == "conversation.item.input_audio_transcription.completed":
@@ -959,24 +994,43 @@ def _listen_realtime_body(
                     final_text = _event_transcript(event) or fallback
                     sys.stdout.write("\n")
                     stop.set()
+                    committed.set()
                     break
                 elif et == "conversation.item.input_audio_transcription.failed":
                     sys.stdout.write("\n")
                     err = getattr(event, "error", None)
                     raise NoSpeechError(f"Realtime transcription failed: {err or event}")
                 elif et == "error":
+                    # Empty-buffer commit errors are ignorable if we already have partials.
+                    with state_lock:
+                        has_partial = bool(shared["partial"].strip())
+                    if committed.is_set() and has_partial:
+                        sys.stdout.write("\n")
+                        break
                     sys.stdout.write("\n")
                     raise RuntimeError(getattr(event, "error", event))
-                elif et == "input_audio_buffer.committed":
-                    deadline = min(deadline, time.monotonic() + 12.0)
+
+                with state_lock:
+                    finish_at = shared["finish_deadline"]
+                if finish_at is not None:
+                    deadline = min(deadline, finish_at)
 
                 if stop.is_set() and not committed.is_set() and shared["first_word_at"] is None:
                     # Aborted with no words.
                     break
+                if committed.is_set() and finish_at is not None and time.monotonic() >= finish_at:
+                    break
                 if time.monotonic() > deadline:
                     break
+        except Exception:
+            # Finish-watcher connection.close() unblocks recv; keep live partial.
+            with state_lock:
+                has_partial = bool(shared["partial"].strip())
+            if not (committed.is_set() and (has_partial or final_text)):
+                raise
         finally:
             stop.set()
+            committed.set()
             worker.join(timeout=2.0)
             watcher.join(timeout=1.0)
 

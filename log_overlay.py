@@ -83,10 +83,17 @@ def overlay_should_show(data: dict[str, Any] | None = None) -> bool:
 
 
 def should_hide_overlay_for_capture(monitors: list[dict[str, Any]] | None = None) -> bool:
-    """True when a CU screenshot would include the overlay (all displays)."""
-    if not overlay_enabled():
-        return False
-    return True
+    """True when a CU screenshot might include log or face overlays."""
+    if overlay_enabled():
+        return True
+    try:
+        from face_overlay import face_overlay_enabled
+
+        if face_overlay_enabled():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _post_overlay_note(name: str) -> None:

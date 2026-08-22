@@ -117,8 +117,20 @@ class OverlayHideForCaptureTests(unittest.TestCase):
     def test_disabled_overlay_never_hides(self) -> None:
         from unittest.mock import patch
 
-        with patch("log_overlay.overlay_enabled", return_value=False):
+        with (
+            patch("log_overlay.overlay_enabled", return_value=False),
+            patch("face_overlay.face_overlay_enabled", return_value=False),
+        ):
             self.assertFalse(should_hide_overlay_for_capture([DUAL[1]]))
+
+    def test_hides_when_only_face_enabled(self) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch("log_overlay.overlay_enabled", return_value=False),
+            patch("face_overlay.face_overlay_enabled", return_value=True),
+        ):
+            self.assertTrue(should_hide_overlay_for_capture([DUAL[1]]))
 
     def test_pause_hides_on_dual_when_tray_alive(self) -> None:
         from unittest.mock import patch

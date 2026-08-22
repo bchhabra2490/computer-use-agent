@@ -114,6 +114,10 @@ def active_tts_voice() -> str:
 
 
 def _numpy():
+    import os
+
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
     import numpy as np
 
     return np
@@ -353,10 +357,17 @@ def play_wav(
         except Exception as exc:
             print(f"[tts] phone speech publish failed ({exc})", flush=True)
         return False
-    with _PLAYBACK_LOCK:
-        if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
-            return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
-        return _play_sounddevice(wav_bytes, interrupt_event=interrupt_event)
+
+    from app_status import begin_tts_playback, end_tts_playback
+
+    begin_tts_playback()
+    try:
+        with _PLAYBACK_LOCK:
+            if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
+                return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
+            return _play_sounddevice(wav_bytes, interrupt_event=interrupt_event)
+    finally:
+        end_tts_playback()
 
 
 def speak(
@@ -404,33 +415,40 @@ def speak(
             print(f"[tts] persistent wake unavailable ({exc})", flush=True)
             monitor = None
 
-    wav_bytes = synthesize(client, text, voice=voice or active_tts_voice())
+    from app_status import begin_tts_playback, end_tts_playback
 
-    wake_event = monitor.woken if (enable and monitor is not None) else None
+    # Cover synth latency too (session may already be back on waiting/listening).
+    begin_tts_playback()
     try:
-        from keyboard_barge import acquire_tts_interrupt
+        wav_bytes = synthesize(client, text, voice=voice or active_tts_voice())
 
-        interrupt_event, release = acquire_tts_interrupt(wake_event)
-    except Exception as exc:
-        print(f"[tts] keyboard barge unavailable ({exc})", flush=True)
-        interrupt_event, release = wake_event, (lambda: None)
+        wake_event = monitor.woken if (enable and monitor is not None) else None
+        try:
+            from keyboard_barge import acquire_tts_interrupt
 
-    if interrupt_event is None:
-        play_wav(wav_bytes)
-        return False
+            interrupt_event, release = acquire_tts_interrupt(wake_event)
+        except Exception as exc:
+            print(f"[tts] keyboard barge unavailable ({exc})", flush=True)
+            interrupt_event, release = wake_event, (lambda: None)
 
-    try:
-        interrupted = play_wav(wav_bytes, interrupt_event=interrupt_event)
-        if interrupted or interrupt_event.is_set():
-            if wake_event is not None and wake_event.is_set():
-                print("[tts] interrupted by wake word", flush=True)
-            # keyboard path already logged in keyboard_barge
-            elif not interrupted:
-                print("[tts] interrupted", flush=True)
-            return True
-        return False
+        if interrupt_event is None:
+            play_wav(wav_bytes)
+            return False
+
+        try:
+            interrupted = play_wav(wav_bytes, interrupt_event=interrupt_event)
+            if interrupted or interrupt_event.is_set():
+                if wake_event is not None and wake_event.is_set():
+                    print("[tts] interrupted by wake word", flush=True)
+                # keyboard path already logged in keyboard_barge
+                elif not interrupted:
+                    print("[tts] interrupted", flush=True)
+                return True
+            return False
+        finally:
+            release()
     finally:
-        release()
+        end_tts_playback()
 
 
 def _speak_later_worker() -> None:

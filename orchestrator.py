@@ -1392,9 +1392,9 @@ def _process_response(
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     global _phone_photo_in_session
     _phone_photo_in_session = False
+    register_orchestrator()
     ensure_tray_running()
     ensure_phone_gateway()
-    register_orchestrator()
     sess = Session()
     bind_session(sess)
 

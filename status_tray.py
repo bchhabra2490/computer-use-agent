@@ -2,7 +2,8 @@
 macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
-Click for a menu with Send (while listening), Add Memory, Log Overlay, Mark Task Done, logs, and quit.
+Click for a menu with Send (while listening), Add Memory, Log Overlay, Face Overlay,
+Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -31,6 +32,7 @@ from app_status import (
     read_status,
     request_mark_done,
     request_send,
+    set_face_overlay_enabled,
     set_overlay_enabled,
     set_tray_pid,
     signal_quit_orchestrator,
@@ -227,6 +229,7 @@ def main() -> None:
         menu = objc.ivar()
         lastSig = objc.ivar()
         overlay = objc.ivar()
+        face = objc.ivar()
 
         def init(self):
             self = objc.super(TrayController, self).init()
@@ -249,6 +252,7 @@ def main() -> None:
             self.statusItem.setMenu_(self.menu)
             self.lastSig = None
             self.overlay = None
+            self.face = None
             try:
                 from log_overlay import OVERLAY_HIDE_NOTE, OVERLAY_SHOW_NOTE
 
@@ -275,12 +279,18 @@ def main() -> None:
         def teardownOverlay(self) -> None:
             overlay = getattr(self, "overlay", None)
             self.overlay = None
-            if overlay is None:
-                return
-            try:
-                overlay.destroy()
-            except Exception:
-                pass
+            if overlay is not None:
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
+            face = getattr(self, "face", None)
+            self.face = None
+            if face is not None:
+                try:
+                    face.destroy()
+                except Exception:
+                    pass
 
         def applicationWillTerminate_(self, _notif) -> None:
             self.teardownOverlay()
@@ -296,18 +306,36 @@ def main() -> None:
                     overlay.hide()
                 except Exception:
                     pass
+            face = getattr(self, "face", None)
+            if face is not None:
+                try:
+                    face.hide()
+                except Exception:
+                    pass
             ack_overlay_hidden(True)
 
         def showLogOverlay_(self, _note) -> None:
+            data = read_status()
             overlay = getattr(self, "overlay", None)
             if overlay is not None:
                 try:
                     from log_overlay import overlay_should_show
 
-                    if overlay_should_show(read_status()):
+                    if overlay_should_show(data):
                         overlay.show()
                     else:
                         overlay.hide()
+                except Exception:
+                    pass
+            face = getattr(self, "face", None)
+            if face is not None:
+                try:
+                    from face_overlay import face_should_show
+
+                    if face_should_show(data):
+                        face.show()
+                    else:
+                        face.hide()
                 except Exception:
                     pass
             ack_overlay_hidden(False)
@@ -320,13 +348,28 @@ def main() -> None:
                 f"{len(data.get('logs') or [])}|{len(agents)}|"
                 f"{data.get('done_requested')}|{data.get('stt_active')}|"
                 f"{data.get('send_requested')}|{data.get('overlay_hidden')}|"
-                f"{data.get('overlay_enabled')}|{data.get('orchestrator_pid')}|"
+                f"{data.get('overlay_enabled')}|{data.get('face_overlay_enabled')}|"
+                f"{data.get('tts_playing')}|{data.get('tts_play_depth')}|"
+                f"{data.get('orchestrator_pid')}|"
                 f"{data.get('agent_pid')}"
             )
-            if sig == self.lastSig:
+            if sig != self.lastSig:
+                self.lastSig = sig
+                self.applyStatus(data)
+            else:
+                # Recover face if it was orderOut'd (e.g. capture hide) without a
+                # status-sig change the poll would otherwise skip.
+                self.keepFaceVisible(data)
+
+        @objc.python_method
+        def keepFaceVisible(self, data: dict) -> None:
+            face = getattr(self, "face", None)
+            if face is None:
                 return
-            self.lastSig = sig
-            self.applyStatus(data)
+            try:
+                face.apply_status(data)
+            except Exception:
+                pass
 
         @objc.python_method
         def applyStatus(self, data: dict) -> None:
@@ -338,6 +381,7 @@ def main() -> None:
                 button.setToolTip_(format_tooltip(data))
             self.rebuildMenu(data)
             self.syncOverlay(data)
+            self.syncFace(data)
 
         @objc.python_method
         def syncOverlay(self, data: dict) -> None:
@@ -351,11 +395,41 @@ def main() -> None:
                 except Exception as e:
                     print(f"[tray] log overlay unavailable: {e}", flush=True)
             elif not want and getattr(self, "overlay", None) is not None:
-                self.teardownOverlay()
+                overlay = self.overlay
+                self.overlay = None
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
             overlay = getattr(self, "overlay", None)
             if overlay is not None:
                 try:
                     overlay.apply_status(data)
+                except Exception:
+                    pass
+
+        @objc.python_method
+        def syncFace(self, data: dict) -> None:
+            from face_overlay import FaceOverlay, face_overlay_enabled
+
+            want = face_overlay_enabled(data)
+            if want and getattr(self, "face", None) is None:
+                try:
+                    self.face = FaceOverlay()
+                    print("[tray] face overlay on (top-center, capture-excluded)", flush=True)
+                except Exception as e:
+                    print(f"[tray] face overlay unavailable: {e}", flush=True)
+            elif not want and getattr(self, "face", None) is not None:
+                face = self.face
+                self.face = None
+                try:
+                    face.destroy()
+                except Exception:
+                    pass
+            face = getattr(self, "face", None)
+            if face is not None:
+                try:
+                    face.apply_status(data)
                 except Exception:
                     pass
 
@@ -485,6 +559,7 @@ def main() -> None:
             self.menu.addItem_(add_mem)
 
             from log_overlay import overlay_enabled as overlay_is_on
+            from face_overlay import face_overlay_enabled as face_is_on
 
             overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Log Overlay",
@@ -494,6 +569,15 @@ def main() -> None:
             overlay_item.setTarget_(self)
             overlay_item.setState_(1 if overlay_is_on(data) else 0)
             self.menu.addItem_(overlay_item)
+
+            face_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Face Overlay",
+                "toggleFaceOverlay:",
+                "",
+            )
+            face_item.setTarget_(self)
+            face_item.setState_(1 if face_is_on(data) else 0)
+            self.menu.addItem_(face_item)
 
             if agents:
                 mark_all = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -576,6 +660,13 @@ def main() -> None:
 
             data = read_status()
             set_overlay_enabled(not overlay_enabled(data))
+            self.applyStatus(read_status())
+
+        def toggleFaceOverlay_(self, _sender) -> None:
+            from face_overlay import face_overlay_enabled
+
+            data = read_status()
+            set_face_overlay_enabled(not face_overlay_enabled(data))
             self.applyStatus(read_status())
 
         def sendAudio_(self, _sender) -> None:

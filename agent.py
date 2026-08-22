@@ -690,11 +690,12 @@ def run(
     `speaker_context` is optional voice-ID text from the orchestrator (may be empty).
     """
     client = OpenAI()
-    ensure_tray_running()
     standalone = ask_user_bridge is None and message_inbox is None
     own_session = False
     if standalone:
         register_agent_process()
+    ensure_tray_running()
+    if standalone:
         try:
             start_mcp()
         except BaseException as e:

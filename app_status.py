@@ -54,6 +54,9 @@ def _default_state() -> dict[str, Any]:
         "overlay_hidden": False,
         "overlay_ack_hidden": False,
         "overlay_enabled": True,
+        "face_overlay_enabled": True,
+        "tts_playing": False,
+        "tts_play_depth": 0,
         "phone_gateway_pid": None,
         "pending_utterances": [],
         "pending_speaks": [],
@@ -199,6 +202,39 @@ def set_overlay_enabled(enabled: bool) -> None:
         data = _read()
         data["overlay_enabled"] = bool(enabled)
         _write(data)
+
+
+def set_face_overlay_enabled(enabled: bool) -> None:
+    """Show or hide the top-center face panel (tray menu toggle)."""
+    with _lock:
+        data = _read()
+        data["face_overlay_enabled"] = bool(enabled)
+        _write(data)
+
+
+def begin_tts_playback() -> None:
+    """Mark that Jarvis audio is synthesizing or playing (nested-safe)."""
+    with _lock:
+        data = _read()
+        depth = max(0, int(data.get("tts_play_depth") or 0)) + 1
+        data["tts_play_depth"] = depth
+        data["tts_playing"] = True
+        _write(data)
+
+
+def end_tts_playback() -> None:
+    """Clear TTS activity when a synth/play scope exits."""
+    with _lock:
+        data = _read()
+        depth = max(0, int(data.get("tts_play_depth") or 0) - 1)
+        data["tts_play_depth"] = depth
+        data["tts_playing"] = depth > 0
+        _write(data)
+
+
+def tts_playing(data: dict[str, Any] | None = None) -> bool:
+    snap = data if data is not None else read_status()
+    return bool(snap.get("tts_playing"))
 
 
 def ack_overlay_hidden(hidden: bool) -> None:

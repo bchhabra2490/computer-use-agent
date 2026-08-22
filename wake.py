@@ -27,6 +27,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+# Before numpy/OpenBLAS (can SIGSEGV if over-threaded on macOS).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import numpy as np
 import sounddevice as sd
 

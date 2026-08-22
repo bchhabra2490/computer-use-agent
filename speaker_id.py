@@ -44,21 +44,21 @@ EMBED_BACKEND = "speakeronnx"
 ENROLLMENT_PASSAGES: list[tuple[str, str]] = [
     (
         "Passage 1 of 5",
-        "The morning sun warmed the kitchen as coffee brewed on the counter.\n"
-        "I speak clearly so the assistant can learn the sound of my voice.\n"
-        "Please read this at your normal pace, not too fast and not too slow.",
+        "Good morning. Coffee is brewing, and sunlight is filling the kitchen.\n"
+        "I'll check my calendar after breakfast, then step outside for a few minutes.\n"
+        "The air feels cool and clear after last night's rain.",
     ),
     (
         "Passage 2 of 5",
         "Jarvis, open Google Maps and show Annapurna Base Camp in Nepal.\n"
-        "Then remind me to check the print job on the DeskJet printer.\n"
-        "I might ask about circuits, diagrams, or the ESP32 on my desk.",
+        "Remind me to check the DeskJet print queue before lunch.\n"
+        "Pull up the wiring diagram for the ESP32 board on my desk.",
     ),
     (
         "Passage 3 of 5",
-        "Numbers mix with names in everyday speech: two monitors, forty percent volume,\n"
-        "and a message for Rekha about dinner at seven.\n"
-        "This is the third long voice sample for speaker enrollment.",
+        "Set the volume to forty percent and turn on both monitors.\n"
+        "Send Rekha a message: dinner is at seven tonight.\n"
+        "I have two meetings tomorrow — one at ten, and another at half past three.",
     ),
     (
         "Passage 4 of 5 (short)",

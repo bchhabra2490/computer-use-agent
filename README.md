@@ -409,7 +409,8 @@ kept skill.
 
 ### Memories
 
-Durable notes live under `memory/personal/` (who the user is),
+Durable notes live under `memory/personal/profile.md` (who the user is — one
+file, re-condensed after every personal write),
 `memory/apps/` (per-application usernames, quirks, usual workflows), and
 `memory/screens/` (screenshot + LLM description). The orchestrator and
 computer agent use `read_memory` / `save_memory` / `save_screen_memory`

@@ -95,6 +95,17 @@ _PLAY_BY = re.compile(
     r"[\"']?([^.\n\"']{1,50}?)\s+by\s+[\"']?([A-Za-z0-9][^\"'\n.]{0,40})",
     re.I,
 )
+_PLAY_QUERY = re.compile(
+    r"\b(?:play|playing|listen\s+to|put\s+on)\s+"
+    r"(?:(?:some|the|an?)\s+)?"
+    r"(?:song|songs|track|tracks|music|playlist|video|videos)?\s*"
+    r"[\"']?(.+?)[\"']?\s*$",
+    re.I,
+)
+_MEDIA_INTENT = re.compile(
+    r"\b(play|playing|playlist|song|songs|music|track|tracks|youtube\s*music)\b",
+    re.I,
+)
 
 
 class RecipeError(Exception):
@@ -435,7 +446,7 @@ def extract_maps_place(utterance: str) -> str | None:
 
 
 def extract_media_query(utterance: str) -> str | None:
-    """Prefer 'play TITLE by ARTIST' / quoted titles over a random 'youtube' clause."""
+    """Prefer 'play TITLE by ARTIST' / quoted titles / plain 'play … songs'."""
     found = _PLAY_BY.search(utterance or "")
     if found:
         title = found.group(1).strip(" \"'")
@@ -452,9 +463,34 @@ def extract_media_query(utterance: str) -> str | None:
             combined = f"{title} {artist}".strip()
             if _valid_slot("query", combined):
                 return combined
-        if _valid_slot("query", inner) and not re.search(r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I):
+        if _valid_slot("query", inner) and not re.search(
+            r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I
+        ):
             return inner
+    plain = _PLAY_QUERY.search((utterance or "").strip().rstrip(".!?"))
+    if plain:
+        query = plain.group(1).strip(" \"'")
+        query = re.sub(
+            r"\b(on\s+youtube(?:\s+music)?|in\s+(?:the\s+)?(?:browser|chrome)|please)\b",
+            "",
+            query,
+            flags=re.I,
+        ).strip(" ,.-")
+        # Drop trailing filler like "for me"
+        query = re.sub(r"\bfor\s+me\b", "", query, flags=re.I).strip(" ,.-")
+        if _valid_slot("query", query) and not re.search(
+            r"\b(chrome|tab|screenshot|playable|open\s+notes)\b", query, re.I
+        ):
+            return query
     return None
+
+
+def _prelude_is_youtube_music(recipe: Recipe) -> bool:
+    for step in recipe.prelude:
+        url = str(step.get("url") or "").lower()
+        if "music.youtube.com" in url and step.get("type") == "open_url":
+            return True
+    return False
 
 
 def _prelude_is_youtube(recipe: Recipe) -> bool:
@@ -620,6 +656,9 @@ def recipe_match_score(recipe: Recipe, utterance: str) -> float:
         return 2.0
     if _prelude_is_youtube(recipe) and _phrase_in(text, "youtube"):
         return 2.0
+    # YouTube Music playlists/songs often omit the word "youtube" ("play old Hindi songs").
+    if _prelude_is_youtube_music(recipe) and _MEDIA_INTENT.search(text) and extract_media_query(text):
+        return 1.8
     best = 0.0
     for template in recipe.match_templates:
         lits = [

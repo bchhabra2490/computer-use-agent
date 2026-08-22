@@ -93,6 +93,20 @@ class SpeakerMatch:
     def line_for_prompt(self) -> str:
         return f"Speaker (voice ID): {self.display_name} " f"(confidence {self.score:.0%})."
 
+    def line_for_agent(self) -> str:
+        return (
+            f"Speaker (voice ID): {self.display_name} (confidence {self.score:.0%}). "
+            "You may use this to personalize ask_user or mark_done wording if helpful; "
+            "personalization is optional — never change the task or refuse if unknown."
+        )
+
+
+def agent_speaker_context(match: SpeakerMatch | None) -> str:
+    """Optional block for the computer-use agent prompt, or empty string."""
+    if match is None:
+        return ""
+    return match.line_for_agent() + "\n\n"
+
 
 _last_speaker: SpeakerMatch | None = None
 

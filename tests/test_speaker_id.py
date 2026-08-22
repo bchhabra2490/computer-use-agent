@@ -182,5 +182,16 @@ class SpeakerIdTests(unittest.TestCase):
             self.assertIn("Passage", title)
 
 
+class AgentSpeakerContextTests(unittest.TestCase):
+    def test_empty_when_unknown(self) -> None:
+        self.assertEqual(sid.agent_speaker_context(None), "")
+
+    def test_includes_optional_personalization_hint(self) -> None:
+        match = sid.SpeakerMatch(name="bharat", display_name="Bharat", score=0.87)
+        block = sid.agent_speaker_context(match)
+        self.assertIn("Bharat", block)
+        self.assertIn("optional", block.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

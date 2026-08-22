@@ -1,12 +1,13 @@
 """Single registry of function tools for the orchestrator and computer agent.
 
 Schemas live here once. ``openai_tools(brain)`` filters by who may call them.
-Shared handlers (memory, who_am_i, MCP) are dispatched from both loops.
+Shared handlers run through prepare → execute → finalize (harness-v2 §14).
+Brain-only tools (start_task, give_response, computer, …) stay in their loops.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from memory import MEMORY_TOOLS, run_memory_tool
@@ -23,10 +24,11 @@ START_TASK_TOOL = {
     "name": "start_task",
     "description": (
         "Start the computer-use agent to control the real desktop (mouse, "
-        "keyboard, screenshots) for a concrete UI task. Use when the user wants "
-        "something done on screen that you cannot answer with speech alone. "
-        "The agent runs in the background; say the wake word then an instruction "
-        "to send mid-task updates."
+        "keyboard, screenshots) for a concrete UI task. Required for play/open/"
+        "click/type/search/navigate work — including music, playlists, videos, "
+        "maps, and apps. Do not claim those actions succeeded without calling "
+        "this. Memories alone cannot play media. The agent runs in the "
+        "background; say the wake word then an instruction to send mid-task updates."
     ),
     "parameters": {
         "type": "object",
@@ -52,12 +54,14 @@ ASK_USER_TOOL = {
     "name": "ask_user",
     "description": (
         "Ask the user a clarifying question aloud and capture their spoken answer "
-        "immediately (no wake word). **Last resort** — before calling this, contemplate "
-        "whether list_memories / read_memory already has the answer (names, accounts, "
-        "usual apps, preferences, screen context). Only ask when memory cannot supply "
-        "the detail or you need live confirmation (destructive work, ambiguous choice). "
-        "Never put questions in a plain assistant message or in give_response_to_user. "
-        "One short spoken question, not a numbered list."
+        "immediately (no wake word). HARD RULE: before calling this tool you MUST "
+        "have already called read_memory this turn (personal/profile for people, "
+        "places, prefs, hardware; app/<slug> for app-specific facts). The catalog "
+        "preview is not enough — open the note. Only ask_user if that memory still "
+        "cannot answer, or you need live confirmation for destructive work. Never "
+        "ask which music/maps app, account, place, or preference to use if memory "
+        "already says. Never put questions in a plain assistant message or in "
+        "give_response_to_user. One short spoken question, not a numbered list."
     ),
     "parameters": {
         "type": "object",
@@ -272,16 +276,40 @@ LIST_OPEN_APPS_TOOL = {
     "strict": True,
 }
 
+READ_SCREEN_TOOL = {
+    "type": "function",
+    "name": "read_screen",
+    "description": (
+        "Capture the current desktop now: display layout, open windows, "
+        "accessibility text for the frontmost app, and a screenshot. Use when "
+        "you need a fresh look at what is on screen before answering or deciding "
+        "the next step — prefer this over start_task for read-only on-screen "
+        "questions. Returns text; the screenshot is attached for vision on the "
+        "next model turn."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "unused": {
+                "type": "boolean",
+                "description": "Unused. Always pass false.",
+            },
+        },
+        "required": ["unused"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 READ_UI_TEXT_TOOL = {
     "type": "function",
     "name": "read_ui_text",
     "description": (
         "Read visible UI text via the macOS Accessibility API (no screenshot). "
-        "Prefer this over screenshots when you need labels, field values, menu "
-        "items, or window titles. Returns a compact AX tree with optional click "
-        "centers in screen points. Many Electron/WebGL/CAD apps expose little AX "
-        "data — if the result says no nodes were found, use the computer tool "
-        "screenshot instead."
+        "Prefer read_screen when you also need a visual; use this for AX-only "
+        "labels, field values, menu items, or window titles. Many Electron/WebGL/"
+        "CAD apps expose little AX data — if no nodes were found, use read_screen "
+        "or the computer tool screenshot instead."
     ),
     "parameters": {
         "type": "object",
@@ -374,6 +402,7 @@ SHARED_TOOL_NAMES = frozenset(
         "save_screen_memory",
         "mcp_call",
         "list_open_apps",
+        "read_screen",
         "set_timer",
         "list_timers",
         "cancel_timer",
@@ -388,6 +417,33 @@ class RegisteredTool:
     brains: frozenset[str]
 
 
+@dataclass
+class PreparedToolCall:
+    """Phase 1 result — clearance complete, effect not started."""
+
+    name: str
+    args: dict[str, Any]
+    call_id: str = ""
+
+
+@dataclass
+class ToolOutcome:
+    """Final tool result for the Responses API (+ optional vision follow-ups)."""
+
+    output: str
+    extras: list[dict[str, Any]] = field(default_factory=list)
+    screenshot_png: bytes | None = None
+    is_error: bool = False
+    terminate: bool = False
+
+
+@dataclass
+class ImmediateToolOutcome:
+    """Phase 1 short-circuit (unknown tool, bad args, blocked)."""
+
+    outcome: ToolOutcome
+
+
 def _entry(schema: dict[str, Any], *brains: Brain) -> RegisteredTool:
     return RegisteredTool(name=str(schema["name"]), schema=schema, brains=frozenset(brains))
 
@@ -399,6 +455,7 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(GIVE_RESPONSE_TOOL, ORCHESTRATOR),
     *(_entry(tool, ORCHESTRATOR, AGENT) for tool in MEMORY_TOOLS),
     _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT),
+    _entry(READ_SCREEN_TOOL, ORCHESTRATOR, AGENT),
     _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT),
     _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT),
@@ -437,7 +494,104 @@ def tool_names(brain: Brain) -> set[str]:
     if brain == AGENT:
         names.add("computer")
     names.add("mcp_call")
+    names.add("read_screen")
     return names
+
+
+def prepare_tool_call(
+    name: str,
+    args: dict[str, Any] | None = None,
+    *,
+    call_id: str = "",
+    brain: Brain = ORCHESTRATOR,
+) -> PreparedToolCall | ImmediateToolOutcome:
+    """Phase 1 — lookup + normalize args. No side effects."""
+    args = dict(args or {})
+    known = tool_names(brain)
+    if name not in known and name not in SHARED_TOOL_NAMES:
+        return ImmediateToolOutcome(
+            ToolOutcome(output=f"Unsupported tool: {name}", is_error=True)
+        )
+    return PreparedToolCall(name=name, args=args, call_id=call_id or "")
+
+
+def _execute_read_screen(_args: dict[str, Any], *, client: Any | None = None) -> ToolOutcome:
+    from context import read_screen, read_screen_vision_input
+
+    del client
+    screen = read_screen()
+    text = screen.text or "(No screen data captured.)"
+    extras: list[dict[str, Any]] = []
+    if screen.screenshot_png:
+        extras.append(read_screen_vision_input(screen.screenshot_png))
+    return ToolOutcome(output=text, extras=extras, screenshot_png=screen.screenshot_png)
+
+
+def execute_prepared_tool(
+    prepared: PreparedToolCall,
+    *,
+    client: Any | None = None,
+) -> ToolOutcome:
+    """Phase 2 — run the effect for shared / registered tools."""
+    name = prepared.name
+    args = prepared.args
+    try:
+        if name == "read_screen":
+            return _execute_read_screen(args, client=client)
+        if name == "who_am_i":
+            return ToolOutcome(output=run_whoami_tool(name, args))
+        if name in {"list_memories", "read_memory", "save_memory", "save_screen_memory"}:
+            return ToolOutcome(output=run_memory_tool(name, args, client=client))
+        if name == "mcp_call":
+            from mcp_client import run_mcp_tool
+
+            return ToolOutcome(output=run_mcp_tool(name, args))
+        if name == "list_open_apps":
+            from displays import format_monitor_occupancy
+
+            return ToolOutcome(output=format_monitor_occupancy())
+        if name in {"set_timer", "list_timers", "cancel_timer"}:
+            from timers import run_timer_tool
+
+            return ToolOutcome(output=run_timer_tool(name, args))
+        return ToolOutcome(output=f"Unsupported tool: {name}", is_error=True)
+    except Exception as e:
+        return ToolOutcome(output=f"Error: {e}", is_error=True)
+
+
+def finalize_tool_outcome(outcome: ToolOutcome) -> ToolOutcome:
+    """Phase 3 — normalize output (hooks could patch here later)."""
+    if outcome.output is None:
+        outcome.output = ""
+    return outcome
+
+
+def run_tool(
+    name: str,
+    args: dict[str, Any] | None = None,
+    *,
+    client: Any | None = None,
+    call_id: str = "",
+    brain: Brain = ORCHESTRATOR,
+) -> ToolOutcome:
+    """prepare → execute → finalize for shared tools."""
+    from events import emit
+
+    prepared = prepare_tool_call(name, args, call_id=call_id, brain=brain)
+    if isinstance(prepared, ImmediateToolOutcome):
+        return finalize_tool_outcome(prepared.outcome)
+    emit("tool_start", lane="agent" if brain == AGENT else "main", name=name, call_id=call_id)
+    outcome = execute_prepared_tool(prepared, client=client)
+    outcome = finalize_tool_outcome(outcome)
+    emit(
+        "tool_result",
+        lane="agent" if brain == AGENT else "main",
+        name=name,
+        call_id=call_id,
+        chars=len(outcome.output or ""),
+        is_error=outcome.is_error,
+    )
+    return outcome
 
 
 def run_shared_tool(
@@ -447,21 +601,6 @@ def run_shared_tool(
     client: Any | None = None,
 ) -> str:
     """Execute tools that both brains share. Raises KeyError if not shared."""
-    args = args or {}
-    if name == "who_am_i":
-        return run_whoami_tool(name, args)
-    if name in {"list_memories", "read_memory", "save_memory", "save_screen_memory"}:
-        return run_memory_tool(name, args, client=client)
-    if name == "mcp_call":
-        from mcp_client import run_mcp_tool
-
-        return run_mcp_tool(name, args)
-    if name == "list_open_apps":
-        from displays import format_monitor_occupancy
-
-        return format_monitor_occupancy()
-    if name in {"set_timer", "list_timers", "cancel_timer"}:
-        from timers import run_timer_tool
-
-        return run_timer_tool(name, args)
-    raise KeyError(f"Not a shared tool: {name}")
+    if name not in SHARED_TOOL_NAMES:
+        raise KeyError(f"Not a shared tool: {name}")
+    return run_tool(name, args, client=client).output

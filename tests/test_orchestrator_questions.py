@@ -126,6 +126,23 @@ class UserTurnInputTests(unittest.TestCase):
         self.assertIsInstance(inp, str)
         self.assertIn("open notes", inp)
 
+    def test_attaches_desktop_screenshot(self) -> None:
+        png = b"\x89PNG" + b"\x00" * 20
+        inp = _user_turn_input(
+            "what is on screen?",
+            [],
+            desktop_context="Desktop snapshot",
+            desktop_screenshot_png=png,
+        )
+        self.assertIsInstance(inp, list)
+        content = inp[0]["content"]
+        types = [part["type"] for part in content]
+        self.assertIn("input_text", types)
+        self.assertIn("input_image", types)
+        url = next(p["image_url"] for p in content if p["type"] == "input_image")
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        self.assertIn("Desktop snapshot", content[0]["text"])
+
     def test_attaches_phone_jpeg(self) -> None:
         jpeg = b"\xff\xd8\xff" + b"\x00" * 20
         inp = _user_turn_input("what is this?", [], photo_jpeg=jpeg)

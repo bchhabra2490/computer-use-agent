@@ -216,6 +216,21 @@ class RecipeRunTests(unittest.TestCase):
         self.assertNotIn("playable", opener.call_args[0][0])
         self.assertIsInstance(result, rc.RecipeHit)
 
+    def test_play_old_hindi_songs_matches_youtube_music(self) -> None:
+        self.assertEqual(rc.extract_media_query("Play old Hindi songs."), "old Hindi songs")
+        recipe = rc.pick_matching_recipe("Play old Hindi songs.")
+        self.assertIsNotNone(recipe)
+        assert recipe is not None
+        self.assertEqual(recipe.name, "youtube-music-search-playlist")
+        with (
+            patch.object(rc, "open_url") as opener,
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe("Play old Hindi songs.", settle=0)
+        opener.assert_called_once()
+        self.assertIn("old%20Hindi%20songs", opener.call_args[0][0].replace("+", "%20"))
+        self.assertIsInstance(result, rc.RecipeHit)
+
 
 class _FakeResponsesClient:
     def __init__(self, payload: dict) -> None:

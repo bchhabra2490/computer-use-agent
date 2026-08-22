@@ -1,17 +1,16 @@
 """Personal, application, and screen memories stored under ``memory/``.
 
 Kinds:
-  - personal — facts about the user (name, preferences, accounts that are not
-    app-specific)
+  - personal — all user facts live in one file: ``memory/personal/profile.md``
   - app — per-application notes (usernames, UI quirks, usual workflows)
   - screen — screenshot + LLM description for later recall
 
 After each orchestrator turn and computer-use run, user input plus LLM
 steps are reviewed and durable facts (repos, songs, preferences) are
-appended here automatically. A second background thread then condenses
-those files to drop repetition.
+appended here automatically. Every personal write re-condenses
+``profile.md``; app notes condense when they grow.
 
-Files: ``memory/personal/<slug>.md``, ``memory/apps/<slug>.md``,
+Files: ``memory/personal/profile.md``, ``memory/apps/<slug>.md``,
 ``memory/screens/<slug>.md`` (+ matching ``.png`` for screen captures).
 """
 
@@ -32,6 +31,9 @@ _MEMORY_WRITE_LOCK = threading.Lock()
 _CONDENSE_STATE_LOCK = threading.Lock()
 _condense_running = False
 _condense_pending = False
+_condense_force_kinds: set[str] = set()
+# All personal facts share this single note.
+PERSONAL_FILE_SLUG = "profile"
 MEMORY_VISION_MODEL = (
     os.environ.get("MEMORY_VISION_MODEL") or os.environ.get("ORCHESTRATOR_MODEL") or "gpt-4o-mini"
 ).strip() or "gpt-4o-mini"
@@ -96,7 +98,12 @@ def _subdir(kind: str, memory_dir: Path | None = None) -> Path:
 
 
 def sanitize_memory_name(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    raw = (name or "").strip().lower().replace("\\", "/")
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    if raw.endswith(".md"):
+        raw = raw[:-3]
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
     if not slug or not _SLUG_RE.match(slug):
         raise ValueError(f"Invalid memory name: {name!r}")
     if len(slug) > 64:
@@ -104,12 +111,78 @@ def sanitize_memory_name(name: str) -> str:
     return slug
 
 
+def personal_memory_path(*, memory_dir: Path | None = None) -> Path:
+    return _subdir("personal", memory_dir) / f"{PERSONAL_FILE_SLUG}.md"
+
+
+def merge_legacy_personal_files(*, memory_dir: Path | None = None) -> Path | None:
+    """
+    Fold any leftover ``personal/<other>.md`` files into ``profile.md``.
+
+    Idempotent; safe to call on every ensure. Returns the profile path when
+    a merge happened, else None.
+    """
+    folder = _subdir("personal", memory_dir)
+    if not folder.is_dir():
+        return None
+    others = sorted(p for p in folder.glob("*.md") if p.is_file() and p.stem != PERSONAL_FILE_SLUG)
+    if not others:
+        return None
+    profile = personal_memory_path(memory_dir=memory_dir)
+    chunks: list[str] = []
+    with _MEMORY_WRITE_LOCK:
+        if profile.is_file():
+            chunks.append(profile.read_text(encoding="utf-8").rstrip())
+        for path in others:
+            try:
+                body = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if not body:
+                path.unlink(missing_ok=True)
+                continue
+            title = path.stem
+            chunks.append(f"## {title}\n\n{body}")
+            path.unlink(missing_ok=True)
+        if not chunks:
+            return None
+        text = "\n\n".join(chunks)
+        if not text.lstrip().startswith("#"):
+            text = f"# personal / {PERSONAL_FILE_SLUG}\n\n" + text
+        profile.write_text(text.rstrip() + "\n", encoding="utf-8")
+    print(
+        f"[memory] merged {len(others)} legacy personal file(s) → " f"personal/{PERSONAL_FILE_SLUG}.md",
+        flush=True,
+    )
+    return profile
+
+
 def ensure_memory_dirs(memory_dir: Path | None = None) -> Path:
     root = _root(memory_dir)
     (root / "personal").mkdir(parents=True, exist_ok=True)
     (root / "apps").mkdir(parents=True, exist_ok=True)
     (root / "screens").mkdir(parents=True, exist_ok=True)
+    merge_legacy_personal_files(memory_dir=memory_dir)
     return root
+
+
+def _personal_append_body(name: str | None, text: str) -> str:
+    """Tag optional topic when callers still pass a non-profile slug."""
+    body = (text or "").strip()
+    if not body:
+        return body
+    raw = (name or "").strip()
+    if not raw:
+        return body
+    try:
+        topic = sanitize_memory_name(raw)
+    except ValueError:
+        return body
+    if topic == PERSONAL_FILE_SLUG:
+        return body
+    if body.lower().startswith(f"**{topic}:**") or body.lower().startswith(f"# {topic}"):
+        return body
+    return f"**{topic}:** {body}"
 
 
 def _is_live_layout_memory(kind: str, name: str) -> bool:
@@ -145,6 +218,19 @@ def list_memories(
     notes: list[MemoryNote] = []
     for k in kinds:
         folder = _subdir(k, memory_dir)
+        if k == "personal":
+            path = personal_memory_path(memory_dir=memory_dir)
+            if path.is_file():
+                text = path.read_text(encoding="utf-8")
+                notes.append(
+                    MemoryNote(
+                        kind="personal",
+                        name=PERSONAL_FILE_SLUG,
+                        path=path,
+                        text=text,
+                    )
+                )
+            continue
         for path in sorted(folder.glob("*.md")):
             text = path.read_text(encoding="utf-8")
             notes.append(MemoryNote(kind=k, name=path.stem, path=path, text=text))
@@ -159,9 +245,17 @@ def read_memory(
 ) -> str:
     """
     Return markdown for one note, or all notes of that kind when ``name`` is empty.
+
+    Personal memories always resolve to ``profile.md`` (any name is ignored).
     """
     ensure_memory_dirs(memory_dir)
     canon = _canonical_kind(kind)
+    if canon == "personal":
+        path = personal_memory_path(memory_dir=memory_dir)
+        if not path.is_file():
+            raise FileNotFoundError(f"No personal memory yet (expected personal/{PERSONAL_FILE_SLUG}.md).")
+        return path.read_text(encoding="utf-8")
+
     slug = (name or "").strip()
     if not slug:
         notes = list_memories(canon, memory_dir=memory_dir)
@@ -187,10 +281,14 @@ def save_memory(
     memory_dir: Path | None = None,
     condense: bool = True,
 ) -> Path:
-    """Create or update a memory file. ``mode`` is append (default) or replace."""
+    """Create or update a memory file. ``mode`` is append (default) or replace.
+
+    Personal facts always land in ``personal/profile.md``. A non-profile
+    ``name`` is kept as a topic tag in the body. After every personal write,
+    the profile file is force-condensed when MEMORY_CONDENSE is on.
+    """
     ensure_memory_dirs(memory_dir)
     canon = _canonical_kind(kind)
-    slug = sanitize_memory_name(name)
     body = (text or "").strip()
     if not body:
         raise ValueError("Memory text is empty.")
@@ -198,6 +296,12 @@ def save_memory(
     how = (mode or "append").strip().lower()
     if how not in {"append", "replace"}:
         raise ValueError("Memory mode must be 'append' or 'replace'.")
+
+    if canon == "personal":
+        slug = PERSONAL_FILE_SLUG
+        body = _personal_append_body(name, body)
+    else:
+        slug = sanitize_memory_name(name)
 
     path = _subdir(canon, memory_dir) / f"{slug}.md"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -211,22 +315,19 @@ def save_memory(
             existing = path.read_text(encoding="utf-8").rstrip() + "\n\n"
             path.write_text(existing + block, encoding="utf-8")
     if condense:
-        schedule_memory_condense(memory_dir=memory_dir)
+        force_kinds = frozenset({"personal"}) if canon == "personal" else frozenset()
+        schedule_memory_condense(memory_dir=memory_dir, force_kinds=force_kinds)
     return path
 
 
 def format_memory_catalog(*, memory_dir: Path | None = None) -> str:
     """Compact index for prompts (names + one-line preview, not full text)."""
-    notes = [
-        n
-        for n in list_memories("all", memory_dir=memory_dir)
-        if not _is_live_layout_memory(n.kind, n.name)
-    ]
+    notes = [n for n in list_memories("all", memory_dir=memory_dir) if not _is_live_layout_memory(n.kind, n.name)]
     if not notes:
         return "No memories saved yet. Use save_memory for facts, or " "save_screen_memory to snapshot the display."
     lines = [
-        "Saved memories (contemplate whether these answer the user before ask_user; "
-        "call read_memory for full text; save_memory / save_screen_memory to update):"
+        "Saved memories (MUST call read_memory before ask_user — catalog preview "
+        "is not enough; save_memory / save_screen_memory to update):"
     ]
     for note in notes:
         lines.append(f"  - {note.rel}: {_preview(note.text)}")
@@ -334,6 +435,14 @@ def parse_extracted_memory_items(payload: Any) -> list[dict[str, str]]:
         text = str(row.get("text") or "").strip()
         if kind not in {"personal", "app"} or not name or not text:
             continue
+        if kind == "personal":
+            try:
+                topic = sanitize_memory_name(name)
+            except ValueError:
+                topic = PERSONAL_FILE_SLUG
+            name = PERSONAL_FILE_SLUG
+            if topic != PERSONAL_FILE_SLUG:
+                text = _personal_append_body(topic, text)
         if _is_live_layout_memory(kind, name):
             continue
         if _text_looks_secret(text):
@@ -390,7 +499,8 @@ def apply_extracted_memory_items(
         written.append(shown)
         print(f"[memory] extracted → {shown}", flush=True)
     if written:
-        schedule_memory_condense(memory_dir=memory_dir)
+        force = frozenset({"personal"} if any(p.replace("\\", "/").startswith("personal/") for p in written) else ())
+        schedule_memory_condense(memory_dir=memory_dir, force_kinds=force)
     return written
 
 
@@ -420,7 +530,11 @@ Respond with JSON only (no markdown fences):
 {"items": [{"kind": "personal" or "app", "name": "short-slug", "text": "one or more bullets", "reason": "why"}]}
 
 Use kind=app and a slug like github, youtube, hn, chrome when the fact is tied to an app.
-Use kind=personal and name=profile for who the user is / standing preferences.
+Use kind=personal and name=profile for who the user is / standing preferences /
+people / places / hardware owned — all personal facts share one profile file.
+Put topic labels inside ``text`` (e.g. "- Multimeter: Fluke 117") rather than
+using a separate personal slug.
+``name`` must be a slug only — no ``.md``, no ``personal/`` or ``apps/`` path prefix.
 If nothing is worth saving, return {"items": []}.
 """
 
@@ -523,11 +637,22 @@ def _dated_heading_count(text: str) -> int:
     return sum(1 for line in (text or "").splitlines() if line.startswith("## "))
 
 
-def notes_need_condense(notes: list[MemoryNote]) -> bool:
-    """True when personal/app notes have stacked dated sections or are long."""
+def notes_need_condense(
+    notes: list[MemoryNote],
+    *,
+    force_kinds: frozenset[str] | set[str] | None = None,
+) -> bool:
+    """True when personal/app notes have stacked dated sections or are long.
+
+    ``force_kinds`` (e.g. ``{"personal"}``) always triggers for those kinds
+    so profile is re-condensed after every personal write.
+    """
+    forced = force_kinds or frozenset()
     for note in notes:
         if note.kind == "screen" or _is_live_layout_memory(note.kind, note.name):
             continue
+        if note.kind in forced:
+            return True
         if _dated_heading_count(note.text) >= 2:
             return True
         if len(note.text) > 2500:
@@ -551,6 +676,8 @@ def parse_condensed_memory_files(payload: Any) -> list[dict[str, str]]:
         text = str(row.get("text") or "").strip()
         if kind not in {"personal", "app"} or not name or not text:
             continue
+        if kind == "personal":
+            name = PERSONAL_FILE_SLUG
         if _is_live_layout_memory(kind, name):
             continue
         if _text_looks_secret(text):
@@ -569,7 +696,7 @@ def write_condensed_memory(
     """Overwrite a note with compact markdown (no extra dated section)."""
     ensure_memory_dirs(memory_dir)
     canon = _canonical_kind(kind)
-    slug = sanitize_memory_name(name)
+    slug = PERSONAL_FILE_SLUG if canon == "personal" else sanitize_memory_name(name)
     body = (text or "").strip()
     if not body:
         raise ValueError("Memory text is empty.")
@@ -634,6 +761,8 @@ Rules:
 - Do not invent facts. Do not include passwords, API keys, or tokens.
 - Rewrite each file as compact markdown: one title line, then bullets.
   No dated ## timestamps.
+- Personal facts always live in a single file: kind=personal, name=profile.
+  Organize that file with clear topic bullets; never invent extra personal files.
 - Omit a file from the result if it is already compact.
 - Only personal and app notes (never screens or the auto-written displays layout).
 
@@ -642,6 +771,8 @@ Current files:
 
 Respond with JSON only (no markdown fences):
 {"files": [{"kind": "personal" or "app", "name": "slug", "text": "# kind / slug\\n\\n- fact", "reason": "why"}]}
+``name`` must match the file slug only (e.g. profile, youtube) — never include ``.md`` or a folder path.
+For personal, ``name`` must always be ``profile``.
 If nothing needs rewriting, return {"files": []}.
 """
 
@@ -650,15 +781,26 @@ def _condense_memories_impl(
     client: Any,
     *,
     memory_dir: Path | None = None,
+    force_kinds: frozenset[str] | set[str] | None = None,
 ) -> list[str]:
     notes = [
         n
         for n in list_memories("all", memory_dir=memory_dir)
         if n.kind in {"personal", "app"} and not _is_live_layout_memory(n.kind, n.name)
     ]
-    if not notes_need_condense(notes):
+    if not notes_need_condense(notes, force_kinds=force_kinds):
         print("[memory] condense skipped (already compact)", flush=True)
         return []
+    # When forcing personal, still send all notes that need work plus personal.
+    forced = force_kinds or frozenset()
+    if forced:
+        selected: list[MemoryNote] = []
+        for note in notes:
+            if note.kind in forced:
+                selected.append(note)
+            elif notes_need_condense([note]):
+                selected.append(note)
+        notes = selected or notes
     blob = _format_notes_for_condense(notes)
     prompt = _CONDENSE_PROMPT.replace("<<<FILES>>>", blob)
     print("[memory] condensing memories…", flush=True)
@@ -679,13 +821,25 @@ def _condense_memories_impl(
         return []
 
 
-def _condense_worker(*, memory_dir: Path | None) -> None:
-    global _condense_running, _condense_pending
+def _condense_worker(
+    *,
+    memory_dir: Path | None,
+    force_kinds: frozenset[str] | None = None,
+) -> None:
+    global _condense_running, _condense_pending, _condense_force_kinds
     try:
         while True:
+            with _CONDENSE_STATE_LOCK:
+                kinds = frozenset(_condense_force_kinds | set(force_kinds or ()))
+                _condense_force_kinds.clear()
+                force_kinds = None
             try:
                 client = _new_extract_client()
-                _condense_memories_impl(client, memory_dir=memory_dir)
+                _condense_memories_impl(
+                    client,
+                    memory_dir=memory_dir,
+                    force_kinds=kinds,
+                )
             except Exception as e:
                 print(f"[memory] condense failed: {e}", flush=True)
             with _CONDENSE_STATE_LOCK:
@@ -697,6 +851,7 @@ def _condense_worker(*, memory_dir: Path | None) -> None:
         with _CONDENSE_STATE_LOCK:
             _condense_running = False
             _condense_pending = False
+            _condense_force_kinds.clear()
         raise
 
 
@@ -704,27 +859,33 @@ def schedule_memory_condense(
     *,
     memory_dir: Path | None = None,
     background: bool = True,
+    force_kinds: frozenset[str] | set[str] | None = None,
 ) -> None:
     """
     Deduplicate personal/app memory files on a daemon thread.
 
     Coalesces overlapping requests so extract + save_memory do not stack
-    parallel LLM calls. No-op when MEMORY_CONDENSE=0.
+    parallel LLM calls. Pass ``force_kinds={"personal"}`` to re-condense
+    profile after every personal write. No-op when MEMORY_CONDENSE=0.
     """
     if not memory_condense_enabled():
         return
-    global _condense_running, _condense_pending
+    global _condense_running, _condense_pending, _condense_force_kinds
     with _CONDENSE_STATE_LOCK:
+        if force_kinds:
+            _condense_force_kinds.update(force_kinds)
         if _condense_running:
             _condense_pending = True
             return
         _condense_running = True
+        kinds = frozenset(_condense_force_kinds)
+        _condense_force_kinds.clear()
     if not background:
-        _condense_worker(memory_dir=memory_dir)
+        _condense_worker(memory_dir=memory_dir, force_kinds=kinds)
         return
     threading.Thread(
         target=_condense_worker,
-        kwargs={"memory_dir": memory_dir},
+        kwargs={"memory_dir": memory_dir, "force_kinds": kinds},
         name="memory-condense",
         daemon=True,
     ).start()
@@ -928,13 +1089,12 @@ READ_MEMORY_TOOL = {
     "type": "function",
     "name": "read_memory",
     "description": (
-        "Read stored memory markdown. kind=personal is user facts "
-        "(usually name=profile); kind=app is per-application notes "
-        "(name=hn, chrome, …); kind=screen is screenshot descriptions. "
-        "Pass name=null to load every note of that kind. "
+        "Read stored memory markdown. kind=personal is the single user profile "
+        "(memory/personal/profile.md — name is optional/ignored); kind=app is "
+        "per-application notes (name=hn, chrome, …); kind=screen is screenshot "
+        "descriptions. Pass name=null to load every note of that kind. "
         "Use before ask_user — read when a fact you need may already be saved "
-        "(profile, app habits, screen context). Pass name=null to load every note "
-        "of that kind when unsure which file holds the answer."
+        "(profile, app habits, screen context)."
     ),
     "parameters": {
         "type": "object",
@@ -947,7 +1107,8 @@ READ_MEMORY_TOOL = {
             "name": {
                 "type": ["string", "null"],
                 "description": (
-                    "Note slug without .md (profile, hn, or a screen slug). "
+                    "Note slug without .md (profile for personal, or hn / a screen slug). "
+                    "For personal, any name reads profile.md. "
                     "Pass null to read all notes of this kind."
                 ),
             },
@@ -962,10 +1123,13 @@ SAVE_MEMORY_TOOL = {
     "type": "function",
     "name": "save_memory",
     "description": (
-        "Save a durable fact to memory/. personal → memory/personal/<name>.md; "
-        "app → memory/apps/<name>.md. Use when the user says remember/save this, "
-        "or after you learn a preference you will need again. Never store "
-        "passwords or API keys unless explicitly asked."
+        "Save a durable fact to memory/. personal always appends to "
+        "memory/personal/profile.md (then re-condenses that file); "
+        "app → memory/apps/<name>.md. For personal, name should be profile "
+        "(or a short topic tag that is stored inside the profile text). "
+        "Use when the user says remember/save this, or after you learn a "
+        "preference you will need again. Never store passwords or API keys "
+        "unless explicitly asked."
     ),
     "parameters": {
         "type": "object",
@@ -977,7 +1141,10 @@ SAVE_MEMORY_TOOL = {
             },
             "name": {
                 "type": "string",
-                "description": "Short slug (profile, hn, gmail, …).",
+                "description": (
+                    "For personal use profile (or a topic slug tagged in the body); "
+                    "for app use hn, gmail, youtube, …"
+                ),
             },
             "text": {
                 "type": "string",
@@ -1052,9 +1219,13 @@ def run_memory_tool(name: str, args: dict, *, client: Any | None = None) -> str:
         if name == "save_memory":
             text = (args.get("text") or "").strip()
             mode = str(args.get("mode") or "append")
+            kind_s = str(kind or "personal")
             if not mem_name:
-                return "Error: save_memory requires a name (e.g. profile, hn)."
-            path = save_memory(str(kind or "personal"), mem_name, text, mode=mode)
+                if _canonical_kind(kind_s) == "personal":
+                    mem_name = PERSONAL_FILE_SLUG
+                else:
+                    return "Error: save_memory requires a name (e.g. hn)."
+            path = save_memory(kind_s, mem_name, text, mode=mode)
             try:
                 shown = path.relative_to(_root(None))
             except ValueError:

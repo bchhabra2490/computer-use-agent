@@ -1,15 +1,19 @@
 """Fn-key dictation: speak into the focused field via OpenAI Realtime STT.
 
-Press Fn alone (no other modifiers) while a text field is focused. The mic
-opens, Realtime transcription runs, and partial text is pasted as you speak.
+Hold Fn alone (no other modifiers) while a text field is focused, then
+release to send. The mic opens, Realtime transcription runs, and partial
+text is pasted as you speak. Release ends listening (send). Esc or Fn
+again while listening cancels.
+
 The face overlay switches to listen mode while the mic is open (``stt_active``).
+A three-dot indicator appears near the cursor while you hold Fn
+(``DICTATION_OVERLAY=1``, default on); it switches to a circular spinner
+after you release, until transcription finishes.
 
-Modes (DICTATION_MODE):
-  tap  — Fn press starts; ends after silence / Esc / over-and-out (default)
-  hold — hold Fn while speaking; release to send
-
-Requires Accessibility (and usually Input Monitoring) for the event tap.
-Start with the orchestrator when DICTATION=1, or: ``cua dictation start``.
+Requires Accessibility (and usually Input Monitoring) for the HID event tap.
+The tap swallows Globe/Fn (keycode 63) so macOS emoji / input-source UI does
+not also open. Start with the orchestrator when DICTATION=1, or:
+``cua dictation start``.
 """
 
 from __future__ import annotations
@@ -30,7 +34,6 @@ LOG_PATH = ROOT / "logs" / "dictation.log"
 _OFF = {"0", "false", "no", "off"}
 
 DICTATION_ENABLED = os.environ.get("DICTATION", "1").strip().lower() not in _OFF
-DICTATION_MODE = (os.environ.get("DICTATION_MODE") or "tap").strip().lower()
 DICTATION_IDLE = float(os.environ.get("DICTATION_IDLE_SECONDS", "2.0"))
 DICTATION_SWALLOW = os.environ.get("DICTATION_SWALLOW", "1").strip().lower() not in _OFF
 DICTATION_REQUIRE_EDITABLE = (
@@ -40,6 +43,8 @@ DICTATION_REQUIRE_EDITABLE = (
 DICTATION_COOLDOWN = float(os.environ.get("DICTATION_COOLDOWN", "0.45"))
 # Batch rapid STT deltas before paste (seconds).
 DICTATION_PASTE_DEBOUNCE = float(os.environ.get("DICTATION_PASTE_DEBOUNCE", "0.08"))
+# kVK_Function — Globe / Fn on Apple keyboards (emoji & character viewer).
+FN_KEYCODE = 63
 
 
 def dictation_enabled() -> bool:
@@ -114,7 +119,7 @@ def ensure_dictation_running() -> subprocess.Popen | None:
         )
         return None
     PID_PATH.write_text(f"{proc.pid}\n", encoding="utf-8")
-    print(f"[dictation] started (pid={proc.pid}) — Fn alone to dictate", flush=True)
+    print(f"[dictation] started (pid={proc.pid}) — hold Fn to dictate", flush=True)
     return proc
 
 
@@ -176,12 +181,19 @@ def cmd_status() -> int:
         print("dictation: stopped")
         return 1
     print(f"dictation: running (pid {pid})")
-    print(f"mode={DICTATION_MODE} idle={DICTATION_IDLE:g}s swallow={int(DICTATION_SWALLOW)}")
+    print(f"hold-to-talk idle={DICTATION_IDLE:g}s swallow={int(DICTATION_SWALLOW)}")
     return 0
 
 
 def _fn_alone(flags: int, *, secondary_fn: int, other_mods: int) -> bool:
     return bool(flags & secondary_fn) and not bool(flags & other_mods)
+
+
+def _is_globe_fn_key(keycode: int, flags: int, *, other_mods: int) -> bool:
+    """True for the Globe/Fn key itself, not Fn+F-key or media remaps."""
+    if int(keycode) != FN_KEYCODE:
+        return False
+    return not bool(int(flags) & other_mods)
 
 
 def _keystroke_v() -> None:
@@ -407,7 +419,7 @@ class DictationDaemon:
             return False, f"focus is not editable ({role})"
         return True, info.get("role") or "ok"
 
-    def _run_session(self, *, hold: bool) -> None:
+    def _run_session(self) -> None:
         if not self._busy.acquire(blocking=False):
             print("[dictation] already recording", flush=True)
             return
@@ -421,6 +433,12 @@ class DictationDaemon:
                 print(f"[dictation] skip: {why}", flush=True)
                 return
             print(f"[dictation] listening… ({why})", flush=True)
+            try:
+                from dictation_overlay import hide_dictation_overlay, show_dictation_overlay
+
+                show_dictation_overlay()
+            except Exception:
+                pass
             try:
                 from app_status import read_status, set_state
 
@@ -445,27 +463,26 @@ class DictationDaemon:
                 from stt import ListenCancelled, NoSpeechError, listen_once
 
                 client = OpenAI()
-                if hold:
-                    # Background: watch for Fn release → Send.
-                    def _hold_watch() -> None:
-                        while self._session.is_set() and not self._stop.is_set():
-                            if self._hold_send.is_set() or not self._fn_down:
-                                try:
-                                    from app_status import request_send
 
-                                    request_send()
-                                except Exception:
-                                    pass
-                                return
-                            time.sleep(0.05)
+                def _hold_watch() -> None:
+                    while self._session.is_set() and not self._stop.is_set():
+                        if self._hold_send.is_set() or not self._fn_down:
+                            try:
+                                from app_status import request_send
 
-                    threading.Thread(
-                        target=_hold_watch, name="dictation-hold", daemon=True
-                    ).start()
+                                request_send()
+                            except Exception:
+                                pass
+                            return
+                        time.sleep(0.05)
+
+                threading.Thread(
+                    target=_hold_watch, name="dictation-hold", daemon=True
+                ).start()
 
                 text = listen_once(
                     client,
-                    prompt="Dictation… (speak, then pause; Esc cancels)",
+                    prompt="Dictation… (hold Fn; release to send; Esc cancels)",
                     mode="freeform",
                     max_attempts=1,
                     announce_retries=False,
@@ -514,6 +531,12 @@ class DictationDaemon:
             except Exception:
                 pass
         finally:
+            try:
+                from dictation_overlay import hide_dictation_overlay
+
+                hide_dictation_overlay()
+            except Exception:
+                pass
             if prev_status is not None:
                 try:
                     from app_status import set_state
@@ -531,7 +554,11 @@ class DictationDaemon:
         """Handle Fn alone edge. Returns True if the event should be swallowed."""
         now = time.monotonic()
         if down:
-            if now - self._last_edge < DICTATION_COOLDOWN and not self._session.is_set():
+            # FlagsChanged + KeyDown fire for one Globe press. Ignore the extra
+            # edge so we do not cancel the session we just started.
+            if now - self._last_edge < DICTATION_COOLDOWN:
+                if self._session.is_set() or self._fn_down:
+                    return True
                 return False
             self._last_edge = now
             self._fn_down = True
@@ -545,27 +572,23 @@ class DictationDaemon:
                     pass
                 print("[dictation] Fn again — cancel", flush=True)
                 return DICTATION_SWALLOW
-            if DICTATION_MODE == "hold":
-                threading.Thread(
-                    target=self._run_session,
-                    kwargs={"hold": True},
-                    name="dictation-session",
-                    daemon=True,
-                ).start()
-                return DICTATION_SWALLOW
-            # tap
             threading.Thread(
                 target=self._run_session,
-                kwargs={"hold": False},
                 name="dictation-session",
                 daemon=True,
             ).start()
             return DICTATION_SWALLOW
 
-        # Fn up
+        # Fn up → send (hold-to-talk).
         was = self._fn_down
         self._fn_down = False
-        if was and DICTATION_MODE == "hold" and self._session.is_set():
+        if was and self._session.is_set():
+            try:
+                from dictation_overlay import set_dictation_overlay_style
+
+                set_dictation_overlay_style("spinner")
+            except Exception:
+                pass
             self._hold_send.set()
             return DICTATION_SWALLOW
         return False
@@ -578,6 +601,7 @@ def _install_fn_tap(daemon: DictationDaemon) -> bool:
             CFRunLoopAddSource,
             CFRunLoopGetCurrent,
             CGEventGetFlags,
+            CGEventGetIntegerValueField,
             CGEventMaskBit,
             CGEventTapCreate,
             CGEventTapEnable,
@@ -588,9 +612,15 @@ def _install_fn_tap(daemon: DictationDaemon) -> bool:
             kCGEventFlagMaskControl,
             kCGEventFlagMaskSecondaryFn,
             kCGEventFlagMaskShift,
+            kCGEventKeyDown,
+            kCGEventKeyUp,
+            kCGEventTapDisabledByTimeout,
+            kCGEventTapDisabledByUserInput,
             kCGEventTapOptionDefault,
             kCGEventTapOptionListenOnly,
+            kCGHIDEventTap,
             kCGHeadInsertEventTap,
+            kCGKeyboardEventKeycode,
             kCGSessionEventTap,
         )
     except Exception as e:
@@ -606,28 +636,54 @@ def _install_fn_tap(daemon: DictationDaemon) -> bool:
     )
     option = kCGEventTapOptionDefault if DICTATION_SWALLOW else kCGEventTapOptionListenOnly
     state = {"fn": False}
+    tap_ref: list = [None]
+    # HID tap can consume Globe before WindowServer opens emoji; session is fallback.
+    tap_kind = "hid"
 
     def callback(_proxy, etype, event, _ref):
         try:
-            if etype != kCGEventFlagsChanged:
+            if etype in (
+                kCGEventTapDisabledByTimeout,
+                kCGEventTapDisabledByUserInput,
+            ):
+                port = tap_ref[0]
+                if port is not None:
+                    CGEventTapEnable(port, True)
+                    print("[dictation] event tap re-enabled", flush=True)
                 return event
+            if etype not in (
+                kCGEventFlagsChanged,
+                kCGEventKeyDown,
+                kCGEventKeyUp,
+            ):
+                return event
+            keycode = int(CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode))
             flags = int(CGEventGetFlags(event))
-            down = _fn_alone(flags, secondary_fn=secondary, other_mods=other)
+            if not _is_globe_fn_key(keycode, flags, other_mods=other):
+                return event
+            if etype == kCGEventFlagsChanged:
+                down = bool(flags & secondary)
+            else:
+                down = etype == kCGEventKeyDown
             if down and not state["fn"]:
                 state["fn"] = True
-                if daemon.on_fn_edge(down=True):
-                    return None
+                daemon.on_fn_edge(down=True)
             elif not down and state["fn"]:
                 state["fn"] = False
-                if daemon.on_fn_edge(down=False):
-                    return None
+                daemon.on_fn_edge(down=False)
+            if DICTATION_SWALLOW:
+                return None
         except Exception as e:
             print(f"[dictation] tap callback: {e}", flush=True)
         return event
 
-    mask = CGEventMaskBit(kCGEventFlagsChanged)
+    mask = (
+        CGEventMaskBit(kCGEventFlagsChanged)
+        | CGEventMaskBit(kCGEventKeyDown)
+        | CGEventMaskBit(kCGEventKeyUp)
+    )
     tap = CGEventTapCreate(
-        kCGSessionEventTap,
+        kCGHIDEventTap,
         kCGHeadInsertEventTap,
         option,
         mask,
@@ -635,17 +691,36 @@ def _install_fn_tap(daemon: DictationDaemon) -> bool:
         None,
     )
     if tap is None:
+        tap_kind = "session"
+        tap = CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            option,
+            mask,
+            callback,
+            None,
+        )
+        if tap is not None:
+            print(
+                "[dictation] HID tap unavailable — using session tap; "
+                "macOS emoji/Globe may still open. Grant Accessibility and "
+                "Input Monitoring to this terminal/Python.",
+                flush=True,
+            )
+    if tap is None:
         print(
             "[dictation] event tap unavailable — grant Accessibility "
             "(and Input Monitoring) to this terminal/Python in System Settings.",
             flush=True,
         )
         return False
+    tap_ref[0] = tap
     source = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
     CGEventTapEnable(tap, True)
     print(
-        f"[dictation] Fn hotkey armed (mode={DICTATION_MODE}, swallow={int(DICTATION_SWALLOW)})",
+        f"[dictation] Fn hotkey armed (hold-to-talk, "
+        f"swallow={int(DICTATION_SWALLOW)}, tap={tap_kind})",
         flush=True,
     )
     return True
@@ -676,13 +751,19 @@ def run_dictation() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     PID_PATH.write_text(f"{os.getpid()}\n", encoding="utf-8")
     print(
-        f"[dictation] ready — press Fn alone to dictate into the focused field "
+        f"[dictation] ready — hold Fn to dictate into the focused field "
         f"(idle={DICTATION_IDLE:g}s)",
         flush=True,
     )
     if not _install_fn_tap(daemon):
         print("[dictation] no event tap — exiting", flush=True)
         return
+    try:
+        from dictation_overlay import init_dictation_overlay
+
+        init_dictation_overlay()
+    except Exception:
+        pass
     try:
         from Quartz import CFRunLoopRun
 

@@ -34,7 +34,7 @@ Speaker enrollment (who is talking)::
     cua speaker test
     cua speaker test --speak-prompts
 
-Fn-key dictation (paste speech into the focused field)::
+Fn-key dictation (hold Fn to paste speech into the focused field)::
 
     cua dictation start
     cua dictation stop
@@ -377,7 +377,7 @@ SPEAKER ID (who is talking — set SPEAKER_ID=1 in .env)
   cua speaker test [--verbose] [--speak-prompts]
   cua speaker delete NAME
 
-DICTATION (Fn key → paste speech into focused field; DICTATION=1 in .env)
+DICTATION (hold Fn → paste speech into focused field; DICTATION=1 in .env)
   cua dictation start
   cua dictation stop
   cua dictation status
@@ -536,12 +536,12 @@ def main(argv: list[str] | None = None) -> int:
 
     dict_p = sub.add_parser(
         "dictation",
-        help="Fn-key dictation — Realtime STT into the focused text field",
+        help="Hold-Fn dictation — Realtime STT into the focused text field",
     )
     dict_sub = dict_p.add_subparsers(dest="dictation_command", required=True)
     dict_sub.add_parser("start", help="Start the dictation hotkey daemon")
     dict_sub.add_parser("stop", help="Stop the dictation daemon")
-    dict_sub.add_parser("status", help="Show dictation pid / mode")
+    dict_sub.add_parser("status", help="Show dictation pid")
 
     accept_p = obs_sub.add_parser(
         "accept",

@@ -49,11 +49,15 @@ def _default_state() -> dict[str, Any]:
         "done_requested": False,
         "done_agent_id": None,
         "send_requested": False,
+        "cancel_requested": False,
         "stt_active": False,
         "agents": [],  # active subagents / computer-agent jobs
         "overlay_hidden": False,
         "overlay_ack_hidden": False,
         "overlay_enabled": True,
+        "face_overlay_enabled": True,
+        "tts_playing": False,
+        "tts_play_depth": 0,
         "phone_gateway_pid": None,
         "pending_utterances": [],
         "pending_speaks": [],
@@ -201,6 +205,39 @@ def set_overlay_enabled(enabled: bool) -> None:
         _write(data)
 
 
+def set_face_overlay_enabled(enabled: bool) -> None:
+    """Show or hide the top-center face panel (tray menu toggle)."""
+    with _lock:
+        data = _read()
+        data["face_overlay_enabled"] = bool(enabled)
+        _write(data)
+
+
+def begin_tts_playback() -> None:
+    """Mark that Jarvis audio is synthesizing or playing (nested-safe)."""
+    with _lock:
+        data = _read()
+        depth = max(0, int(data.get("tts_play_depth") or 0)) + 1
+        data["tts_play_depth"] = depth
+        data["tts_playing"] = True
+        _write(data)
+
+
+def end_tts_playback() -> None:
+    """Clear TTS activity when a synth/play scope exits."""
+    with _lock:
+        data = _read()
+        depth = max(0, int(data.get("tts_play_depth") or 0) - 1)
+        data["tts_play_depth"] = depth
+        data["tts_playing"] = depth > 0
+        _write(data)
+
+
+def tts_playing(data: dict[str, Any] | None = None) -> bool:
+    snap = data if data is not None else read_status()
+    return bool(snap.get("tts_playing"))
+
+
 def ack_overlay_hidden(hidden: bool) -> None:
     """Tray confirms the panel is actually off-screen (or back)."""
     with _lock:
@@ -223,23 +260,30 @@ def set_phone_gateway_pid(pid: int | None) -> None:
         _write(data)
 
 
-def enqueue_utterance(text: str, *, source: str = "phone", photo: bool = False) -> None:
+def enqueue_utterance(
+    text: str,
+    *,
+    source: str = "phone",
+    photo: bool = False,
+    sink: str | None = None,
+) -> None:
     """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
     text = (text or "").strip()
     if not text:
         return
     source = (source or "phone").strip() or "phone"
+    item: dict[str, Any] = {
+        "text": text,
+        "source": source,
+        "ts": time.time(),
+        "photo": bool(photo),
+    }
+    if sink is not None:
+        item["sink"] = _normalize_sink(sink)
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
-        pending.append(
-            {
-                "text": text,
-                "source": source,
-                "ts": time.time(),
-                "photo": bool(photo),
-            }
-        )
+        pending.append(item)
         data["pending_utterances"] = pending[-20:]
         _write(data)
     kind = "photo" if photo else "queued"
@@ -254,6 +298,16 @@ def utterance_pending() -> bool:
 
 def _normalize_sink(sink: str | None) -> str:
     return "phone" if (sink or "").strip().lower() == "phone" else "mac"
+
+
+def parse_reply_sink_param(value: Any) -> str | None:
+    """Parse optional API ``sink`` / ``speaker``; ``None`` leaves reply_sink unchanged."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    return _normalize_sink(s)
 
 
 def set_reply_sink(sink: str) -> None:
@@ -279,11 +333,8 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
-        if isinstance(item, str):
-            data["reply_sink"] = "phone"
-        else:
-            src = str((item or {}).get("source") or "phone").strip().lower()
-            data["reply_sink"] = "phone" if src == "phone" else "mac"
+        if isinstance(item, dict) and item.get("sink") is not None:
+            data["reply_sink"] = _normalize_sink(str(item.get("sink")))
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -529,6 +580,7 @@ def register_orchestrator(pid: int | None = None) -> None:
         data["done_requested"] = False
         data["done_agent_id"] = None
         data["send_requested"] = False
+        data["cancel_requested"] = False
         data["stt_active"] = False
         _write(data)
 
@@ -585,7 +637,9 @@ _MARK_DONE_RE = re.compile(
     r"|mark done"
     r"|that(?:'s| is) done"
     r"|task is done"
-    r"|stop (?:the )?(?:task|agent)"
+    r"|stop (?:the )?(?:task|agent|job|run)"
+    r"|pause (?:the )?(?:task|agent|job|run)"
+    r"|cancel (?:the )?(?:task|agent|job|run)"
     r"|no (?:other|further) actions?(?: (?:is|are))? required"
     r"|no further action"
     r"|nothing else (?:to do|needed|required)"
@@ -594,15 +648,34 @@ _MARK_DONE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare stop/pause — what users say when the agent says "say stop anytime".
+# Keep these exact so "stop listening" / "stop the music" stay out.
+_MARK_DONE_EXACT = frozenset(
+    {
+        "stop",
+        "pause",
+        "cancel",
+        "abort",
+        "halt",
+        "done",
+        "finished",
+        "complete",
+        "that's it",
+        "thats it",
+    }
+)
+
 
 def is_mark_done_utterance(text: str) -> bool:
     """True when the user wants the running computer task marked complete."""
-    low = (text or "").strip().lower()
+    low = (text or "").strip().lower().rstrip(".!?")
     if not low:
         return False
+    if low in _MARK_DONE_EXACT:
+        return True
     if _MARK_DONE_RE.search(low):
         return True
-    return low in {"done", "finished", "complete", "that's it", "thats it"}
+    return False
 
 
 def request_mark_done(agent_id: str | None = None) -> None:
@@ -657,12 +730,16 @@ def clear_mark_done() -> None:
 
 
 def set_stt_listening(active: bool) -> None:
-    """STT owns the mic — tray Send is enabled while this is True."""
+    """STT owns the mic — tray Send/Cancel are enabled while this is True."""
     with _lock:
         data = _read()
         data["stt_active"] = bool(active)
-        if not active:
+        if active:
+            data["cancel_requested"] = False
             data["send_requested"] = False
+        else:
+            data["send_requested"] = False
+            data["cancel_requested"] = False
         _write(data)
 
 
@@ -671,6 +748,7 @@ def request_send() -> None:
     with _lock:
         data = _read()
         data["send_requested"] = True
+        data["cancel_requested"] = False
         _write(data)
     log("Send requested — processing audio")
 
@@ -695,6 +773,48 @@ def clear_send() -> None:
     with _lock:
         data = _read()
         data["send_requested"] = False
+        _write(data)
+
+
+def request_cancel() -> None:
+    """Abort the current listen (no transcript) and stop in-flight agent work.
+
+    While STT is active: discards capture. If computer-use agents are running:
+    also requests mark-done so UI actions stop.
+    """
+    with _lock:
+        data = _read()
+        data["cancel_requested"] = True
+        data["send_requested"] = False
+        # Drop queued text/phone commands so they are not processed next.
+        data["pending_utterances"] = []
+        agents = list(data.get("agents") or [])
+        _write(data)
+    log("Cancel requested — abort listen / processing")
+    if agents:
+        request_mark_done()
+
+
+def cancel_pending() -> bool:
+    with _lock:
+        return bool(_read().get("cancel_requested"))
+
+
+def consume_cancel() -> bool:
+    """True if Cancel was requested; clears the flag so it fires once."""
+    with _lock:
+        data = _read()
+        if not data.get("cancel_requested"):
+            return False
+        data["cancel_requested"] = False
+        _write(data)
+        return True
+
+
+def clear_cancel() -> None:
+    with _lock:
+        data = _read()
+        data["cancel_requested"] = False
         _write(data)
 
 

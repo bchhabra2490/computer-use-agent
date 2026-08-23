@@ -25,6 +25,10 @@ class UtteranceTests(unittest.TestCase):
             "nothing else needed",
             "that's all",
             "stop the task",
+            "stop",
+            "Stop!",
+            "pause",
+            "cancel",
         ):
             self.assertTrue(st.is_mark_done_utterance(text), text)
 
@@ -34,6 +38,9 @@ class UtteranceTests(unittest.TestCase):
             "mark this unread",
             "I'm not done yet",
             "continue the task",
+            "stop listening",
+            "stop the music",
+            "don't stop",
         ):
             self.assertFalse(st.is_mark_done_utterance(text), text)
 
@@ -73,18 +80,40 @@ class FlagTests(unittest.TestCase):
     def test_stt_listening_clears_send_on_stop(self) -> None:
         st.request_send()
         st.set_stt_listening(True)
+        self.assertFalse(st.send_pending())
+        st.request_send()
         self.assertTrue(st.send_pending())
         st.set_stt_listening(False)
         self.assertFalse(st.send_pending())
+
+    def test_cancel_request_and_consume(self) -> None:
+        self.assertFalse(st.cancel_pending())
+        st.request_cancel()
+        self.assertTrue(st.cancel_pending())
+        self.assertTrue(st.consume_cancel())
+        self.assertFalse(st.cancel_pending())
+
+    def test_cancel_clears_send_and_pending_utterances(self) -> None:
+        st.enqueue_utterance("ignore me")
+        st.request_send()
+        st.request_cancel()
+        self.assertFalse(st.send_pending())
+        self.assertTrue(st.cancel_pending())
+        self.assertIsNone(st.consume_utterance())
 
     def test_enqueue_and_consume_utterance(self) -> None:
         self.assertFalse(st.utterance_pending())
         st.enqueue_utterance("  play a song  ")
         self.assertTrue(st.utterance_pending())
         self.assertEqual(st.consume_utterance(), "play a song")
-        self.assertEqual(st.reply_sink(), "phone")
+        self.assertEqual(st.reply_sink(), "mac")
         self.assertFalse(st.utterance_pending())
         self.assertIsNone(st.consume_utterance())
+
+    def test_enqueue_with_sink_sets_reply_on_consume(self) -> None:
+        st.enqueue_utterance("play a song", sink="phone")
+        self.assertEqual(st.consume_utterance(), "play a song")
+        self.assertEqual(st.reply_sink(), "phone")
 
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")

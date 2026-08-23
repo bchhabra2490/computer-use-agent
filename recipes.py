@@ -1,9 +1,9 @@
 """Parameterized desktop recipes: stable prefix, optional computer-use handoff.
 
 A recipe opens a URL or app (with ``{{placeholders}}``), then either finishes
-or hands leftover work to the vision agent. Matching recipes run before traces
-and before the screenshot loop. Slot values are filled with regex first; EVAL_MODEL
-only runs if bind fails. Screenshot-only leftover is saved here (no CU loop).
+or hands leftover work to the vision agent. Matching recipes run before the
+screenshot loop. Slot values are filled with regex first; EVAL_MODEL only runs
+if bind fails. Screenshot-only leftover is saved here (no CU loop).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from urllib.parse import quote, unquote, urlparse
 
 from task_log import TaskLog, _slugify
 from task_spec import is_procedure_brief
-from traces import (
+from utterance_match import (
     _HARD_TASK,
     _extract_urls,
     _norm,
@@ -93,6 +93,17 @@ _PLAY_BY = re.compile(
     r"(?:now\s+playing|play(?:ing)?)\s+"
     r"(?:the\s+(?:song|track|video)\s+)?"
     r"[\"']?([^.\n\"']{1,50}?)\s+by\s+[\"']?([A-Za-z0-9][^\"'\n.]{0,40})",
+    re.I,
+)
+_PLAY_QUERY = re.compile(
+    r"\b(?:play|playing|listen\s+to|put\s+on)\s+"
+    r"(?:(?:some|the|an?)\s+)?"
+    r"(?:song|songs|track|tracks|music|playlist|video|videos)?\s*"
+    r"[\"']?(.+?)[\"']?\s*$",
+    re.I,
+)
+_MEDIA_INTENT = re.compile(
+    r"\b(play|playing|playlist|song|songs|music|track|tracks|youtube\s*music)\b",
     re.I,
 )
 
@@ -214,7 +225,8 @@ def match_template(template: str, utterance: str) -> tuple[dict[str, str], str] 
             words = (value or "").split()
             if not words:
                 continue
-            parts.append(r"\s+".join(re.escape(w) for w in words))
+            # Word-bound literals so "play" does not match inside "plays".
+            parts.append(r"\b" + r"\s+".join(re.escape(w) for w in words) + r"\b")
             parts.append(r"\s*")
             continue
         names.append(value)
@@ -242,8 +254,19 @@ def match_template(template: str, utterance: str) -> tuple[dict[str, str], str] 
     return params, leftover
 
 
-def _safe_http_url(url: str) -> str:
+def _normalize_http_url(url: str) -> str:
+    """Prefix https:// for bare hosts (draw.io → https://draw.io)."""
     raw = (url or "").strip()
+    if not raw or "://" in raw:
+        return raw
+    # Host or host/path only — reject spaces / odd schemes slipped in without ://.
+    if re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]*)?", raw, flags=re.I):
+        return "https://" + raw
+    return raw
+
+
+def _safe_http_url(url: str) -> str:
+    raw = _normalize_http_url(url)
     parsed = urlparse(raw)
     if parsed.scheme not in {"http", "https"}:
         raise RecipeError(f"blocked URL scheme {parsed.scheme!r}")
@@ -370,9 +393,8 @@ def _valid_slot(name: str, value: str) -> bool:
     if not text:
         return False
     if name == "url":
-        probe = text if "://" in text else f"https://{text}"
         try:
-            _safe_http_url(probe)
+            _safe_http_url(text)
             return True
         except RecipeError:
             return False
@@ -394,6 +416,13 @@ def slot_grounded_in_utterance(utterance: str, value: str) -> bool:
     if not text or not slot:
         return False
     if slot in text:
+        return True
+    # Bare host ↔ https://host (recipe open-http-url).
+    if "://" in slot:
+        host = _norm(_normalize_http_url(value).split("://", 1)[-1])
+        if host and host in text:
+            return True
+    elif "." in slot and _norm(_normalize_http_url(value)) in text:
         return True
     words = [w for w in slot.split() if len(w) > 1]
     if not words:
@@ -435,7 +464,7 @@ def extract_maps_place(utterance: str) -> str | None:
 
 
 def extract_media_query(utterance: str) -> str | None:
-    """Prefer 'play TITLE by ARTIST' / quoted titles over a random 'youtube' clause."""
+    """Prefer 'play TITLE by ARTIST' / quoted titles / plain 'play … songs'."""
     found = _PLAY_BY.search(utterance or "")
     if found:
         title = found.group(1).strip(" \"'")
@@ -452,9 +481,34 @@ def extract_media_query(utterance: str) -> str | None:
             combined = f"{title} {artist}".strip()
             if _valid_slot("query", combined):
                 return combined
-        if _valid_slot("query", inner) and not re.search(r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I):
+        if _valid_slot("query", inner) and not re.search(
+            r"\b(youtube|chrome|tab|screenshot|playable)\b", inner, re.I
+        ):
             return inner
+    plain = _PLAY_QUERY.search((utterance or "").strip().rstrip(".!?"))
+    if plain:
+        query = plain.group(1).strip(" \"'")
+        query = re.sub(
+            r"\b(on\s+youtube(?:\s+music)?|in\s+(?:the\s+)?(?:browser|chrome)|please)\b",
+            "",
+            query,
+            flags=re.I,
+        ).strip(" ,.-")
+        # Drop trailing filler like "for me"
+        query = re.sub(r"\bfor\s+me\b", "", query, flags=re.I).strip(" ,.-")
+        if _valid_slot("query", query) and not re.search(
+            r"\b(chrome|tab|screenshot|playable|open\s+notes)\b", query, re.I
+        ):
+            return query
     return None
+
+
+def _prelude_is_youtube_music(recipe: Recipe) -> bool:
+    for step in recipe.prelude:
+        url = str(step.get("url") or "").lower()
+        if "music.youtube.com" in url and step.get("type") == "open_url":
+            return True
+    return False
 
 
 def _prelude_is_youtube(recipe: Recipe) -> bool:
@@ -620,6 +674,9 @@ def recipe_match_score(recipe: Recipe, utterance: str) -> float:
         return 2.0
     if _prelude_is_youtube(recipe) and _phrase_in(text, "youtube"):
         return 2.0
+    # YouTube Music playlists/songs often omit the word "youtube" ("play old Hindi songs").
+    if _prelude_is_youtube_music(recipe) and _MEDIA_INTENT.search(text) and extract_media_query(text):
+        return 1.8
     best = 0.0
     for template in recipe.match_templates:
         lits = [

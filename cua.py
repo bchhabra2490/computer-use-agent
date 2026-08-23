@@ -4,6 +4,10 @@ Runs the voice orchestrator in the background (detached session, logs to
 ``logs/cua.log``). ``cua start`` also installs a ``cua`` shim on PATH when
 possible so the command works from any directory.
 
+Full command reference::
+
+    cua help
+
 Passive desktop observer (separate process, drafts only)::
 
     cua observe start
@@ -22,9 +26,27 @@ Rewrite verbose skill playbooks::
     cua skills condense --name open-app --dry-run
     cua skills merge --dry-run
     cua skills merge
+
+Speaker enrollment (who is talking)::
+
+    cua speaker enroll --name Bharat
+    cua speaker list
+    cua speaker test
+    cua speaker test --speak-prompts
+
+Fn-key dictation (paste speech into the focused field)::
+
+    cua dictation start
+    cua dictation stop
+    cua dictation status
 """
 
 from __future__ import annotations
+
+# Load .env before subcommands read OPENAI_* / TTS_* / etc.
+from envfile import load_dotenv
+
+load_dotenv()
 
 import argparse
 import os
@@ -313,12 +335,95 @@ def cmd_status() -> int:
     return 0
 
 
+def format_help() -> str:
+    """Full CLI reference for ``cua help``."""
+    return f"""\
+cua — personal computer-use agent (voice orchestrator + tools)
+
+DAEMON
+  cua start [--no-auto] [--max-steps N]
+      Start the voice orchestrator in the background (logs: logs/cua.log).
+      Installs a PATH shim on first run (~/.local/bin/cua).
+  cua stop              Stop the orchestrator, tray, and phone gateway.
+  cua restart           Stop then start.
+  cua status            Print whether the daemon is running.
+  cua install           Install the cua shim onto PATH.
+
+VOICE (foreground — same orchestrator, attached terminal)
+  python orchestrator.py [--auto]
+  python agent.py --voice [--auto]
+
+  Configure in .env (see README “Voice configuration”):
+    OPENAI_API_KEY          required
+    STT_PROVIDER=openai|sarvam
+    TTS_PROVIDER=openai|sarvam
+    WAKE_MODEL / WAKE_PHRASE / WAKE_MODE=model|phrase
+    TTS_BARGE_IN=1          wake word interrupts speech
+    TTS_CONFIRM_HEARD=1     speak “I heard: …” after each listen
+    MIC_DEVICE=             sounddevice input name or index
+
+OBSERVER (separate process — drafts only; not started by cua start)
+  cua observe start       Watch your clicks; draft memories/skills after ~10 min.
+  cua observe stop
+  cua observe status
+  cua observe list        Pending drafts (m1 / s1 item refs).
+  cua observe accept ID [m1 s2 …] [--memory NAME] [--skill NAME]
+  cua observe accept --all
+  cua observe reject ID [items…] [--all]
+
+SPEAKER ID (who is talking — set SPEAKER_ID=1 in .env)
+  cua speaker enroll [--name YourName] [--speak-prompts]
+  cua speaker list
+  cua speaker test [--verbose] [--speak-prompts]
+  cua speaker delete NAME
+
+DICTATION (Fn key → paste speech into focused field; DICTATION=1 in .env)
+  cua dictation start
+  cua dictation stop
+  cua dictation status
+
+SKILLS (playbooks under skills/*/SKILL.md)
+  cua skills condense [--name SKILL] [--force] [--dry-run]
+  cua skills merge [--name SKILL …] [--dry-run]
+
+MCP (Linear, GitHub, Notion, … — browser login)
+  cua mcp login linear|github|notion
+  cua mcp login SLUG --url https://…/mcp
+  cua mcp login github --token ghp_…
+  cua mcp logout NAME
+  cua mcp status
+  cua mcp apps
+
+PHONE GATEWAY (companion app — PHONE_GATEWAY=1 in .env)
+  Starts with cua start when enabled. HTTP on port 8742 (LAN / Tailscale).
+  Token: .runtime/phone.token (max 5 chars).
+  Pass "sink": "phone" on /v1/command|audio|photo for phone TTS playback.
+  Run standalone: python phone_gateway.py
+
+COMPUTER AGENT (typed task, no voice)
+  python agent.py "Open Notes and write today's date" [--auto] [--max-steps N]
+
+OTHER
+  python status_tray.py   Menu-bar icon alone (auto-starts with orchestrator).
+  cua help                Show this reference.
+
+Docs: README.md in {ROOT.name}/
+Env template: .env.example
+"""
+
+
+def cmd_help() -> int:
+    print(format_help())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cua",
         description="Start and stop the computer-use-agent daemon",
+        add_help=True,
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     start_p = sub.add_parser("start", help="Start the orchestrator in the background")
     start_p.add_argument(
@@ -339,6 +444,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("stop", help="Stop the background orchestrator")
     sub.add_parser("status", help="Print whether the daemon is running")
     sub.add_parser("install", help="Install the cua command on PATH")
+    sub.add_parser("help", help="Show all commands (daemon, observe, speaker, …)")
 
     mcp_p = sub.add_parser(
         "mcp",
@@ -427,6 +533,16 @@ def main(argv: list[str] | None = None) -> int:
     obs_sub.add_parser("stop", help="Stop the observer daemon")
     obs_sub.add_parser("status", help="Show observer pid and pending draft count")
     obs_sub.add_parser("list", help="List proposed drafts")
+
+    dict_p = sub.add_parser(
+        "dictation",
+        help="Fn-key dictation — Realtime STT into the focused text field",
+    )
+    dict_sub = dict_p.add_subparsers(dest="dictation_command", required=True)
+    dict_sub.add_parser("start", help="Start the dictation hotkey daemon")
+    dict_sub.add_parser("stop", help="Stop the dictation daemon")
+    dict_sub.add_parser("status", help="Show dictation pid / mode")
+
     accept_p = obs_sub.add_parser(
         "accept",
         help="Write a proposed draft into memory/ and skills/",
@@ -499,7 +615,51 @@ def main(argv: list[str] | None = None) -> int:
         help="Reject every proposed draft",
     )
 
+    speaker_p = sub.add_parser(
+        "speaker",
+        help="Enroll voices so Jarvis can tell who is speaking",
+    )
+    speaker_sub = speaker_p.add_subparsers(dest="speaker_command", required=True)
+    speaker_enroll_p = speaker_sub.add_parser(
+        "enroll",
+        help="Read five passages (3 long + 2 short) to create a voice profile",
+    )
+    speaker_enroll_p.add_argument("--name", default=None, help="Your display name")
+    speaker_enroll_p.add_argument(
+        "--max-seconds",
+        type=float,
+        default=45.0,
+        help="Max seconds per passage recording",
+    )
+    speaker_enroll_p.add_argument(
+        "--speak-prompts",
+        action="store_true",
+        help="Speak brief TTS instructions before each passage",
+    )
+    speaker_sub.add_parser("list", help="List enrolled speakers")
+    speaker_delete_p = speaker_sub.add_parser("delete", help="Remove a speaker profile")
+    speaker_delete_p.add_argument("name", help="Name or slug")
+    speaker_test_p = speaker_sub.add_parser(
+        "test",
+        help="Record once and identify who is speaking",
+    )
+    speaker_test_p.add_argument("--max-seconds", type=float, default=15.0)
+    speaker_test_p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print similarity scores for every enrolled speaker",
+    )
+    speaker_test_p.add_argument(
+        "--speak-prompts",
+        action="store_true",
+        help="After identification, speak Hey <name> or Hey Stranger via TTS",
+    )
+
     args = parser.parse_args(argv)
+    if args.command is None:
+        return cmd_help()
+    if args.command == "help":
+        return cmd_help()
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
     if args.command == "stop":
@@ -568,6 +728,36 @@ def main(argv: list[str] | None = None) -> int:
                 items=args.items,
                 memories=args.memories,
                 skills=args.skills,
+            )
+        return 2
+    if args.command == "dictation":
+        import dictation as dictation_mod
+
+        if args.dictation_command == "start":
+            return dictation_mod.cmd_start()
+        if args.dictation_command == "stop":
+            return dictation_mod.cmd_stop()
+        if args.dictation_command == "status":
+            return dictation_mod.cmd_status()
+        return 2
+    if args.command == "speaker":
+        from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
+
+        if args.speaker_command == "enroll":
+            return cmd_enroll(
+                args.name,
+                max_seconds=args.max_seconds,
+                speak_prompts=args.speak_prompts,
+            )
+        if args.speaker_command == "list":
+            return cmd_list()
+        if args.speaker_command == "delete":
+            return cmd_delete(args.name)
+        if args.speaker_command == "test":
+            return cmd_test(
+                max_seconds=args.max_seconds,
+                verbose=args.verbose,
+                speak_prompts=args.speak_prompts,
             )
         return 2
     parser.print_help()

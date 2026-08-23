@@ -121,11 +121,15 @@ def _listener_loop() -> None:
         fd = sys.stdin.fileno()
     except Exception:
         return
-    print(
-        "[tts] keyboard barge-in armed "
-        f"(keys={os.environ.get('TTS_KEYBOARD_BARGE_KEYS', 'space,esc,enter')})",
-        flush=True,
-    )
+    try:
+        from tts import tts_print
+
+        tts_print(
+            "[tts] keyboard barge-in armed "
+            f"(keys={os.environ.get('TTS_KEYBOARD_BARGE_KEYS', 'space,esc,enter')})",
+        )
+    except Exception:
+        pass
     while not _stop.is_set():
         try:
             ready, _, _ = select.select([fd], [], [], 0.05)
@@ -137,7 +141,12 @@ def _listener_loop() -> None:
             # Match any configured single-byte key in the chunk.
             if any(data[i : i + 1] in BARGE_KEYS for i in range(len(data))):
                 _kb_event.set()
-                print("[tts] interrupted by keyboard", flush=True)
+                try:
+                    from tts import tts_print
+
+                    tts_print("[tts] interrupted by keyboard")
+                except Exception:
+                    pass
                 break
         except Exception:
             break

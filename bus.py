@@ -53,12 +53,14 @@ class AgentMessagePublisher:
         # Let PULL sockets connect before first send.
         time.sleep(0.05)
 
-    def send(self, text: str, *, kind: str = "user_message") -> None:
+    def send(self, text: str, *, kind: str = "steer") -> None:
         text = (text or "").strip()
         if not text:
             return
+        from input_queues import normalize_bus_kind
+
         payload = {
-            "type": kind,
+            "type": normalize_bus_kind(kind),
             "text": text,
             "ts": time.time(),
         }
@@ -67,7 +69,7 @@ class AgentMessagePublisher:
         except zmq.Again:
             print(f"[bus] queue full — dropped: {text!r}", file=sys.stderr)
             return
-        print(f"[bus] queued → agent: {text!r}")
+        print(f"[bus] queued → agent ({payload['type']}): {text!r}")
 
     def close(self) -> None:
         try:
@@ -89,7 +91,18 @@ class AgentMessageInbox:
         time.sleep(0.05)
 
     def drain(self) -> list[str]:
-        messages: list[str] = []
+        """Legacy: return steer + follow_up texts only (next_run excluded)."""
+        from input_queues import DrainBatch
+
+        batch = self.drain_batch()
+        return batch.all_texts("steer", "follow_up")
+
+    def drain_batch(self):
+        """Drain typed messages into steer / follow_up / next_run buckets."""
+        from input_queues import BUS_KINDS, DrainBatch, QueuedMessage, normalize_bus_kind
+        from events import emit
+
+        batch = DrainBatch()
         while True:
             try:
                 raw: dict[str, Any] = self._sock.recv_json(flags=zmq.NOBLOCK)
@@ -98,23 +111,34 @@ class AgentMessageInbox:
             if not isinstance(raw, dict):
                 print(f"[bus] agent ← ignored non-dict payload: {raw!r}", file=sys.stderr)
                 continue
-            kind = raw.get("type")
-            if kind not in {None, "user_message", "directive"}:
-                print(f"[bus] agent ← ignored type={kind!r}", file=sys.stderr)
+            kind_raw = raw.get("type")
+            if kind_raw not in BUS_KINDS and kind_raw is not None:
+                print(f"[bus] agent ← ignored type={kind_raw!r}", file=sys.stderr)
                 continue
             text = str(raw.get("text") or "").strip()
             if not text:
                 continue
+            kind = normalize_bus_kind(str(kind_raw) if kind_raw else "steer")
+            msg = QueuedMessage.make(text, kind=kind)
             ts = raw.get("ts")
             age = f" age={time.time() - float(ts):.1f}s" if ts is not None else ""
-            print(f"[bus] agent ← ZeroMQ message{age}: {text!r}", flush=True)
-            messages.append(text)
-        if messages:
+            print(f"[bus] agent ← {kind}{age}: {text!r}", flush=True)
+            emit("queue_consume", lane="agent", kind=kind, text=text[:160], id=msg.id)
+            if kind == "steer":
+                batch.steer.append(msg)
+            elif kind == "follow_up":
+                batch.follow_up.append(msg)
+            else:
+                batch.next_run.append(msg)
+        total = len(batch.steer) + len(batch.follow_up) + len(batch.next_run)
+        if total:
             print(
-                f"[bus] agent drained {len(messages)} ZeroMQ message(s) this poll",
+                f"[bus] agent drained {total} message(s) "
+                f"(steer={len(batch.steer)} follow_up={len(batch.follow_up)} "
+                f"next_run={len(batch.next_run)})",
                 flush=True,
             )
-        return messages
+        return batch
 
     def close(self) -> None:
         try:

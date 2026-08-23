@@ -69,6 +69,24 @@ _SPEAK_LATER_Q: deque[tuple] = deque()
 _SPEAK_LATER_CV = threading.Condition()
 _SPEAK_LATER_THREAD: threading.Thread | None = None
 
+_OFF = {"0", "false", "no", "off"}
+# Console chatter ([tts] text / provider / barge). Default off — set TTS_LOG=1 to show.
+TTS_LOG = os.environ.get("TTS_LOG", "0").strip().lower() not in _OFF
+# Console [tts-latency] lines. File log under logs/ still written when path is set.
+TTS_LATENCY_LOG = os.environ.get("TTS_LATENCY_LOG", "0").strip().lower() not in _OFF
+
+
+def tts_print(message: str, *, force: bool = False) -> None:
+    """Print a ``[tts] …`` line when TTS_LOG=1 (or ``force`` for real errors)."""
+    if force or TTS_LOG:
+        print(message, flush=True)
+
+
+def tts_latency_print(message: str) -> None:
+    """Print a ``[tts-latency] …`` line when TTS_LATENCY_LOG=1."""
+    if TTS_LATENCY_LOG:
+        print(message, flush=True)
+
 
 def _use_sarvam() -> bool:
     return TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}
@@ -114,6 +132,10 @@ def active_tts_voice() -> str:
 
 
 def _numpy():
+    import os
+
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
     import numpy as np
 
     return np
@@ -339,7 +361,7 @@ def play_wav(
     """
     Play WAV bytes. On macOS defaults to afplay (ignores force_rate).
 
-    When the current turn came from the phone, skip Mac speakers and publish
+    When ``reply_sink`` is ``phone`` (set via API ``sink`` param), skip Mac speakers and publish
     the WAV for ``GET /v1/speech`` instead.
 
     Returns True if interrupted via interrupt_event.
@@ -351,12 +373,19 @@ def play_wav(
 
             write_phone_speech(wav_bytes)
         except Exception as exc:
-            print(f"[tts] phone speech publish failed ({exc})", flush=True)
+            tts_print(f"[tts] phone speech publish failed ({exc})", force=True)
         return False
-    with _PLAYBACK_LOCK:
-        if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
-            return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
-        return _play_sounddevice(wav_bytes, interrupt_event=interrupt_event)
+
+    from app_status import begin_tts_playback, end_tts_playback
+
+    begin_tts_playback()
+    try:
+        with _PLAYBACK_LOCK:
+            if _TTS_PLAYER in {"afplay", "system"} and sys.platform == "darwin":
+                return _play_afplay(wav_bytes, interrupt_event=interrupt_event)
+            return _play_sounddevice(wav_bytes, interrupt_event=interrupt_event)
+    finally:
+        end_tts_playback()
 
 
 def speak(
@@ -375,7 +404,7 @@ def speak(
     even when mic barge-in is off, as long as the terminal is focused.
     Phone-sink replies skip Mac playback and barge-in (the phone is the speaker).
     """
-    print(f"[tts] {text}")
+    tts_print(f"[tts] {text}")
     phone = _phone_reply_sink()
     enable = False if phone else (BARGE_IN_DEFAULT if barge_in is None else bool(barge_in))
     if enable:
@@ -383,9 +412,8 @@ def speak(
             from wake import text_mentions_wake_phrase
 
             if text_mentions_wake_phrase(text):
-                print(
+                tts_print(
                     "[tts] barge-in off for this line (contains wake phrase — avoids echo)",
-                    flush=True,
                 )
                 enable = False
         except Exception:
@@ -401,36 +429,43 @@ def speak(
             if monitor is not None:
                 monitor.clear()
         except Exception as exc:
-            print(f"[tts] persistent wake unavailable ({exc})", flush=True)
+            tts_print(f"[tts] persistent wake unavailable ({exc})", force=True)
             monitor = None
 
-    wav_bytes = synthesize(client, text, voice=voice or active_tts_voice())
+    from app_status import begin_tts_playback, end_tts_playback
 
-    wake_event = monitor.woken if (enable and monitor is not None) else None
+    # Cover synth latency too (session may already be back on waiting/listening).
+    begin_tts_playback()
     try:
-        from keyboard_barge import acquire_tts_interrupt
+        wav_bytes = synthesize(client, text, voice=voice or active_tts_voice())
 
-        interrupt_event, release = acquire_tts_interrupt(wake_event)
-    except Exception as exc:
-        print(f"[tts] keyboard barge unavailable ({exc})", flush=True)
-        interrupt_event, release = wake_event, (lambda: None)
+        wake_event = monitor.woken if (enable and monitor is not None) else None
+        try:
+            from keyboard_barge import acquire_tts_interrupt
 
-    if interrupt_event is None:
-        play_wav(wav_bytes)
-        return False
+            interrupt_event, release = acquire_tts_interrupt(wake_event)
+        except Exception as exc:
+            tts_print(f"[tts] keyboard barge unavailable ({exc})", force=True)
+            interrupt_event, release = wake_event, (lambda: None)
 
-    try:
-        interrupted = play_wav(wav_bytes, interrupt_event=interrupt_event)
-        if interrupted or interrupt_event.is_set():
-            if wake_event is not None and wake_event.is_set():
-                print("[tts] interrupted by wake word", flush=True)
-            # keyboard path already logged in keyboard_barge
-            elif not interrupted:
-                print("[tts] interrupted", flush=True)
-            return True
-        return False
+        if interrupt_event is None:
+            play_wav(wav_bytes)
+            return False
+
+        try:
+            interrupted = play_wav(wav_bytes, interrupt_event=interrupt_event)
+            if interrupted or interrupt_event.is_set():
+                if wake_event is not None and wake_event.is_set():
+                    tts_print("[tts] interrupted by wake word")
+                # keyboard path already logged in keyboard_barge
+                elif not interrupted:
+                    tts_print("[tts] interrupted")
+                return True
+            return False
+        finally:
+            release()
     finally:
-        release()
+        end_tts_playback()
 
 
 def _speak_later_worker() -> None:
@@ -443,7 +478,7 @@ def _speak_later_worker() -> None:
         try:
             speak(client, text, voice=voice)
         except Exception as e:
-            print(f"[tts] background speak failed: {e}", flush=True)
+            tts_print(f"[tts] background speak failed: {e}", force=True)
 
 
 def speak_later(

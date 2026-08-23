@@ -57,6 +57,52 @@ class MemoryStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mem.sanitize_memory_name("***")
         self.assertEqual(mem.sanitize_memory_name("../etc"), "etc")
+        self.assertEqual(mem.sanitize_memory_name("raspberry-pi-3b.md"), "raspberry-pi-3b")
+        self.assertEqual(
+            mem.sanitize_memory_name("personal/raspberry-pi-3b.md"),
+            "raspberry-pi-3b",
+        )
+
+    def test_personal_always_single_profile(self) -> None:
+        mem.save_memory(
+            "personal", "multimeter", "Fluke 117", memory_dir=self.root, condense=False
+        )
+        mem.save_memory(
+            "personal", "contacts", "Mom on WhatsApp", memory_dir=self.root, condense=False
+        )
+        notes = mem.list_memories("personal", memory_dir=self.root)
+        self.assertEqual([n.name for n in notes], ["profile"])
+        self.assertTrue((self.root / "personal" / "profile.md").is_file())
+        self.assertFalse((self.root / "personal" / "multimeter.md").exists())
+        text = mem.read_memory("personal", "multimeter", memory_dir=self.root)
+        self.assertIn("Fluke 117", text)
+        self.assertIn("**multimeter:**", text)
+        self.assertIn("**contacts:**", text)
+        self.assertIn("Mom on WhatsApp", text)
+
+    def test_merge_legacy_personal_files(self) -> None:
+        personal = self.root / "personal"
+        personal.mkdir(parents=True)
+        (personal / "profile.md").write_text(
+            "# personal / profile\n\n- Name: Bharat\n", encoding="utf-8"
+        )
+        (personal / "multimeter.md").write_text(
+            "# personal / multimeter\n\n- Fluke 117\n", encoding="utf-8"
+        )
+        (personal / "raspberry-pi-3b.md").write_text(
+            "- Lives on the shelf\n", encoding="utf-8"
+        )
+        path = mem.merge_legacy_personal_files(memory_dir=self.root)
+        self.assertIsNotNone(path)
+        self.assertFalse((personal / "multimeter.md").exists())
+        self.assertFalse((personal / "raspberry-pi-3b.md").exists())
+        body = (personal / "profile.md").read_text(encoding="utf-8")
+        self.assertIn("Name: Bharat", body)
+        self.assertIn("Fluke 117", body)
+        self.assertIn("## raspberry-pi-3b", body)
+        self.assertNotIn("Migrated from", body)
+        notes = mem.list_memories("personal", memory_dir=self.root)
+        self.assertEqual([n.name for n in notes], ["profile"])
 
     def test_save_screen_utterance(self) -> None:
         self.assertTrue(mem.is_save_screen_utterance("Save the screen as memory"))
@@ -288,6 +334,7 @@ class CondenseMemoryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         mem._condense_running = False
         mem._condense_pending = False
+        mem._condense_force_kinds.clear()
         self._env = patch.dict("os.environ", {"MEMORY_CONDENSE": "1"})
         self._env.start()
 
@@ -295,6 +342,7 @@ class CondenseMemoryTests(unittest.TestCase):
         self._env.stop()
         mem._condense_running = False
         mem._condense_pending = False
+        mem._condense_force_kinds.clear()
         self.tmp.cleanup()
 
     def test_needs_condense_on_stacked_sections(self) -> None:
@@ -308,6 +356,51 @@ class CondenseMemoryTests(unittest.TestCase):
         )
         notes = mem.list_memories("app", memory_dir=self.root)
         self.assertTrue(mem.notes_need_condense(notes))
+
+    def test_force_personal_condense_after_single_write(self) -> None:
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Prefers dark mode",
+            memory_dir=self.root,
+            condense=False,
+        )
+        notes = mem.list_memories("personal", memory_dir=self.root)
+        self.assertFalse(mem.notes_need_condense(notes))
+        self.assertTrue(
+            mem.notes_need_condense(notes, force_kinds=frozenset({"personal"}))
+        )
+
+        class _Resp:
+            output_text = json.dumps(
+                {
+                    "files": [
+                        {
+                            "kind": "personal",
+                            "name": "profile",
+                            "text": "# personal / profile\n\n- Prefers dark mode",
+                        }
+                    ]
+                }
+            )
+            output = []
+
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+
+            def create(self, **_kwargs):
+                return _Resp()
+
+        written = mem._condense_memories_impl(
+            _Client(),
+            memory_dir=self.root,
+            force_kinds=frozenset({"personal"}),
+        )
+        self.assertEqual(written, ["personal/profile.md"])
+        body = mem.read_memory("personal", memory_dir=self.root)
+        self.assertIn("Prefers dark mode", body)
+        self.assertEqual(mem._dated_heading_count(body), 0)
 
     def test_parse_and_write_compact_file(self) -> None:
         mem.save_memory(

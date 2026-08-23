@@ -15,12 +15,21 @@ import math
 import os
 import queue
 import re
+import select
 import sys
 import threading
 import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
+
+# Before numpy/OpenBLAS (can SIGSEGV if over-threaded on macOS).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import numpy as np
 import sounddevice as sd
@@ -128,6 +137,10 @@ class NoSpeechError(RuntimeError):
 
 class PhoneCommandReady(Exception):
     """A phone-gateway text command arrived; abort mic capture and use it."""
+
+
+class ListenCancelled(Exception):
+    """User aborted listen (Esc / tray Cancel) — do not process audio."""
 
 
 def save_recording(
@@ -477,6 +490,25 @@ def _send_requested() -> bool:
         return False
 
 
+def _cancel_requested() -> bool:
+    """True once when Cancel / Esc was requested during this listen."""
+    try:
+        from app_status import consume_cancel
+
+        return consume_cancel()
+    except Exception:
+        return False
+
+
+def _cancel_pending() -> bool:
+    try:
+        from app_status import cancel_pending
+
+        return cancel_pending()
+    except Exception:
+        return False
+
+
 def _phone_pending() -> bool:
     try:
         from app_status import utterance_pending
@@ -644,12 +676,14 @@ def listen_realtime(
     prompt: str | None = None,
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> tuple[str, bytes]:
     """
     Capture one utterance and return (transcript, wav_bytes).
 
     OpenAI: stream to Realtime transcription; end after idle with no new words.
     Sarvam: record until silence, then Saaras file STT.
+    ``on_partial`` (OpenAI path only) is called with the growing live transcript.
     """
     # Persistent wake owns the mic for barge-in — release it for STT.
     try:
@@ -685,6 +719,7 @@ def listen_realtime(
             prompt=prompt,
             mode=mode,
             max_wait_for_speech=max_wait_for_speech,
+            on_partial=on_partial,
         )
     finally:
         if set_stt_listening is not None:
@@ -751,12 +786,22 @@ def _listen_sarvam(
     return text, wav
 
 
+def _emit_partial(on_partial: Callable[[str], None] | None, live: str) -> None:
+    if on_partial is None:
+        return
+    try:
+        on_partial(live)
+    except Exception as e:
+        print(f"[stt] on_partial failed: {e}", flush=True)
+
+
 def _listen_realtime_body(
     client: OpenAI,
     *,
     prompt: str | None = None,
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> tuple[str, bytes]:
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     _prepare_mic()
@@ -767,9 +812,9 @@ def _listen_realtime_body(
     print(
         prompt
         or (
-            f"Listening for yes/no… (sends after {idle:g}s without new words, {hint})"
+            f"Listening for yes/no… (sends after {idle:g}s without new words, {hint}; Esc cancels)"
             if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s without new words, {hint})"
+            else f"Listening… (sends after {idle:g}s without new words, {hint}; Esc cancels)"
         )
     )
     if _phone_pending():
@@ -783,7 +828,9 @@ def _listen_realtime_body(
     errors: queue.Queue[BaseException] = queue.Queue()
     pcm_24k_chunks: list[np.ndarray] = []
     send_lock = threading.Lock()
+    # "committed" here means "stop appending / finish listen" — not WS commit ack.
     committed = threading.Event()
+    cancelled = threading.Event()
 
     # Shared transcript state — idle timer arms only after the first word.
     state_lock = threading.Lock()
@@ -792,25 +839,60 @@ def _listen_realtime_body(
         "last_delta_at": None,
         "first_word_at": None,
         "timer_armed": False,
+        "finish_deadline": None,
     }
     started_at = time.monotonic()
     mic_deadline = started_at + MAX_RECORD_SECONDS
     wake_spotter = _listen_end_spotter()
     wake_send = threading.Event()
+    # After end-listen, use live partials — do not block on input_audio_buffer.completed.
+    # Concurrent WS commit/send from worker threads during recv can wedge the socket.
+    END_FINISH_SECONDS = float(os.environ.get("STT_END_FINISH_SECONDS", "1.5"))
+    hotkeys = _ListenHotkeys(cancel_keys=STT_CANCEL_KEYS, send_keys=STT_SEND_KEYS)
+    hotkeys.start()
 
-    def _commit_once(connection, reason: str) -> None:
-        if committed.is_set():
+    def _close_connection(connection) -> None:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    def _abort_listen(connection, reason: str) -> None:
+        """Stop capture and discard — do not return a transcript."""
+        if cancelled.is_set():
             return
-        print(f"[stt] {reason}")
-        with send_lock:
-            try:
-                connection.input_audio_buffer.commit()
-            except Exception as exc:
-                errors.put(exc)
-                stop.set()
-                return
+        try:
+            from app_status import consume_cancel
+
+            consume_cancel()
+        except Exception:
+            pass
+        print(f"[stt] {reason}", flush=True)
+        cancelled.set()
         committed.set()
         stop.set()
+        with state_lock:
+            shared["finish_deadline"] = time.monotonic()
+        errors.put(ListenCancelled("Listen cancelled"))
+        _close_connection(connection)
+
+    def _finish_listen(connection, reason: str, *, settle: float | None = None) -> None:
+        """Stop capture and unblock the recv loop; keep any live partial transcript."""
+        if committed.is_set() or cancelled.is_set():
+            return
+        print(f"[stt] {reason}", flush=True)
+        committed.set()
+        stop.set()
+        wait = END_FINISH_SECONDS if settle is None else max(0.0, float(settle))
+        with state_lock:
+            shared["finish_deadline"] = time.monotonic() + wait
+
+        def _force_close() -> None:
+            # Let trailing deltas arrive, then close so `for event in connection` cannot hang.
+            time.sleep(wait)
+            _close_connection(connection)
+
+        threading.Thread(target=_force_close, name="stt-finish-close", daemon=True).start()
 
     def mic_worker(connection) -> None:
         try:
@@ -838,13 +920,15 @@ def _listen_realtime_body(
                     if wake_spotter is not None:
                         try:
                             if wake_spotter.feed(cleaned, capture_rate):
-                                print("[stt] wake word — processing audio.")
+                                print("[stt] wake word — processing audio.", flush=True)
                                 wake_send.set()
                                 from wake import play_over_and_out_chime
 
                                 play_over_and_out_chime()
                         except Exception:
                             pass
+                    if committed.is_set():
+                        break
                     pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
                     if pcm_24k.size == 0:
                         continue
@@ -870,17 +954,23 @@ def _listen_realtime_body(
                     text = shared["partial"].strip()
                     last = shared["last_delta_at"]
                     first = shared["first_word_at"]
+                if hotkeys.cancel.is_set() or _cancel_pending():
+                    _abort_listen(connection, "cancelled — discarding audio.")
+                    return
                 if _phone_pending():
                     print("[stt] phone command — using typed text.", flush=True)
                     stop.set()
-                    try:
-                        connection.close()
-                    except Exception:
-                        pass
+                    _close_connection(connection)
                     errors.put(PhoneCommandReady())
                     return
-                if wake_send.is_set() or _send_requested():
-                    _commit_once(connection, "Send — processing audio.")
+                if wake_send.is_set() or hotkeys.send.is_set() or _send_requested():
+                    if wake_send.is_set():
+                        reason = "over and out — finishing with live transcript."
+                    elif hotkeys.send.is_set():
+                        reason = "Enter — processing audio."
+                    else:
+                        reason = "Send — processing audio."
+                    _finish_listen(connection, reason)
                     return
                 # No words yet: wait (do not run the 3s send timer).
                 if first is None or not text or last is None:
@@ -888,99 +978,145 @@ def _listen_realtime_body(
                         print(
                             f"[stt] no words after {wait_limit:g}s — aborting listen.",
                             file=sys.stderr,
+                            flush=True,
                         )
                         errors.put(NoSpeechError("No speech transcribed — try again."))
                         stop.set()
-                        try:
-                            connection.close()
-                        except Exception:
-                            pass
+                        _close_connection(connection)
                     continue
                 if (now - last) >= idle:
-                    _commit_once(connection, f"no new words for {idle:g}s — sending.")
+                    _finish_listen(
+                        connection,
+                        f"no new words for {idle:g}s — sending.",
+                        settle=0.4,
+                    )
                     return
                 if now >= mic_deadline:
-                    _commit_once(connection, "max record time — sending.")
+                    _finish_listen(connection, "max record time — sending.", settle=0.4)
                     return
         except BaseException as exc:  # noqa: BLE001
             errors.put(exc)
             stop.set()
+            _close_connection(connection)
 
     # Transcription sessions must use intent=transcription and must NOT pass ?model=.
-    with client.realtime.connect(extra_query={"intent": "transcription"}) as connection:
-        connection.session.update(session=_transcription_session(mode=mode))
+    try:
+        with client.realtime.connect(extra_query={"intent": "transcription"}) as connection:
+            connection.session.update(session=_transcription_session(mode=mode))
 
-        worker = threading.Thread(target=mic_worker, args=(connection,), daemon=True)
-        watcher = threading.Thread(target=idle_watch_worker, args=(connection,), daemon=True)
-        worker.start()
-        watcher.start()
+            worker = threading.Thread(target=mic_worker, args=(connection,), daemon=True)
+            watcher = threading.Thread(target=idle_watch_worker, args=(connection,), daemon=True)
+            worker.start()
+            watcher.start()
 
-        final_text = ""
-        deadline = started_at + MAX_RECORD_SECONDS + 20.0
+            final_text = ""
+            deadline = started_at + MAX_RECORD_SECONDS + 20.0
 
-        try:
-            for event in connection:
-                if not errors.empty():
-                    raise errors.get()
-                et = _event_type(event)
-                if et == "conversation.item.input_audio_transcription.delta":
-                    piece = _event_delta(event)
-                    if piece and piece.strip():
-                        with state_lock:
-                            shared["partial"] += piece
-                            now = time.monotonic()
-                            shared["last_delta_at"] = now
-                            if shared["first_word_at"] is None:
-                                shared["first_word_at"] = now
-                                if not shared["timer_armed"]:
-                                    shared["timer_armed"] = True
-                                    print(
-                                        f"\n[stt] first word — {idle:g}s idle timer started",
-                                        flush=True,
+            try:
+                for event in connection:
+                    if not errors.empty():
+                        raise errors.get()
+                    if cancelled.is_set() or hotkeys.cancel.is_set() or _cancel_pending():
+                        if not cancelled.is_set():
+                            _abort_listen(connection, "cancelled — discarding audio.")
+                        raise ListenCancelled("Listen cancelled")
+                    et = _event_type(event)
+                    if et == "conversation.item.input_audio_transcription.delta":
+                        piece = _event_delta(event)
+                        if piece and piece.strip():
+                            with state_lock:
+                                shared["partial"] += piece
+                                now = time.monotonic()
+                                shared["last_delta_at"] = now
+                                if shared["first_word_at"] is None:
+                                    shared["first_word_at"] = now
+                                    if not shared["timer_armed"]:
+                                        shared["timer_armed"] = True
+                                        print(
+                                            f"\n[stt] first word — {idle:g}s idle timer started",
+                                            flush=True,
+                                        )
+                                live = shared["partial"]
+                            _print_live(live)
+                            _emit_partial(on_partial, live)
+                            try:
+                                from wake import transcript_has_end_phrase
+
+                                if transcript_has_end_phrase(live):
+                                    from wake import play_over_and_out_chime
+
+                                    play_over_and_out_chime()
+                                    wake_send.set()
+                                    with state_lock:
+                                        final_text = shared["partial"].strip()
+                                    sys.stdout.write("\n")
+                                    _finish_listen(
+                                        connection,
+                                        "over and out — finishing with live transcript.",
+                                        settle=0.35,
                                     )
-                            live = shared["partial"]
-                        _print_live(live)
-                        try:
-                            from wake import transcript_has_end_phrase
+                            except Exception:
+                                pass
+                    elif et == "conversation.item.input_audio_transcription.completed":
+                        with state_lock:
+                            fallback = shared["partial"].strip()
+                        final_text = _event_transcript(event) or fallback
+                        if final_text:
+                            _emit_partial(on_partial, final_text)
+                        sys.stdout.write("\n")
+                        stop.set()
+                        committed.set()
+                        break
+                    elif et == "conversation.item.input_audio_transcription.failed":
+                        sys.stdout.write("\n")
+                        err = getattr(event, "error", None)
+                        raise NoSpeechError(f"Realtime transcription failed: {err or event}")
+                    elif et == "error":
+                        # Empty-buffer commit errors are ignorable if we already have partials.
+                        with state_lock:
+                            has_partial = bool(shared["partial"].strip())
+                        if committed.is_set() and has_partial:
+                            sys.stdout.write("\n")
+                            break
+                        sys.stdout.write("\n")
+                        raise RuntimeError(getattr(event, "error", event))
 
-                            if transcript_has_end_phrase(live):
-                                print("\n[stt] over and out — processing audio.")
-                                from wake import play_over_and_out_chime
-
-                                play_over_and_out_chime()
-                                wake_send.set()
-                                _commit_once(connection, "end phrase — processing audio.")
-                        except Exception:
-                            pass
-                elif et == "conversation.item.input_audio_transcription.completed":
                     with state_lock:
-                        fallback = shared["partial"].strip()
-                    final_text = _event_transcript(event) or fallback
-                    sys.stdout.write("\n")
-                    stop.set()
-                    break
-                elif et == "conversation.item.input_audio_transcription.failed":
-                    sys.stdout.write("\n")
-                    err = getattr(event, "error", None)
-                    raise NoSpeechError(f"Realtime transcription failed: {err or event}")
-                elif et == "error":
-                    sys.stdout.write("\n")
-                    raise RuntimeError(getattr(event, "error", event))
-                elif et == "input_audio_buffer.committed":
-                    deadline = min(deadline, time.monotonic() + 12.0)
+                        finish_at = shared["finish_deadline"]
+                    if finish_at is not None:
+                        deadline = min(deadline, finish_at)
 
-                if stop.is_set() and not committed.is_set() and shared["first_word_at"] is None:
-                    # Aborted with no words.
-                    break
-                if time.monotonic() > deadline:
-                    break
-        finally:
-            stop.set()
-            worker.join(timeout=2.0)
-            watcher.join(timeout=1.0)
+                    if stop.is_set() and not committed.is_set() and shared["first_word_at"] is None:
+                        # Aborted with no words.
+                        break
+                    if committed.is_set() and finish_at is not None and time.monotonic() >= finish_at:
+                        break
+                    if time.monotonic() > deadline:
+                        break
+            except ListenCancelled:
+                raise
+            except Exception:
+                # Finish-watcher connection.close() unblocks recv; keep live partial.
+                with state_lock:
+                    has_partial = bool(shared["partial"].strip())
+                if cancelled.is_set():
+                    raise ListenCancelled("Listen cancelled")
+                if not (committed.is_set() and (has_partial or final_text)):
+                    raise
+            finally:
+                stop.set()
+                committed.set()
+                worker.join(timeout=2.0)
+                watcher.join(timeout=1.0)
+    finally:
+        hotkeys.stop()
 
     if not errors.empty():
-        raise errors.get()
+        err = errors.get()
+        raise err
+
+    if cancelled.is_set():
+        raise ListenCancelled("Listen cancelled")
 
     if not pcm_24k_chunks:
         raise NoSpeechError("No audio captured — check microphone permissions.")
@@ -1031,6 +1167,173 @@ def record_fixed(
     return _float_to_wav(_normalize_peak(pcm), REALTIME_RATE)
 
 
+_ENTER_KEYS = frozenset({b"\n", b"\r"})
+_CANCEL_KEY_ALIASES: dict[str, frozenset[bytes]] = {
+    "esc": frozenset({b"\x1b"}),
+    "escape": frozenset({b"\x1b"}),
+    "space": frozenset({b" "}),
+    "enter": frozenset({b"\n", b"\r"}),
+    "return": frozenset({b"\n", b"\r"}),
+}
+
+
+def _parse_listen_keys(raw: str | None, *, default: str) -> frozenset[bytes]:
+    text = (raw if raw is not None else default).strip().lower()
+    if text in {"0", "false", "no", "off", ""}:
+        return frozenset()
+    out: set[bytes] = set()
+    for part in text.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if token in _CANCEL_KEY_ALIASES:
+            out |= _CANCEL_KEY_ALIASES[token]
+        elif len(token) == 1:
+            out.add(token.encode("utf-8"))
+    return frozenset(out)
+
+
+# Esc (default) aborts listen without processing. Enter still used by enter-only modes.
+STT_CANCEL_KEYS = _parse_listen_keys(
+    os.environ.get("STT_CANCEL_KEYS"),
+    default="esc",
+)
+STT_SEND_KEYS = _parse_listen_keys(
+    os.environ.get("STT_SEND_KEYS"),
+    default="enter",
+)
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+class _ListenHotkeys:
+    """TTY hotkeys while STT owns the mic: cancel (Esc) and optional send (Enter)."""
+
+    def __init__(
+        self,
+        *,
+        cancel_keys: frozenset[bytes] | None = None,
+        send_keys: frozenset[bytes] | None = None,
+    ) -> None:
+        self.cancel = threading.Event()
+        self.send = threading.Event()
+        self._cancel_keys = cancel_keys if cancel_keys is not None else STT_CANCEL_KEYS
+        self._send_keys = send_keys if send_keys is not None else frozenset()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._old_term = None
+        self._fd: int | None = None
+        self._owned_tty = False
+
+    @property
+    def event(self) -> threading.Event:
+        """Back-compat alias used by enter-only record helpers (send)."""
+        return self.send
+
+    def start(self) -> None:
+        if sys.platform == "win32":
+            return
+        if not self._cancel_keys and not self._send_keys:
+            return
+        try:
+            self._fd = os.open("/dev/tty", os.O_RDONLY)
+            self._owned_tty = True
+        except OSError:
+            if not _stdin_is_tty():
+                return
+            self._fd = sys.stdin.fileno()
+            self._owned_tty = False
+        try:
+            import termios
+            import tty
+
+            self._old_term = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        except Exception:
+            if self._owned_tty and self._fd is not None:
+                os.close(self._fd)
+            self._fd = None
+            self._owned_tty = False
+            self._old_term = None
+            return
+        bits = []
+        if self._cancel_keys:
+            bits.append("Esc=cancel")
+        if self._send_keys:
+            bits.append("Enter=send")
+        if bits:
+            print(f"[stt] hotkeys: {', '.join(bits)} (terminal focused)", flush=True)
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="stt-listen-hotkeys",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+        self._thread = None
+        if self._old_term is not None and self._fd is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
+            except Exception:
+                pass
+            self._old_term = None
+        if self._fd is not None:
+            try:
+                while True:
+                    ready, _, _ = select.select([self._fd], [], [], 0)
+                    if not ready:
+                        break
+                    os.read(self._fd, 1024)
+            except Exception:
+                pass
+        if self._owned_tty and self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+        self._fd = None
+        self._owned_tty = False
+
+    def _loop(self) -> None:
+        fd = self._fd
+        if fd is None:
+            return
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.05)
+                if not ready:
+                    continue
+                data = os.read(fd, 32)
+                if not data:
+                    continue
+                for i in range(len(data)):
+                    key = data[i : i + 1]
+                    if key in self._cancel_keys:
+                        self.cancel.set()
+                        return
+                    if key in self._send_keys:
+                        self.send.set()
+                        return
+            except Exception:
+                return
+
+
+# Back-compat name for enter-only helpers.
+_EnterKeyListener = _ListenHotkeys
+
+
 def record_until_silence(
     sample_rate: int | None = None,
     *,
@@ -1042,11 +1345,19 @@ def record_until_silence(
     require_speech: bool = False,
     wake_spotter=None,
     end_watch=None,
+    end_on_enter: bool = False,
+    enter_only: bool = False,
 ) -> bytes:
     _prepare_mic()
     capture_rate = int(sample_rate) if sample_rate else _capture_sample_rate()
     _log_mic_settings(capture_rate)
     print(prompt)
+    cancel_listener = _ListenHotkeys(
+        cancel_keys=STT_CANCEL_KEYS,
+        send_keys=STT_SEND_KEYS if end_on_enter else frozenset(),
+    )
+    cancel_listener.start()
+    enter_listener = cancel_listener if end_on_enter else None
     chunk_frames = int(CHUNK_SECONDS * capture_rate)
     warmup_frames = int(MIC_WARMUP_SECONDS * capture_rate)
     noise = FanNoiseFilter(capture_rate)
@@ -1054,67 +1365,82 @@ def record_until_silence(
     heard = False
     sent = False
     silent_run = waited = total = 0.0
-    with _open_input_stream(capture_rate, chunk_frames) as stream:
-        _cue_listen_start()
-        if warmup_frames:
-            data, _ = stream.read(warmup_frames)
-            cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
-            chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
-            total += warmup_frames / float(capture_rate)
-        while total < max_record_seconds:
-            data, _ = stream.read(chunk_frames)
-            cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
-            pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
-            chunks.append(pcm_24k)
-            total += CHUNK_SECONDS
-            if end_watch is not None:
-                try:
-                    end_watch.feed_pcm24k(pcm_24k)
-                    if end_watch.hit.is_set():
-                        from wake import play_over_and_out_chime
+    try:
+        with _open_input_stream(capture_rate, chunk_frames) as stream:
+            _cue_listen_start()
+            if warmup_frames:
+                data, _ = stream.read(warmup_frames)
+                cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                chunks.append(_resample(cleaned, capture_rate, REALTIME_RATE))
+                total += warmup_frames / float(capture_rate)
+            while total < max_record_seconds:
+                if cancel_listener.cancel.is_set() or _cancel_pending():
+                    print("[stt] cancelled — discarding audio.", flush=True)
+                    try:
+                        from app_status import consume_cancel
 
-                        play_over_and_out_chime()
-                        sent = True
-                        break
-                except Exception:
-                    pass
-            if wake_spotter is not None:
-                try:
-                    if wake_spotter.feed(cleaned, capture_rate):
-                        print("[stt] wake word — processing audio.")
-                        from wake import play_over_and_out_chime
+                        consume_cancel()
+                    except Exception:
+                        pass
+                    raise ListenCancelled("Listen cancelled")
+                data, _ = stream.read(chunk_frames)
+                cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
+                chunks.append(pcm_24k)
+                total += CHUNK_SECONDS
+                if end_watch is not None:
+                    try:
+                        end_watch.feed_pcm24k(pcm_24k)
+                        if end_watch.hit.is_set():
+                            from wake import play_over_and_out_chime
 
-                        play_over_and_out_chime()
-                        sent = True
+                            play_over_and_out_chime()
+                            sent = True
+                            break
+                    except Exception:
+                        pass
+                if wake_spotter is not None:
+                    try:
+                        if wake_spotter.feed(cleaned, capture_rate):
+                            print("[stt] wake word — processing audio.")
+                            from wake import play_over_and_out_chime
+
+                            play_over_and_out_chime()
+                            sent = True
+                            break
+                    except Exception:
+                        pass
+                if _phone_pending():
+                    print("[stt] phone command — using typed text.", flush=True)
+                    raise PhoneCommandReady()
+                if _send_requested() or (enter_listener is not None and enter_listener.send.is_set()):
+                    print("[stt] menu Send — processing audio.")
+                    sent = True
+                    break
+                peak = _peak(cleaned)
+                if peak >= speech_peak:
+                    heard = True
+                    silent_run = 0.0
+                elif heard and not enter_only:
+                    silent_run += CHUNK_SECONDS
+                    if silent_run >= silence_seconds:
                         break
-                except Exception:
-                    pass
-            if _phone_pending():
-                print("[stt] phone command — using typed text.", flush=True)
-                raise PhoneCommandReady()
-            if _send_requested():
-                print("[stt] menu Send — processing audio.")
-                sent = True
-                break
-            peak = _peak(cleaned)
-            if peak >= speech_peak:
-                heard = True
-                silent_run = 0.0
-            elif heard:
-                silent_run += CHUNK_SECONDS
-                if silent_run >= silence_seconds:
-                    break
-            else:
-                waited += CHUNK_SECONDS
-                if waited >= max_wait_for_speech:
-                    break
+                else:
+                    waited += CHUNK_SECONDS
+                    if waited >= max_wait_for_speech:
+                        break
+    finally:
+        cancel_listener.stop()
     if require_speech and not heard and not sent:
         raise NoSpeechError("No speech detected — try again.")
     pcm = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
     return _float_to_wav(_normalize_peak(pcm), REALTIME_RATE)
 
 
-record_until_enter = record_until_silence
+def record_until_enter(*args, **kwargs) -> bytes:
+    kwargs.setdefault("end_on_enter", True)
+    kwargs.setdefault("enter_only", True)
+    return record_until_silence(*args, **kwargs)
 
 
 def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str | None = None) -> str:
@@ -1269,6 +1595,20 @@ def classify_yes_no(text: str) -> str | None:
     return None
 
 
+def _tag_speaker(wav_bytes: bytes | None) -> None:
+    if not wav_bytes:
+        return
+    try:
+        from speaker_id import enabled, identify, set_last_speaker
+
+        if not enabled():
+            set_last_speaker(None)
+            return
+        set_last_speaker(identify(wav_bytes))
+    except Exception as e:
+        print(f"[speaker] tag failed ({e})", flush=True)
+
+
 def listen_once(
     client: OpenAI,
     *,
@@ -1277,6 +1617,7 @@ def listen_once(
     max_attempts: int = 3,
     announce_retries: bool = True,
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> str:
     """Capture one utterance via the configured STT provider (OpenAI or Sarvam)."""
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
@@ -1299,14 +1640,28 @@ def listen_once(
         live = ""
         queued = _consume_phone_utterance()
         if queued:
+            try:
+                from speaker_id import clear_last_speaker
+
+                clear_last_speaker()
+            except Exception:
+                pass
             print(f'Heard: "{queued}" (phone)')
             return queued
         try:
+            try:
+                from speaker_id import clear_last_speaker, enabled
+
+                if enabled():
+                    clear_last_speaker()
+            except Exception:
+                pass
             live, wav = listen_realtime(
                 client,
                 prompt=prompt or default_prompt,
                 mode=mode,
                 max_wait_for_speech=max_wait_for_speech,
+                on_partial=on_partial,
             )
             try:
                 from wake import play_listen_end_chime
@@ -1316,7 +1671,11 @@ def listen_once(
                 pass
             save_recording(wav, transcript=live, kind=mode, live_transcript=live)
             print(f'Heard: "{live}"')
+            _tag_speaker(wav)
             return live
+        except ListenCancelled:
+            print("[stt] listen cancelled.", flush=True)
+            raise
         except PhoneCommandReady:
             queued = _consume_phone_utterance()
             if queued:
@@ -1461,6 +1820,9 @@ def ask_user(client: OpenAI, question: str) -> str:
             mode="freeform",
             prompt="Listening for your answer… (sends after 3s without new words)",
         )
+    except ListenCancelled:
+        print("[ask_user] cancelled", flush=True)
+        return "The user cancelled listening. Do not assume an answer."
     except NoSpeechError as e:
         print(f"[ask_user] no speech: {e}", file=sys.stderr)
         return (

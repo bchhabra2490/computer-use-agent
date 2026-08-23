@@ -11,8 +11,8 @@ memory/personal/*.md
 memory/apps/*.md
 memory/screens/*
 !memory/screens/.gitkeep
-traces/*.json
-!traces/.gitkeep
 mcp.json
 .gitignore
 mqtt.log
+models/speakers/
+docs/

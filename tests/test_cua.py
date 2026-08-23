@@ -104,6 +104,20 @@ class StartStopTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def test_help_command(self) -> None:
+        with patch("builtins.print") as printed:
+            self.assertEqual(cua.main(["help"]), 0)
+        text = printed.call_args[0][0]
+        self.assertIn("OBSERVER", text)
+        self.assertIn("SPEAKER ID", text)
+        self.assertIn("cua observe list", text)
+        self.assertIn("cua speaker enroll", text)
+
+    def test_bare_cua_shows_help(self) -> None:
+        with patch("builtins.print") as printed:
+            self.assertEqual(cua.main([]), 0)
+        self.assertIn("DAEMON", printed.call_args[0][0])
+
     def test_unknown_command_exits(self) -> None:
         with self.assertRaises(SystemExit):
             cua.main(["nope"])

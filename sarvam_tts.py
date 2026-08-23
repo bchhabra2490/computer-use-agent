@@ -82,8 +82,12 @@ def synthesize_wav(text: str, *, speaker: str | None = None) -> bytes:
     if not pcm:
         raise RuntimeError("Sarvam TTS returned empty audio.")
 
-    print(
-        f"[tts] provider=sarvam model={model} voice={voice} lang={language}",
-        flush=True,
-    )
+    try:
+        from tts import tts_print
+
+        tts_print(
+            f"[tts] provider=sarvam model={model} voice={voice} lang={language}",
+        )
+    except Exception:
+        pass
     return _pcm_to_wav(pcm, sample_rate=rate)

@@ -399,14 +399,60 @@ class McpManager:
             self._servers.clear()
             self._started = False
 
+    def ensure_connected(self, server: str) -> str | None:
+        """Connect (or reconnect) a configured server. Returns an error string or None."""
+        name = (server or "").strip()
+        if not name:
+            return "Error: mcp_call requires server."
+        if name not in self._specs:
+            # Config may have been edited after start — reload once.
+            try:
+                self._specs = load_mcp_config()
+            except Exception:
+                pass
+        spec = self._specs.get(name)
+        if spec is None:
+            known = ", ".join(sorted(self._specs)) or "(none)"
+            return f"Error: unknown MCP server {name!r}. Configured: {known}"
+        live = self._servers.get(name)
+        if live is not None and live.session is not None and not live.error:
+            return None
+        if not self._started or self._loop is None:
+            return f"Error: MCP is not started; cannot connect {name!r}."
+        print(f"[mcp] connecting {name}…", flush=True)
+        try:
+            self._submit(self._connect_one(spec), timeout=MCP_CONNECT_TIMEOUT + 5)
+        except concurrent.futures.TimeoutError:
+            return (
+                f"Error: MCP server {name!r} timed out connecting "
+                f"(is it running? {spec.url or spec.command or name})."
+            )
+        except BaseException as e:
+            if _is_fatal(e):
+                raise
+            return f"Error: MCP server {name!r} connect failed: {_mcp_error_text(e)}"
+        live = self._servers.get(name)
+        if live is None or live.session is None:
+            detail = (live.error if live else None) or "not connected"
+            hint = ""
+            if spec.url and "localhost" in spec.url:
+                hint = f" Start the local server, then retry ({spec.url})."
+            return f"Error: MCP server {name!r} is not connected ({detail}).{hint}"
+        return None
+
     def call(self, server: str, tool: str, arguments: dict[str, Any] | None = None) -> str:
         name = (server or "").strip()
         tool_name = (tool or "").strip()
         if not name or not tool_name:
             return "Error: mcp_call requires server and tool."
+        connect_err = self.ensure_connected(name)
+        if connect_err:
+            return connect_err
         live = self._servers.get(name)
         if live is None or live.session is None:
-            available = ", ".join(sorted(self._servers)) or "(none)"
+            available = ", ".join(
+                sorted(n for n, s in self._servers.items() if s.session is not None)
+            ) or "(none)"
             return f"Error: MCP server {name!r} is not connected. Available: {available}"
         meta = next((t for t in live.tools if t.name == tool_name), None)
         if meta is None:
@@ -439,10 +485,15 @@ class McpManager:
         for name, spec in self._specs.items():
             live = self._servers.get(name)
             if live is None:
-                lines.append(f"- {name}: not started")
+                where = spec.url or spec.command or name
+                lines.append(
+                    f"- {name}: not connected yet (will retry on mcp_call; {where})"
+                )
                 continue
-            if live.error:
-                lines.append(f"- {name}: failed ({live.error})")
+            if live.error or live.session is None:
+                err = live.error or "not connected"
+                where = spec.url or spec.command or name
+                lines.append(f"- {name}: failed ({err}); retry on mcp_call — {where}")
                 continue
             shown = live.tools
             if MCP_READ_ONLY:
@@ -516,6 +567,13 @@ class McpManager:
 
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
+
+        prev = self._servers.get(spec.name)
+        if prev is not None and prev.stop is not None:
+            try:
+                prev.stop.set()
+            except Exception:
+                pass
 
         ready = asyncio.Event()
         stop = asyncio.Event()

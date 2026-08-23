@@ -6,7 +6,7 @@ Tools:
   - start_task — hand off to the computer-use agent (background thread)
   - ask_user — speak a question and capture a spoken reply
   - give_response_to_user — speak a reply (optionally end the session)
-  - list_memories / read_memory / save_memory / save_screen_memory — notes + screen snapshots
+  - list_memories / read_memory / save_memory / save_screen_memory / read_screen — notes + screen snapshots
   - list_open_apps — running apps, windows by display, and open browser tabs
   - set_timer / list_timers / cancel_timer — native countdown (no Clock UI)
   - mcp_call — tools from servers in mcp.json (when configured)
@@ -43,7 +43,7 @@ import signal
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 from pathlib import Path
 
 from openai import OpenAI
@@ -79,7 +79,13 @@ from bus import (
     strip_wake_prefix,
 )
 from audio import AudioSession, bind_audio, get_audio
-from context import assemble_context
+from checkpoint import run_orchestrator_checkpoint
+from context import assemble_context, read_screen_vision_input
+from events import emit
+from input_queues import (
+    classify_utterance_for_agent,
+    get_next_run_queue,
+)
 from memory import (
     TurnTrace,
     capture_and_save_screen,
@@ -91,12 +97,21 @@ from mcp_client import (
     start_mcp,
     stop_mcp,
 )
+from orchestrator_prompts import build_system_prompt
 from session import Session, bind_session, get_session
+from session_compact import (
+    SessionCompactState,
+    format_task_history_block,
+    is_context_overflow_error,
+)
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
+from dictation import ensure_dictation_running, stop_dictation
 from stt import POST_TTS_COOLDOWN, NoSpeechError, ask_user, listen_once
 from task_spec import resolve_agent_task
-from tools_registry import orchestrator_tools, run_shared_tool
+from task_feedback import collect_post_task_feedback, format_feedback_for_model
+from tools_registry import orchestrator_tools, run_tool
+from barge_router import classify_barge_utterance
 from wake import (
     format_wake_phrases,
 )
@@ -117,126 +132,94 @@ TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
 }
 _phone_photo_in_session = False
 
-SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
-
-You receive transcribed speech from the user, and sometimes a photo from their
-phone camera (attached as an image on that turn). Decide the next action with tools only
-— never reply with a plain assistant message (the user will not hear it, and the mic
-will not open):
-- give_response_to_user — speak an answer or acknowledgment that does not need a reply
-- who_am_i — read README.md when they ask who you are, what you can do, or about this agent
-- ask_user — ask one short clarifying question aloud, then listen for their answer
-  (no wake word). Use this for any question, confirmation, or choice.
-- start_task — run the computer-use agent for real mouse/keyboard/UI work
-- list_memories / read_memory / save_memory — personal facts and per-app notes
-  under memory/ (see skill read-memory). Read before asking for a known preference;
-  save when the user says remember/save this.
-- save_screen_memory — screenshot the desktop, describe it, store under
-  memory/screens/. Use when they say "save the screen as memory" (do not start_task).
-- list_open_apps — live running apps, windows by display, and open browser tabs
-  (titles + URLs). Occupancy below is a snapshot; call this for a fresh list.
-  Prefer this (and give_response_to_user) over start_task when they only ask
-  what is open / which tabs they have.
-- set_timer / list_timers / cancel_timer — native countdown (no Clock app).
-  Use set_timer for “set a 5 minute timer” and reminders (“remind me in 5 minutes
-  to check the oven”). Convert to seconds. speak=true plus message when they
-  asked to be reminded of something; otherwise notification only. Then
-  give_response_to_user once. Do not start_task or sleep.
-{mcp_rule}
-Rules:
-- Prefer give_response_to_user for questions you can answer without touching the computer.
-- When a phone-camera photo is attached, look at it. Explain what you see if they asked,
-  and answer follow-up questions about that same photo with the detail they asked for
-  (not a teaser — include specs or labels when relevant). Prefer give_response_to_user.
-  Do not start_task unless they asked you to do something on the Mac with what you saw.
-- If they ask who you are, what you do, how you work, or about this agent / Jarvis /
-  Rekha / computer-use-agent, call who_am_i first, then give_response_to_user with a
-  short spoken summary from the README (do not read it verbatim, no markdown).
-- Prefer mcp_call over start_task when a connected MCP server can search, fetch, or
-  change the data (issues, docs, analytics, APIs). Use start_task only for real
-  mouse/keyboard/UI work (open an app, click play, fill a form on screen).
-- For physical hardware/device control (lights, switches, TV, AC, locks, sensors),
-  prefer hardware MCP via mcp_call. Do not use desktop UI clicks as a workaround
-  when the hardware MCP can perform the action.
-- Prefer start_task for opening apps, browsing, clicking, reading on-screen content, etc.
-  Not for timers or reminders — those are set_timer.
-  start_task.task is the GOAL only (what they asked). Never narrate how: no
-  “open Chrome, new tab, wait for load, press Cmd+L”. If they said “show Togo
-  on a map”, pass that. After a prior task, pass only the leftover goal
-  (“screenshot the map”), not a restart of Chrome.
-- Call read_memory before ask_user when the missing detail may already be stored
-  (name, usernames, usual apps, what was on screen). save_memory for durable
-  facts they state. save_screen_memory when they want the current display stored.
-- Call ask_user when a required detail is missing (which app, which account, confirm
-  destructive work, how to split issues, labels). One short spoken question — never a
-  numbered list in a message or in give_response_to_user.
-- give_response_to_user: match length to the question — complete but concise for speech.
-  Answer the substance they asked for; never a teaser ("I'll list…" without the list)
-  and never a lecture (no filler, repetition, or off-topic padding).
-  Simple fact or yes/no → one or two sentences. Comparisons, specs, or multi-part
-  questions → cover every part they asked for, briefly. "Go ahead" / "tell me more"
-  → deliver what you offered at that same depth, not longer.
-  Write for speech: natural sentences; titles and names instead of raw URLs or
-  https links (painful to hear); no markdown; no file paths unless asked.
-  After give_response_to_user, STOP — do not emit a plain message or speak again.
-  Never say “I’ll wait”, “I’m ready”, or repeat that you marked the task done.
-- After each start_task, you receive that task's result plus the full history of tasks
-  already run in this session. Use that history to decide:
-  - If the user's request is fully satisfied → give_response_to_user ONCE with an
-    appropriate spoken summary, then stop. The runtime already listens next.
-  - If a distinct remaining step is still needed → start_task with only the leftover work.
-  - Do not restart a task that already succeeded just to rephrase it.
-- Stay in the conversation after completing work. Only set end_session=true when the
-  user clearly says goodbye, quit, stop listening, or similar.
-- While a computer task is running, the user can interrupt/update by saying
-  the wake word ("Hey Jarvis") then an instruction — those go straight to the
-  agent; you do not need to call tools for them.
-- If they say "mark it done", "that's done", or "no other action is required"
-  while a computer task is running, the runtime stops that task — do not
-  start_task again for the same work.
-- When multiple displays are listed below, use that layout in start_task
-  (which screen already has Chrome, Slack, etc.). Screenshots are primary-only.
-
-Available desktop skills the computer agent can load:
-{skills}
-
-{memories}
-
-{displays}
-
-{mcp}
-
-{not_to_do}
-"""
-
 
 class AgentJob:
     """Background computer-agent run + ZeroMQ inbox handle."""
 
-    def __init__(self, task: str, call_id: str, *, match_text: str | None = None):
+    def __init__(
+        self,
+        task: str,
+        call_id: str,
+        *,
+        match_text: str | None = None,
+        speaker_context: str = "",
+    ):
         self.task = task
         self.match_text = (match_text or task).strip() or task
+        self.speaker_context = (speaker_context or "").strip()
         self.call_id = call_id
         self.done = threading.Event()
         self.result: str | None = None
         self.error: BaseException | None = None
         self.thread: threading.Thread | None = None
+        self.redirected_from_barge = False
+        self.log_dir: str | None = None
+        self.feedback_payload: dict[str, Any] | None = None
 
     @property
     def alive(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
 
 
-def _format_task_history(history: list[dict[str, str]]) -> str:
-    if not history:
-        return "(no computer tasks run yet in this session)"
-    blocks: list[str] = []
-    for i, entry in enumerate(history, start=1):
-        blocks.append(f"### Task {i}\n" f"Request:\n{entry['task']}\n\n" f"Result:\n{entry['result']}")
-    return "\n\n".join(blocks)
+def _format_task_history(
+    history: list[dict[str, str]],
+    *,
+    task_summary: str = "",
+) -> str:
+    return format_task_history_block(history, task_summary=task_summary)
 
 
-def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: bool = False) -> str:
+def _clear_speaker_tag() -> None:
+    """Drop stale voice-ID state when this utterance had no local mic clip."""
+    try:
+        from speaker_id import clear_last_speaker
+
+        clear_last_speaker()
+    except Exception:
+        pass
+
+
+def _log_speaker_round(session_speaker: Any) -> Any:
+    """
+    Read voice ID for this round, update session state, log only (no tool use yet).
+
+    ``session_speaker`` is the last known speaker across orchestrator rounds.
+    Returns the speaker match for this round, or None.
+    """
+    try:
+        from speaker_id import enabled, get_last_speaker
+
+        if not enabled():
+            return session_speaker
+        match = get_last_speaker()
+        if match is None:
+            print("[orchestrator] speaker: unknown", flush=True)
+            status_log("[speaker] unknown")
+            return None
+        if session_speaker is not None and session_speaker.name != match.name:
+            print(
+                f"[orchestrator] speaker changed: " f"{session_speaker.display_name} → {match.display_name}",
+                flush=True,
+            )
+        print(
+            f"[orchestrator] speaker: {match.display_name} ({match.score:.0%})",
+            flush=True,
+        )
+        status_log(f"[speaker] {match.display_name} ({match.score:.0%})")
+        return match
+    except Exception as e:
+        print(f"[orchestrator] speaker: unavailable ({e})", flush=True)
+        return session_speaker
+
+
+def _history_note(
+    utterance: str,
+    task_history: list[dict[str, str]],
+    *,
+    task_summary: str = "",
+    photo: bool = False,
+    desktop_context: str = "",
+) -> str:
     prefix = ""
     if photo:
         prefix = (
@@ -245,8 +228,14 @@ def _history_note(utterance: str, task_history: list[dict[str, str]], *, photo: 
             "about this same photo. Do not start_task unless they asked you to "
             "do something on the Mac.\n\n"
         )
+    desktop_block = (desktop_context or "").strip()
+    if desktop_block:
+        prefix += desktop_block + "\n\n"
     return (
-        prefix + f"User said: {utterance}\n\n" + f"Computer task history so far:\n{_format_task_history(task_history)}"
+        prefix
+        + f"User said: {utterance}\n\n"
+        + f"Computer task history so far:\n"
+        + _format_task_history(task_history, task_summary=task_summary)
     )
 
 
@@ -254,26 +243,39 @@ def _user_turn_input(
     utterance: str,
     task_history: list[dict[str, str]],
     *,
+    task_summary: str = "",
     pending_fn_outputs: list[dict] | None = None,
     photo_jpeg: bytes | None = None,
+    desktop_context: str = "",
+    desktop_screenshot_png: bytes | None = None,
 ) -> Any:
-    """Build Responses API ``input`` for one user turn (optional phone photo)."""
-    note = _history_note(utterance, task_history, photo=bool(photo_jpeg))
+    """Build Responses API ``input`` for one user turn (optional phone + desktop images)."""
+    note = _history_note(
+        utterance,
+        task_history,
+        task_summary=task_summary,
+        photo=bool(photo_jpeg),
+        desktop_context=desktop_context,
+    )
     extras = list(pending_fn_outputs or [])
+    images: list[tuple[str, bytes, str]] = []
+    if desktop_screenshot_png:
+        images.append(("image/png", desktop_screenshot_png, "high"))
     if photo_jpeg:
-        b64 = base64.b64encode(photo_jpeg).decode("ascii")
-        user = {
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": note},
+        images.append(("image/jpeg", photo_jpeg, "high"))
+    if images:
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": note}]
+        for mime, data, detail in images:
+            b64 = base64.b64encode(data).decode("ascii")
+            content.append(
                 {
                     "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{b64}",
-                    "detail": "high",
-                },
-            ],
-        }
-        return [*extras, user] if extras else [user]
+                    "image_url": f"data:{mime};base64,{b64}",
+                    "detail": detail,
+                }
+            )
+        user = {"role": "user", "content": content}
+        return [*extras, user]
     if extras:
         return [*extras, {"role": "user", "content": note}]
     return note
@@ -360,6 +362,13 @@ def _turn_already_spoke(turn: TurnTrace | None) -> bool:
     if turn is None:
         return False
     return any(kind == "spoken" for kind, _ in turn.steps)
+
+
+def _turn_spoke_since(turn: TurnTrace | None, start_index: int) -> bool:
+    """True if give_response_to_user spoke after `start_index` (this response only)."""
+    if turn is None:
+        return False
+    return any(kind == "spoken" for kind, _ in turn.steps[start_index:])
 
 
 def _give_response_closes_turn(call, out: dict | None) -> bool:
@@ -557,6 +566,10 @@ def _start_agent_thread(
 
     def _target() -> None:
         inbox = AgentMessageInbox()
+
+        def _on_log_dir(path: str) -> None:
+            job.log_dir = path
+
         try:
             job.result = computer_agent.run(
                 job.task,
@@ -567,6 +580,8 @@ def _start_agent_thread(
                 ask_user_bridge=ask_bridge,
                 status_agent_id=job.call_id,
                 user_said=job.match_text,
+                speaker_context=job.speaker_context,
+                on_log_dir=_on_log_dir,
             )
         except BaseException as e:  # noqa: BLE001 — capture for main thread
             job.error = e
@@ -581,6 +596,125 @@ def _start_agent_thread(
         daemon=True,
     )
     job.thread.start()
+
+
+def _task_context_snippet(task_history: list[dict[str, str]]) -> str:
+    if not task_history:
+        return "(none)"
+    lines: list[str] = []
+    for item in task_history[-3:]:
+        task = str(item.get("task") or "").strip()
+        if task:
+            lines.append(f"- {task[:160]}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _launch_agent_job(
+    client: OpenAI,
+    *,
+    goal: str,
+    user_said: str,
+    call_id: str,
+    auto: bool,
+    max_steps: int,
+    ask_bridge: AskUserBridge,
+    redirected_from_barge: bool = False,
+) -> AgentJob:
+    spec = resolve_agent_task(user_said=user_said, planner_task=goal)
+    if spec.goal != goal:
+        print(
+            f"[orchestrator] dropped procedure brief; goal={spec.goal!r}",
+            flush=True,
+        )
+    print(f"\n[orchestrator] start_task: {spec.goal}")
+    speaker_context = ""
+    try:
+        from speaker_id import agent_speaker_context, get_last_speaker
+
+        speaker_context = agent_speaker_context(get_last_speaker())
+        if speaker_context.strip():
+            line = speaker_context.strip().split("\n", 1)[0]
+            print(f"[orchestrator] agent speaker context: {line}", flush=True)
+    except Exception:
+        pass
+    get_session().enter_and_log(
+        "agent",
+        f"Starting task: {spec.goal[:120]}",
+        task=spec.goal,
+    )
+    job = AgentJob(
+        task=spec.goal,
+        call_id=call_id,
+        match_text=spec.match_text,
+        speaker_context=speaker_context,
+    )
+    job.redirected_from_barge = redirected_from_barge
+    _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
+    _speak_later(client, "Starting that now.")
+    emit("agent_start", lane="agent", run_id=job.call_id, task=job.task[:120])
+    return job
+
+
+def _resolve_barge_utterance(
+    client: OpenAI,
+    barge: str,
+    *,
+    spoken_context: str,
+    user_said: str,
+    task_history: list[dict[str, str]],
+    publisher: AgentMessagePublisher,
+    auto: bool,
+    max_steps: int,
+    ask_bridge: AskUserBridge,
+    tool_call_id: str,
+) -> tuple[str | None, AgentJob | None]:
+    """
+    Classify barge-in; start a new agent task when the user redirected.
+
+    Returns (tool_output, deferred_job). When ``deferred_job`` is set, tool_output
+    is None (same contract as start_task).
+    """
+    decision = classify_barge_utterance(
+        client,
+        barge,
+        spoken_context=spoken_context,
+        user_turn=user_said,
+        task_context=_task_context_snippet(task_history),
+    )
+    if decision.is_new_task:
+        if active_agents():
+            _forward_to_agent(publisher, decision.task_goal)
+            return (
+                (
+                    f"Speech interrupted. User redirected while you were speaking: "
+                    f"{decision.task_goal}. Forwarded to the running agent as steer."
+                ),
+                None,
+            )
+        job = _launch_agent_job(
+            client,
+            goal=decision.task_goal,
+            user_said=barge,
+            call_id=tool_call_id,
+            auto=auto,
+            max_steps=max_steps,
+            ask_bridge=ask_bridge,
+            redirected_from_barge=True,
+        )
+        return None, job
+    if decision.kind == "steer" and active_agents():
+        _forward_to_agent(publisher, barge)
+        return (
+            f"Speech interrupted. User steer (forwarded to running agent): {barge}",
+            None,
+        )
+    return (
+        (
+            f"Speech interrupted. User then said: {barge}. "
+            "Act on that instruction next (do not assume the spoken reply finished)."
+        ),
+        None,
+    )
 
 
 def _listen_after_barge(
@@ -809,6 +943,7 @@ def _listen_command(
 
     queued = consume_utterance()
     if queued:
+        _clear_speaker_tag()
         return queued
     if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
         return consume_utterance()
@@ -819,6 +954,7 @@ def _listen_command(
     get_session().enter_and_log("listening", f"{heard} heard — listening")
     remainder = get_wake_remainder()
     if remainder:
+        _clear_speaker_tag()
         set_reply_sink("mac")
         return strip_wake_prefix(remainder).strip() or remainder
     try:
@@ -827,7 +963,12 @@ def _listen_command(
             prompt=listen_prompt or "Listening…",
         )
     except Exception as e:
-        print(f"[orchestrator] listen after wake failed: {e}")
+        from stt import ListenCancelled
+
+        if isinstance(e, ListenCancelled):
+            print("[orchestrator] listen cancelled", flush=True)
+        else:
+            print(f"[orchestrator] listen after wake failed: {e}")
         return None
     command = strip_wake_prefix(utterance).strip()
     if not command:
@@ -839,7 +980,12 @@ def _listen_command(
             )
             command = strip_wake_prefix(utterance).strip()
         except Exception as e:
-            print(f"[orchestrator] follow-up listen failed: {e}")
+            from stt import ListenCancelled
+
+            if isinstance(e, ListenCancelled):
+                print("[orchestrator] listen cancelled", flush=True)
+            else:
+                print(f"[orchestrator] follow-up listen failed: {e}")
             return None
     set_reply_sink("mac")
     return command or None
@@ -850,6 +996,8 @@ def _supervise_agent(
     job: AgentJob,
     publisher: AgentMessagePublisher,
     ask_bridge: AskUserBridge,
+    *,
+    record_speaker: Callable[[], None] | None = None,
 ) -> str:
     """
     Main-thread loop while the agent thread runs.
@@ -878,7 +1026,8 @@ def _supervise_agent(
         if not notified_done:
             try:
                 publisher.send(
-                    "The user marked this task done. Stop all UI actions. " "Call mark_done and do not continue."
+                    "The user marked this task done. Stop all UI actions. " "Call mark_done and do not continue.",
+                    kind="steer",
                 )
             except Exception as e:
                 print(f"[orchestrator] bus send failed: {e}")
@@ -886,10 +1035,7 @@ def _supervise_agent(
         if spoken:
             barged = _speak(client, "Marking it done.")
             if barged and not is_mark_done_utterance(barged):
-                try:
-                    publisher.send(barged)
-                except Exception as e:
-                    print(f"[orchestrator] bus send failed: {e}")
+                _forward_to_agent(publisher, barged)
 
     while not job.done.is_set():
         if quit_requested():
@@ -906,11 +1052,7 @@ def _supervise_agent(
         if speak_pending():
             barged = _service_timer_speech(client)
             if barged and not is_mark_done_utterance(barged):
-                try:
-                    publisher.send(barged)
-                    print(f"[orchestrator] forwarded to agent: {barged!r}")
-                except Exception as e:
-                    print(f"[orchestrator] bus send failed: {e}")
+                _forward_to_agent(publisher, barged)
             continue
 
         command = _listen_command(
@@ -943,6 +1085,8 @@ def _supervise_agent(
             command = _confirm_heard(client, command)
             print(f'\n[user] "{command}"')
             status_log(f'[user] "{command}"')
+        if record_speaker is not None:
+            record_speaker()
         low = command.lower().strip()
         if is_mark_done_utterance(command):
             print("[orchestrator] user marked the running task done")
@@ -958,19 +1102,13 @@ def _supervise_agent(
                 if is_save_screen_utterance(pending_cmd):
                     command = pending_cmd
                 else:
-                    try:
-                        publisher.send(pending_cmd)
-                    except Exception as e:
-                        print(f"[orchestrator] bus send failed: {e}")
+                    _forward_to_agent(publisher, pending_cmd)
                     continue
             result = _save_screen_now(client, command)
             ok = result.lower().startswith("saved")
             barged = _speak(client, "Saved." if ok else "Could not save the screen.")
             if barged:
-                try:
-                    publisher.send(barged)
-                except Exception as e:
-                    print(f"[orchestrator] bus send failed: {e}")
+                _forward_to_agent(publisher, barged)
             continue
         if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
             barged = _speak(
@@ -980,23 +1118,14 @@ def _supervise_agent(
             if barged:
                 print(f'\n[user] "{barged}" (barge-in)')
                 status_log(f'[user] "{barged}" (barge-in)')
-                try:
-                    publisher.send(barged)
-                    print(f"[orchestrator] forwarded to agent: {barged!r}")
-                except Exception as e:
-                    print(f"[orchestrator] bus send failed: {e}")
+                _forward_to_agent(publisher, barged)
             else:
                 time.sleep(POST_TTS_COOLDOWN)
             if job.done.is_set():
                 break
             continue
 
-        try:
-            publisher.send(command)
-            print(f"[orchestrator] forwarded to agent: {command!r}")
-            status_log(f"[bus] → agent: {command[:120]}")
-        except Exception as e:
-            print(f"[orchestrator] bus send failed: {e}")
+        _forward_to_agent(publisher, command)
 
     # Drain any last ask that arrived as the agent was finishing.
     while _service_agent_ask(client, ask_bridge):
@@ -1004,8 +1133,42 @@ def _supervise_agent(
 
     if job.thread is not None:
         job.thread.join(timeout=5.0)
+
+    result = job.result or "failed\nError: no result from agent"
+    try:
+        job.feedback_payload = collect_post_task_feedback(
+            client,
+            goal=job.task,
+            user_said=job.match_text,
+            result=result,
+            log_dir=job.log_dir,
+            run_id=job.call_id,
+            speak_fn=_speak,
+            should_skip=quit_requested,
+        )
+    except Exception as e:
+        print(f"[orchestrator] post-task feedback failed: {e}", flush=True)
+
     get_session().enter_and_log("ready", "Computer agent finished")
-    return job.result or "failed\nError: no result from agent"
+    emit("agent_end", lane="agent", run_id=job.call_id, task=job.task[:120])
+    return result
+
+
+def _forward_to_agent(publisher: AgentMessagePublisher, text: str) -> None:
+    """Classify utterance and enqueue on the agent bus (steer / follow_up / next_run)."""
+    kind = classify_utterance_for_agent(text)
+    if kind == "next_run":
+        get_next_run_queue().enqueue(text)
+        print(f"[orchestrator] queued next_run (after agent): {text!r}", flush=True)
+        emit("queue_enqueue", lane="main", kind="next_run", text=text[:160])
+        return
+    try:
+        publisher.send(text, kind=kind)
+        print(f"[orchestrator] forwarded to agent ({kind}): {text!r}")
+        status_log(f"[bus] → agent ({kind}): {text[:120]}")
+        emit("queue_enqueue", lane="agent", kind=kind, text=text[:160])
+    except Exception as e:
+        print(f"[orchestrator] bus send failed: {e}")
 
 
 def _handle_tool(
@@ -1020,10 +1183,10 @@ def _handle_tool(
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
     user_said: str = "",
-) -> tuple[dict | None, bool, AgentJob | None]:
+) -> tuple[dict | None, bool, AgentJob | None, bytes | None]:
     """
     Execute one tool call.
-    Returns (function_call_output_or_None, end_session, deferred_agent_job).
+    Returns (function_call_output_or_None, end_session, deferred_agent_job, read_screen_png).
     When start_task launches, output is None and the job must be supervised.
     """
     args = json.loads(call.arguments or "{}")
@@ -1048,6 +1211,7 @@ def _handle_tool(
             llm_tts is not None and getattr(call, "call_id", None) and llm_tts.took_call(call.call_id)
         )
         handled_barge = False
+        deferred_from_barge: AgentJob | None = None
         if message and already_streamed:
             # Playback continues on the TTS worker — do not block the agent.
             log_llm(message, source="tts")
@@ -1057,46 +1221,61 @@ def _handle_tool(
                 flush=True,
             )
             get_session().enter("speaking", message[:100])
-            if _looks_like_question(message) and not end_session:
-                interrupted = bool(llm_tts.wait_call(call.call_id))
-                llm_tts.acknowledge_call(call.call_id)
-                if interrupted:
-                    handled_barge = True
-                    end_session = False
-                    get_session().enter("listening", "barge-in")
-                    barge = _listen_after_barge(client)
-                    if barge:
-                        output = (
-                            f"Speech interrupted. User then said: {barge}. "
-                            "Act on that instruction next (do not assume the spoken reply finished)."
-                        )
-                    else:
-                        output = (
-                            "Speech interrupted but no follow-up command was heard. "
-                            "Ask briefly what they need, or wait for the next wake."
-                        )
-                else:
-                    output = f"Spoke to user. end_session={end_session}"
-            else:
-                llm_tts.acknowledge_call(call.call_id)
-                output = f"Spoke to user. end_session={end_session}"
-        elif message:
-            if _looks_like_question(message) and not end_session:
-                barge = _speak(client, message)
+            interrupted = bool(llm_tts.wait_call(call.call_id))
+            llm_tts.acknowledge_call(call.call_id)
+            if interrupted:
+                handled_barge = True
+                end_session = False
+                get_session().enter("listening", "barge-in")
+                barge = _listen_after_barge(client)
                 if barge:
-                    handled_barge = True
-                    end_session = False
-                    output = (
-                        f"Speech interrupted. User then said: {barge}. "
-                        "Act on that instruction next (do not assume the spoken reply finished)."
+                    output, deferred_from_barge = _resolve_barge_utterance(
+                        client,
+                        barge,
+                        spoken_context=message,
+                        user_said=user_said,
+                        task_history=task_history,
+                        publisher=publisher,
+                        auto=auto,
+                        max_steps=max_steps,
+                        ask_bridge=ask_bridge,
+                        tool_call_id=call.call_id,
                     )
                 else:
-                    output = f"Spoke to user. end_session={end_session}"
+                    output = (
+                        "Speech interrupted but no follow-up command was heard. "
+                        "Ask briefly what they need, or wait for the next wake."
+                    )
             else:
-                _speak_later(client, message)
+                output = f"Spoke to user. end_session={end_session}"
+        elif message:
+            barge = _speak(client, message)
+            if barge:
+                handled_barge = True
+                end_session = False
+                output, deferred_from_barge = _resolve_barge_utterance(
+                    client,
+                    barge,
+                    spoken_context=message,
+                    user_said=user_said,
+                    task_history=task_history,
+                    publisher=publisher,
+                    auto=auto,
+                    max_steps=max_steps,
+                    ask_bridge=ask_bridge,
+                    tool_call_id=call.call_id,
+                )
+            else:
                 output = f"Spoke to user. end_session={end_session}"
         else:
             output = f"Spoke to user. end_session={end_session}"
+
+        if deferred_from_barge is not None:
+            print(
+                f"[orchestrator] give_response_to_user → barge redirected to task",
+                flush=True,
+            )
+            return None, False, deferred_from_barge, None
 
         # give_response does not open the mic. If the model asked a question
         # here anyway, listen without a wake word so the user can answer.
@@ -1109,7 +1288,8 @@ def _handle_tool(
             output = (
                 f"Spoke to user, then captured their answer (no wake word): {answer}. "
                 "Continue with that answer. Further questions must use ask_user "
-                "(one short spoken question, not a numbered list)."
+                "(one short spoken question after checking memories when relevant, "
+                "not a numbered list)."
             )
         print(f"[orchestrator] give_response_to_user → {output}")
 
@@ -1128,30 +1308,16 @@ def _handle_tool(
         if not task:
             output = "Error: empty task"
         else:
-            spec = resolve_agent_task(
+            job = _launch_agent_job(
+                client,
+                goal=task,
                 user_said=user_said or ((turn.user_input if turn else "") or ""),
-                planner_task=task,
-            )
-            if spec.goal != task:
-                print(
-                    f"[orchestrator] dropped procedure brief; goal={spec.goal!r}",
-                    flush=True,
-                )
-            print(f"\n[orchestrator] start_task: {spec.goal}")
-            get_session().enter_and_log(
-                "agent",
-                f"Starting task: {spec.goal[:120]}",
-                task=spec.goal,
-            )
-            job = AgentJob(
-                task=spec.goal,
                 call_id=call.call_id,
-                match_text=spec.match_text,
+                auto=auto,
+                max_steps=max_steps,
+                ask_bridge=ask_bridge,
             )
-            _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
-            _speak_later(client, "Starting that now.")
-            # Defer function_call_output until the agent thread finishes.
-            return None, False, job
+            return None, False, job, None
 
     elif call.name in {
         "list_memories",
@@ -1161,12 +1327,30 @@ def _handle_tool(
         "who_am_i",
         "mcp_call",
         "list_open_apps",
+        "read_screen",
         "set_timer",
         "list_timers",
         "cancel_timer",
     }:
-        output = run_shared_tool(call.name, args, client=client)
+        outcome = run_tool(
+            call.name,
+            args,
+            client=client,
+            call_id=getattr(call, "call_id", "") or "",
+            brain="orchestrator",
+        )
+        output = outcome.output
         print(f"[orchestrator] {call.name}: {output[:160].replace(chr(10), ' ')}")
+        return (
+            {
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": output,
+            },
+            False,
+            None,
+            outcome.screenshot_png,
+        )
 
     else:
         output = f"Unsupported tool: {call.name}"
@@ -1178,6 +1362,7 @@ def _handle_tool(
             "output": output,
         },
         end_session,
+        None,
         None,
     )
 
@@ -1194,6 +1379,8 @@ def _process_response(
     llm_tts: Any | None = None,
     turn: TurnTrace | None = None,
     user_said: str = "",
+    record_speaker: Callable[[], None] | None = None,
+    compact_state: SessionCompactState | None = None,
 ) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -1205,13 +1392,17 @@ def _process_response(
     """
     end_session = False
     while True:
+        # Only speech from *this* model response should suppress leftover TTS.
+        # Earlier give_response_to_user in the same turn (e.g. a mid-turn question)
+        # must not silence a later plain-message answer (stream often has chars=0).
+        steps_at_response_start = len(turn.steps) if turn is not None else 0
         _print_messages(response)
         _record_llm_step(turn, response)
         function_calls = [i for i in response.output if i.type == "function_call"]
         if not function_calls:
             leftover = _assistant_message_text(response)
-            already_spoke = _turn_already_spoke(turn)
-            if leftover and _looks_like_question(leftover) and not already_spoke:
+            spoke_this_response = _turn_spoke_since(turn, steps_at_response_start)
+            if leftover and _looks_like_question(leftover) and not spoke_this_response:
                 print(
                     "[orchestrator] model asked in a message instead of ask_user — "
                     "speaking and listening without wake word",
@@ -1229,21 +1420,23 @@ def _process_response(
                     input=(
                         f"User answered: {answer}\n\n"
                         "Continue the task with this answer. Never put questions in a "
-                        "plain message; call ask_user (one short question) or "
-                        "give_response_to_user (statements only)."
+                        "plain message. HARD RULE: call read_memory "
+                        "(personal/profile and any relevant app note) before "
+                        "ask_user; only ask if memory still cannot answer. "
+                        "Otherwise give_response_to_user (statements only)."
                     ),
                 )
                 continue
-            if leftover and not already_spoke:
+            if leftover and not spoke_this_response:
                 print(
                     "[orchestrator] model replied with a message instead of "
                     "give_response_to_user — speaking it in the background",
                     flush=True,
                 )
                 _speak_later(client, leftover)
-            elif leftover and already_spoke:
+            elif leftover and spoke_this_response:
                 print(
-                    "[orchestrator] skipping leftover message " "(already spoke this turn)",
+                    "[orchestrator] skipping leftover message " "(already spoke this response)",
                     flush=True,
                 )
             return response, end_session, []
@@ -1253,7 +1446,7 @@ def _process_response(
         close_after_speech = False
 
         for call in function_calls:
-            out, stop, job = _handle_tool(
+            out, stop, job, screen_png = _handle_tool(
                 client,
                 call,
                 auto=auto,
@@ -1272,6 +1465,8 @@ def _process_response(
                     turn.add("start_task", job.task)
             elif out is not None:
                 outputs.append(out)
+                if screen_png:
+                    outputs.append(read_screen_vision_input(screen_png))
                 if turn is not None:
                     result_text = str(out.get("output") or "")
                     turn.add("tool_result", f"{call.name}: {result_text}", max_len=3000)
@@ -1279,18 +1474,46 @@ def _process_response(
                     close_after_speech = True
 
         if deferred_job is not None:
-            result = _supervise_agent(client, deferred_job, publisher, ask_bridge)
+            result = _supervise_agent(
+                client,
+                deferred_job,
+                publisher,
+                ask_bridge,
+                record_speaker=record_speaker,
+            )
             task_history.append({"task": deferred_job.task, "result": result})
+            if compact_state is not None:
+                cp = run_orchestrator_checkpoint(
+                    client,
+                    compact_state,
+                    task_history,
+                    capture_desktop=False,
+                    after_task=True,
+                )
+                task_history = cp.task_history
             if turn is not None:
                 turn.add("start_task_result", result or "", max_len=4000)
-            history_blob = _format_task_history(task_history)
+            task_summary = compact_state.task_summary if compact_state is not None else ""
+            history_blob = _format_task_history(task_history, task_summary=task_summary)
+            redirect_note = ""
+            if getattr(deferred_job, "redirected_from_barge", False):
+                redirect_note = (
+                    "The user interrupted your spoken reply to redirect to this task. "
+                    "Do not restart earlier completed tasks.\n\n"
+                )
+            feedback_line = ""
+            fb = getattr(deferred_job, "feedback_payload", None)
+            if isinstance(fb, dict):
+                feedback_line = format_feedback_for_model(fb) + "\n\n"
             outputs.append(
                 {
                     "type": "function_call_output",
                     "call_id": deferred_job.call_id,
                     "output": (
+                        f"{redirect_note}"
                         f"Computer agent finished this task.\n"
                         f"Latest result:\n{result}\n\n"
+                        f"{feedback_line}"
                         f"Session task history (use this to decide next action):\n"
                         f"{history_blob}\n\n"
                         "Decide next:\n"
@@ -1337,9 +1560,10 @@ def _process_response(
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     global _phone_photo_in_session
     _phone_photo_in_session = False
+    register_orchestrator()
     ensure_tray_running()
     ensure_phone_gateway()
-    register_orchestrator()
+    ensure_dictation_running()
     sess = Session()
     bind_session(sess)
 
@@ -1377,20 +1601,16 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             "the request.\n"
         )
 
-    def _system_prompt() -> str:
+    def _system_prompt(*, session_summary: str = "") -> str:
         bundle = assemble_context()
-        # Occupancy text can contain `{` from window titles; inject after format.
-        return (
-            SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
-            .replace("{not_to_do}", "__NOT_TO_DO__")
-            .format(
-                skills=bundle.skills,
-                memories=bundle.memories,
-                mcp=bundle.mcp,
-                mcp_rule=mcp_rule,
-            )
-            .replace("__DISPLAYS__", bundle.displays)
-            .replace("__NOT_TO_DO__", bundle.not_to_do)
+        return build_system_prompt(
+            skills=bundle.skills,
+            memories=bundle.memories,
+            displays=bundle.displays,
+            mcp=bundle.mcp,
+            not_to_do=bundle.not_to_do,
+            mcp_rule=mcp_rule,
+            session_summary=session_summary,
         )
 
     publisher = AgentMessagePublisher()
@@ -1417,6 +1637,20 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         previous_id: str | None = None
         task_history: list[dict[str, str]] = []
         pending_fn_outputs: list[dict] = []
+        session_speaker: Any = None
+        compact_state = SessionCompactState()
+
+        def _record_speaker() -> None:
+            nonlocal session_speaker
+            session_speaker = _log_speaker_round(session_speaker)
+
+        try:
+            from speaker_id import enabled as speaker_id_enabled
+
+            if speaker_id_enabled():
+                print("[orchestrator] speaker ID enabled — logging voice each round", flush=True)
+        except Exception:
+            pass
 
         while True:
             if quit_requested():
@@ -1428,29 +1662,35 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 utterance = pending
                 pending = None
             else:
-                if speak_pending():
+                next_batch = get_next_run_queue().drain()
+                if next_batch:
+                    utterance = " ".join(m.text for m in next_batch if m.text).strip()
+                    print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
+                elif speak_pending():
                     barged = _service_timer_speech(client)
                     if barged:
                         pending = barged
                     continue
-                utterance = _listen_command(
-                    client,
-                    should_stop=quit_requested,
-                    wake_prompt=f"Waiting for {format_wake_phrases()}…",
-                    listen_prompt="Listening…",
-                )
-                if quit_requested():
-                    print("[orchestrator] quit requested from menu bar.")
-                    sess.enter_and_log("done", "Quit from menu bar")
-                    return
-                if utterance is None:
-                    continue
+                else:
+                    utterance = _listen_command(
+                        client,
+                        should_stop=quit_requested,
+                        wake_prompt=f"Waiting for {format_wake_phrases()}…",
+                        listen_prompt="Listening…",
+                    )
+                    if quit_requested():
+                        print("[orchestrator] quit requested from menu bar.")
+                        sess.enter_and_log("done", "Quit from menu bar")
+                        return
+                    if utterance is None:
+                        continue
 
             photo_turn = phone_photo_pending()
             if not photo_turn:
                 utterance = _confirm_heard(client, utterance)
             print(f'\n[user] "{utterance}"')
             status_log(f'[user] "{utterance}"')
+            _record_speaker()
             low = utterance.lower().strip()
             if is_mark_done_utterance(utterance):
                 if active_agents():
@@ -1488,35 +1728,90 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 jpeg = phone_photo_jpeg(consume_pending=True)
                 if jpeg:
                     _phone_photo_in_session = True
+
+            compact_state.begin_turn()
+            emit("turn_start", lane="main", utterance=utterance[:160])
+            cp = run_orchestrator_checkpoint(
+                client,
+                compact_state,
+                task_history,
+                pending_fn_outputs=pending_fn_outputs or None,
+                capture_desktop=True,
+            )
+            task_history = cp.task_history
+            if cp.reset_thread:
+                previous_id = None
+            if cp.next_run_messages:
+                extras = " ".join(m.text for m in cp.next_run_messages if m.text)
+                if extras:
+                    utterance = f"{utterance} {extras}".strip() if utterance else extras
+                    print(f"[orchestrator] applied next_run queue: {extras!r}", flush=True)
+
+            desktop = cp.desktop
             turn_input = _user_turn_input(
                 utterance,
                 task_history,
-                pending_fn_outputs=pending_fn_outputs or None,
+                task_summary=compact_state.task_summary,
+                pending_fn_outputs=cp.pending_fn_outputs or None,
                 photo_jpeg=jpeg,
+                desktop_context=desktop.text,
+                desktop_screenshot_png=desktop.screenshot_png,
             )
             pending_fn_outputs = []
             turn = TurnTrace(utterance)
-            system = _system_prompt()
+            system = _system_prompt(session_summary=compact_state.session_summary)
 
-            if previous_id is None:
-                response = _create_response(
-                    client,
-                    llm_tts=llm_tts,
-                    model=MODEL,
-                    tools=orchestrator_tools(),
-                    instructions=system,
-                    input=turn_input,
-                )
-            else:
-                response = _create_response(
-                    client,
-                    llm_tts=llm_tts,
-                    model=MODEL,
-                    tools=orchestrator_tools(),
-                    instructions=system,
-                    previous_response_id=previous_id,
-                    input=turn_input,
-                )
+            response = None
+            for overflow_attempt in range(2):
+                try:
+                    if previous_id is None:
+                        response = _create_response(
+                            client,
+                            llm_tts=llm_tts,
+                            model=MODEL,
+                            tools=orchestrator_tools(),
+                            instructions=system,
+                            input=turn_input,
+                        )
+                    else:
+                        response = _create_response(
+                            client,
+                            llm_tts=llm_tts,
+                            model=MODEL,
+                            tools=orchestrator_tools(),
+                            instructions=system,
+                            previous_response_id=previous_id,
+                            input=turn_input,
+                        )
+                    break
+                except Exception as e:
+                    if overflow_attempt == 0 and is_context_overflow_error(e):
+                        print(f"[orchestrator] context overflow ({e}); recovering once", flush=True)
+                        cp = run_orchestrator_checkpoint(
+                            client,
+                            compact_state,
+                            task_history,
+                            capture_desktop=True,
+                            overflow=True,
+                        )
+                        task_history = cp.task_history
+                        desktop = cp.desktop
+                        if cp.reset_thread:
+                            previous_id = None
+                        system = _system_prompt(session_summary=compact_state.session_summary)
+                        turn_input = _user_turn_input(
+                            utterance,
+                            task_history,
+                            task_summary=compact_state.task_summary,
+                            pending_fn_outputs=None,
+                            photo_jpeg=jpeg,
+                            desktop_context=desktop.text,
+                            desktop_screenshot_png=desktop.screenshot_png,
+                        )
+                        continue
+                    raise
+            if response is None:
+                raise RuntimeError("Orchestrator response failed after overflow recovery")
 
             response, end_session, pending_fn_outputs = _process_response(
                 client,
@@ -1529,8 +1824,12 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 llm_tts=llm_tts,
                 turn=turn,
                 user_said=utterance,
+                record_speaker=_record_speaker,
+                compact_state=compact_state,
             )
             previous_id = response.id
+            compact_state.record_turn(utterance, turn.as_text())
+            emit("turn_end", lane="main", utterance=utterance[:160])
             maybe_extract_run_memories(
                 user_input=utterance,
                 transcript=turn.as_text(),
@@ -1567,6 +1866,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         unregister_orchestrator()
         stop_phone_gateway()
         stop_tray()
+        stop_dictation()
         sess.enter("idle", "Orchestrator stopped")
         bind_audio(None)
         bind_session(None)
@@ -1588,6 +1888,7 @@ def main(argv: list[str] | None = None) -> None:
         print("\n[orchestrator] stopped.")
         stop_phone_gateway()
         stop_tray()
+        stop_dictation()
         sys.exit(0)
 
 

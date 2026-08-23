@@ -23,6 +23,8 @@ BUDGET_MCP = int(os.environ.get("CONTEXT_BUDGET_MCP", "3500"))
 
 NOT_TO_DO_PATH = Path(__file__).resolve().parent / "not_to_do.md"
 BUDGET_NOT_TO_DO = int(os.environ.get("CONTEXT_BUDGET_NOT_TO_DO", "1200"))
+BUDGET_ORCH_DESKTOP_TEXT = int(os.environ.get("ORCHESTRATOR_DESKTOP_TEXT_CHARS", "12000"))
+BUDGET_ORCH_AX = int(os.environ.get("ORCHESTRATOR_DESKTOP_AX_CHARS", "8000"))
 
 
 @dataclass
@@ -114,3 +116,159 @@ def assemble_context(
         not_to_do=_clip(format_not_to_do(), BUDGET_NOT_TO_DO),
     )
     return bundle
+
+
+@dataclass(frozen=True)
+class TurnDesktopContext:
+    """Live desktop snapshot attached to one orchestrator user turn."""
+
+    text: str
+    screenshot_png: bytes | None = None
+
+
+def orchestrator_desktop_enabled() -> bool:
+    return os.environ.get("ORCHESTRATOR_DESKTOP_CONTEXT", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _orchestrator_desktop_ax_enabled() -> bool:
+    return os.environ.get("ORCHESTRATOR_DESKTOP_AX", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _orchestrator_desktop_screenshot_enabled() -> bool:
+    return os.environ.get("ORCHESTRATOR_DESKTOP_SCREENSHOT", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _capture_desktop_context(
+    *,
+    enable_screenshot: bool,
+    enable_ax: bool,
+    header: str,
+    log_prefix: str = "orchestrator",
+) -> TurnDesktopContext:
+    monitors: list[dict] | None = None
+    screenshot_png: bytes | None = None
+    screenshot_size: tuple[int, int] | None = None
+
+    try:
+        from actions import DesktopController, list_monitors
+
+        monitors = list_monitors()
+        if enable_screenshot:
+            desktop = DesktopController()
+            screenshot_png = desktop.capture_screenshot()
+            screenshot_size = (desktop._model_w, desktop._model_h)
+    except Exception as e:
+        print(f"[{log_prefix}] desktop screenshot failed: {e}", flush=True)
+
+    desktop_text = ""
+    try:
+        bundle = assemble_context(
+            monitors=monitors,
+            screenshot_size=screenshot_size,
+            include_geometry=True,
+            persist=False,
+        )
+        desktop_text = bundle.desktop_block()
+    except Exception as e:
+        desktop_text = f"(display context unavailable: {e})"
+
+    ax_text = ""
+    if enable_ax:
+        try:
+            from accessibility import read_ui_text
+
+            ax_text = read_ui_text(max_chars=BUDGET_ORCH_AX)
+        except Exception as e:
+            ax_text = f"(accessibility unavailable: {e})"
+
+    parts = [header, desktop_text]
+    if ax_text.strip():
+        parts.extend(["", "Accessibility text (frontmost app):", ax_text.strip()])
+    if screenshot_png:
+        parts.extend(
+            [
+                "",
+                "A screenshot of the attached display(s) is included with this message. "
+                "Use it with the text above to answer what is on screen.",
+            ]
+        )
+
+    text = _clip("\n\n".join(p for p in parts if p), BUDGET_ORCH_DESKTOP_TEXT)
+    if screenshot_png:
+        kb = len(screenshot_png) / 1024.0
+        print(
+            f"[{log_prefix}] desktop context: {len(text)} chars, screenshot {kb:.0f} KB",
+            flush=True,
+        )
+    elif text.strip():
+        print(f"[{log_prefix}] desktop context: {len(text)} chars (no screenshot)", flush=True)
+
+    return TurnDesktopContext(text=text, screenshot_png=screenshot_png)
+
+
+def read_screen() -> TurnDesktopContext:
+    """
+    Explicit screen read for the read_screen tool — display layout, AX text,
+    and screenshot (always attempted).
+    """
+    return _capture_desktop_context(
+        enable_screenshot=True,
+        enable_ax=True,
+        header="Screen read (read_screen):",
+        log_prefix="read_screen",
+    )
+
+
+def read_screen_vision_input(png: bytes) -> dict[str, Any]:
+    """Follow-up user message so the model sees the read_screen PNG."""
+    import base64
+
+    b64 = base64.b64encode(png).decode("ascii")
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "Screenshot from read_screen (same moment as the tool output above). "
+                    "Use it with the accessibility and display text."
+                ),
+            },
+            {
+                "type": "input_image",
+                "image_url": f"data:image/png;base64,{b64}",
+                "detail": "high",
+            },
+        ],
+    }
+
+
+def capture_turn_desktop_context() -> TurnDesktopContext:
+    """
+    Capture display occupancy, accessibility text, and a desktop screenshot
+    for one orchestrator question (what the user is looking at now).
+    """
+    if not orchestrator_desktop_enabled():
+        return TurnDesktopContext("")
+
+    return _capture_desktop_context(
+        enable_screenshot=_orchestrator_desktop_screenshot_enabled(),
+        enable_ax=_orchestrator_desktop_ax_enabled(),
+        header="Desktop snapshot for this question (what the user is looking at on the Mac now):",
+        log_prefix="orchestrator",
+    )

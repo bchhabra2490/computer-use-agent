@@ -22,6 +22,7 @@ from orchestrator import (  # noqa: E402
     _looks_like_question,
     _strip_wait_filler,
     _turn_already_spoke,
+    _turn_spoke_since,
     _user_turn_input,
 )
 
@@ -100,6 +101,15 @@ class RepeatSpeechTests(unittest.TestCase):
         turn.add("spoken", "I created seven issues.")
         self.assertTrue(_turn_already_spoke(turn))
 
+    def test_turn_spoke_since_ignores_earlier_speech(self) -> None:
+        turn = TurnTrace("gpu advice")
+        turn.add("spoken", "Want me to search listings?")
+        start = len(turn.steps)
+        turn.add("llm", "follow-up answer in a plain message")
+        self.assertFalse(_turn_spoke_since(turn, start))
+        turn.add("spoken", "Orin Nano can run Whisper small.")
+        self.assertTrue(_turn_spoke_since(turn, start))
+
     def test_give_response_closes_turn(self) -> None:
         call = SimpleNamespace(name="give_response_to_user")
         self.assertTrue(
@@ -125,6 +135,23 @@ class UserTurnInputTests(unittest.TestCase):
         inp = _user_turn_input("open notes", [])
         self.assertIsInstance(inp, str)
         self.assertIn("open notes", inp)
+
+    def test_attaches_desktop_screenshot(self) -> None:
+        png = b"\x89PNG" + b"\x00" * 20
+        inp = _user_turn_input(
+            "what is on screen?",
+            [],
+            desktop_context="Desktop snapshot",
+            desktop_screenshot_png=png,
+        )
+        self.assertIsInstance(inp, list)
+        content = inp[0]["content"]
+        types = [part["type"] for part in content]
+        self.assertIn("input_text", types)
+        self.assertIn("input_image", types)
+        url = next(p["image_url"] for p in content if p["type"] == "input_image")
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        self.assertIn("Desktop snapshot", content[0]["text"])
 
     def test_attaches_phone_jpeg(self) -> None:
         jpeg = b"\xff\xd8\xff" + b"\x00" * 20

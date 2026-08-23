@@ -827,7 +827,12 @@ def _listen_command(
             prompt=listen_prompt or "Listening…",
         )
     except Exception as e:
-        print(f"[orchestrator] listen after wake failed: {e}")
+        from stt import ListenCancelled
+
+        if isinstance(e, ListenCancelled):
+            print("[orchestrator] listen cancelled", flush=True)
+        else:
+            print(f"[orchestrator] listen after wake failed: {e}")
         return None
     command = strip_wake_prefix(utterance).strip()
     if not command:
@@ -839,7 +844,12 @@ def _listen_command(
             )
             command = strip_wake_prefix(utterance).strip()
         except Exception as e:
-            print(f"[orchestrator] follow-up listen failed: {e}")
+            from stt import ListenCancelled
+
+            if isinstance(e, ListenCancelled):
+                print("[orchestrator] listen cancelled", flush=True)
+            else:
+                print(f"[orchestrator] follow-up listen failed: {e}")
             return None
     set_reply_sink("mac")
     return command or None

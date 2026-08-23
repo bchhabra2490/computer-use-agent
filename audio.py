@@ -157,7 +157,12 @@ class AudioSession:
         try:
             utterance = self.listen(listen_prompt or "Listening…")
         except Exception as e:
-            print(f"[audio] listen after wake failed: {e}")
+            from stt import ListenCancelled
+
+            if isinstance(e, ListenCancelled):
+                print("[audio] listen cancelled", flush=True)
+            else:
+                print(f"[audio] listen after wake failed: {e}")
             return None
         command = strip_wake_prefix(utterance).strip()
         if not command:
@@ -166,7 +171,12 @@ class AudioSession:
                 utterance = self.listen("Still listening for your command…")
                 command = strip_wake_prefix(utterance).strip()
             except Exception as e:
-                print(f"[audio] follow-up listen failed: {e}")
+                from stt import ListenCancelled
+
+                if isinstance(e, ListenCancelled):
+                    print("[audio] listen cancelled", flush=True)
+                else:
+                    print(f"[audio] follow-up listen failed: {e}")
                 return None
         set_reply_sink("mac")
         return command or None

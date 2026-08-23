@@ -73,9 +73,26 @@ class FlagTests(unittest.TestCase):
     def test_stt_listening_clears_send_on_stop(self) -> None:
         st.request_send()
         st.set_stt_listening(True)
+        self.assertFalse(st.send_pending())
+        st.request_send()
         self.assertTrue(st.send_pending())
         st.set_stt_listening(False)
         self.assertFalse(st.send_pending())
+
+    def test_cancel_request_and_consume(self) -> None:
+        self.assertFalse(st.cancel_pending())
+        st.request_cancel()
+        self.assertTrue(st.cancel_pending())
+        self.assertTrue(st.consume_cancel())
+        self.assertFalse(st.cancel_pending())
+
+    def test_cancel_clears_send_and_pending_utterances(self) -> None:
+        st.enqueue_utterance("ignore me")
+        st.request_send()
+        st.request_cancel()
+        self.assertFalse(st.send_pending())
+        self.assertTrue(st.cancel_pending())
+        self.assertIsNone(st.consume_utterance())
 
     def test_enqueue_and_consume_utterance(self) -> None:
         self.assertFalse(st.utterance_pending())

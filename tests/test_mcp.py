@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -185,6 +186,82 @@ class LiveStdioTests(unittest.TestCase):
             self.assertIn("MCP_READ_ONLY", blocked)
             allowed = mgr.call("echo", "echo", {"text": "ok"})
             self.assertIn("ok", allowed)
+
+
+    def test_ensure_connected_retries_http_server(self) -> None:
+        spec = mc.ServerSpec(
+            name="morning",
+            url="http://127.0.0.1:9/api/mcp",
+            transport="http",
+        )
+        mgr = mc.McpManager(specs={"morning": spec})
+        mgr._started = True
+        mgr._loop = asyncio.new_event_loop()
+
+        async def fake_connect(s: mc.ServerSpec) -> None:
+            mgr._servers[s.name] = mc._LiveServer(
+                spec=s,
+                session=object(),
+                tools=[
+                    mc.McpTool(
+                        server=s.name,
+                        name="get_briefing",
+                        description="Get briefing",
+                        read_only=True,
+                    )
+                ],
+            )
+
+        with patch.object(mgr, "_submit", side_effect=lambda coro, timeout: mgr._loop.run_until_complete(coro)):
+            with patch.object(mgr, "_connect_one", side_effect=fake_connect):
+                err = mgr.ensure_connected("morning")
+        self.assertIsNone(err)
+        self.assertIsNotNone(mgr._servers["morning"].session)
+        mgr._loop.close()
+        mgr._loop = None
+
+    def test_call_reconnects_before_tool(self) -> None:
+        spec = mc.ServerSpec(name="echo", command="unused", transport="stdio")
+        mgr = mc.McpManager(specs={"echo": spec})
+        mgr._started = True
+        mgr._loop = asyncio.new_event_loop()
+        session = object()
+
+        async def fake_connect(s: mc.ServerSpec) -> None:
+            mgr._servers[s.name] = mc._LiveServer(
+                spec=s,
+                session=session,
+                tools=[
+                    mc.McpTool(
+                        server=s.name,
+                        name="ping",
+                        description="Ping",
+                        read_only=True,
+                    )
+                ],
+            )
+
+        with (
+            patch.object(mgr, "_submit", side_effect=lambda coro, timeout: mgr._loop.run_until_complete(coro)),
+            patch.object(mgr, "_connect_one", side_effect=fake_connect),
+            patch.object(mgr, "_call_async", return_value=asyncio.sleep(0, result="pong")),
+        ):
+            # _call_async is awaited via _submit — patch _submit for call path too after connect.
+            calls = {"n": 0}
+
+            def submit(coro, timeout):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return mgr._loop.run_until_complete(coro)
+                # second submit is the tool call
+                return "pong"
+
+            with patch.object(mgr, "_submit", side_effect=submit):
+                with patch.object(mgr, "_connect_one", side_effect=fake_connect):
+                    out = mgr.call("echo", "ping", {})
+        self.assertEqual(out, "pong")
+        mgr._loop.close()
+        mgr._loop = None
 
 
 if __name__ == "__main__":

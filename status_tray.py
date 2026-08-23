@@ -31,6 +31,7 @@ from app_status import (
     pid_alive,
     read_status,
     request_mark_done,
+    request_cancel,
     request_send,
     set_face_overlay_enabled,
     set_overlay_enabled,
@@ -347,7 +348,8 @@ def main() -> None:
                 f"{data.get('state')}|{data.get('detail')}|{data.get('updated_at')}|"
                 f"{len(data.get('logs') or [])}|{len(agents)}|"
                 f"{data.get('done_requested')}|{data.get('stt_active')}|"
-                f"{data.get('send_requested')}|{data.get('overlay_hidden')}|"
+                f"{data.get('send_requested')}|{data.get('cancel_requested')}|"
+                f"{data.get('overlay_hidden')}|"
                 f"{data.get('overlay_enabled')}|{data.get('face_overlay_enabled')}|"
                 f"{data.get('tts_playing')}|{data.get('tts_play_depth')}|"
                 f"{data.get('orchestrator_pid')}|"
@@ -541,6 +543,7 @@ def main() -> None:
             listening = bool(data.get("stt_active")) or str(
                 data.get("state") or ""
             ) in {"listening", "ask"}
+            busy = listening or bool(agents)
             send = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Send",
                 "sendAudio:",
@@ -549,6 +552,15 @@ def main() -> None:
             send.setTarget_(self)
             send.setEnabled_(listening)
             self.menu.addItem_(send)
+
+            cancel = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Cancel Listen / Processing",
+                "cancelListen:",
+                "",
+            )
+            cancel.setTarget_(self)
+            cancel.setEnabled_(busy)
+            self.menu.addItem_(cancel)
 
             add_mem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Add Memory",
@@ -677,6 +689,9 @@ def main() -> None:
             if not listening:
                 return
             request_send()
+
+        def cancelListen_(self, _sender) -> None:
+            request_cancel()
 
         def addMemory_(self, _sender) -> None:
             _add_memory_from_tray()

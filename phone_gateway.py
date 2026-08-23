@@ -48,6 +48,7 @@ from app_status import (
     request_mark_done,
     request_quit,
     request_send,
+    request_cancel,
     set_phone_gateway_pid,
     write_phone_photo,
 )
@@ -159,6 +160,9 @@ def apply_control(action: str) -> dict[str, Any]:
     if key == "send":
         request_send()
         return {"ok": True, "action": "send"}
+    if key in {"cancel", "abort", "stop_listen"}:
+        request_cancel()
+        return {"ok": True, "action": "cancel"}
     if key in {"mark_done", "done"}:
         request_mark_done()
         return {"ok": True, "action": "mark_done"}

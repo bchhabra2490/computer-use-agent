@@ -49,6 +49,7 @@ def _default_state() -> dict[str, Any]:
         "done_requested": False,
         "done_agent_id": None,
         "send_requested": False,
+        "cancel_requested": False,
         "stt_active": False,
         "agents": [],  # active subagents / computer-agent jobs
         "overlay_hidden": False,
@@ -565,6 +566,7 @@ def register_orchestrator(pid: int | None = None) -> None:
         data["done_requested"] = False
         data["done_agent_id"] = None
         data["send_requested"] = False
+        data["cancel_requested"] = False
         data["stt_active"] = False
         _write(data)
 
@@ -693,12 +695,16 @@ def clear_mark_done() -> None:
 
 
 def set_stt_listening(active: bool) -> None:
-    """STT owns the mic — tray Send is enabled while this is True."""
+    """STT owns the mic — tray Send/Cancel are enabled while this is True."""
     with _lock:
         data = _read()
         data["stt_active"] = bool(active)
-        if not active:
+        if active:
+            data["cancel_requested"] = False
             data["send_requested"] = False
+        else:
+            data["send_requested"] = False
+            data["cancel_requested"] = False
         _write(data)
 
 
@@ -707,6 +713,7 @@ def request_send() -> None:
     with _lock:
         data = _read()
         data["send_requested"] = True
+        data["cancel_requested"] = False
         _write(data)
     log("Send requested — processing audio")
 
@@ -731,6 +738,48 @@ def clear_send() -> None:
     with _lock:
         data = _read()
         data["send_requested"] = False
+        _write(data)
+
+
+def request_cancel() -> None:
+    """Abort the current listen (no transcript) and stop in-flight agent work.
+
+    While STT is active: discards capture. If computer-use agents are running:
+    also requests mark-done so UI actions stop.
+    """
+    with _lock:
+        data = _read()
+        data["cancel_requested"] = True
+        data["send_requested"] = False
+        # Drop queued text/phone commands so they are not processed next.
+        data["pending_utterances"] = []
+        agents = list(data.get("agents") or [])
+        _write(data)
+    log("Cancel requested — abort listen / processing")
+    if agents:
+        request_mark_done()
+
+
+def cancel_pending() -> bool:
+    with _lock:
+        return bool(_read().get("cancel_requested"))
+
+
+def consume_cancel() -> bool:
+    """True if Cancel was requested; clears the flag so it fires once."""
+    with _lock:
+        data = _read()
+        if not data.get("cancel_requested"):
+            return False
+        data["cancel_requested"] = False
+        _write(data)
+        return True
+
+
+def clear_cancel() -> None:
+    with _lock:
+        data = _read()
+        data["cancel_requested"] = False
         _write(data)
 
 

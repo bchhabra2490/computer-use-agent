@@ -176,6 +176,8 @@ cua observe accept --all       # write every item in every draft
 cua observe reject <id> m2     # drop one item from a draft
 cua observe reject --all       # discard every proposed draft
 cua observe stop
+cua face                       # list blobatars (* = current)
+cua face droplet               # switch the live face overlay
 ```
 
 `cua start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
@@ -356,11 +358,15 @@ A small **menu-bar icon** starts with the orchestrator or agent:
 - **On-screen overlay** — the same logs on a transparent, click-through panel
   (prefers a second display). Hides for each screenshot, then comes back.
   Toggle **Log Overlay** in the menu-bar icon.
+- **Face overlay** — a click-through blobatar at the top center of the main
+  display. Mood follows session state (sleep / listen / speak / think). Hidden
+  from computer-use screenshots. Toggle **Face Overlay** in the menu-bar icon,
+  or set `FACE_OVERLAY=0`.
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
-  **Add Memory** (screenshot + description), **Log Overlay**, in-progress agents,
-  **Mark Task Done**, recent logs, **Quit Orchestrator**, open latest `logs/`
-  run folder, quit the icon
+  **Add Memory** (screenshot + description), **Log Overlay**, **Face Overlay**,
+  in-progress agents, **Mark Task Done**, recent logs, **Quit Orchestrator**,
+  open latest `logs/` run folder, quit the icon
 
 While a computer task is running, **Mark Task Done** (menu bar) or saying
 “mark it done” / “no other action is required” stops that job. The agent also
@@ -370,6 +376,28 @@ calls `mark_done` itself when the request is finished.
 python status_tray.py          # run the icon alone (optional)
 STATUS_TRAY=0 python orchestrator.py   # disable auto-start
 ```
+
+**Blobatars.** Four faces; switch without restarting:
+
+| Name | Look |
+|------|------|
+| `pebble` | teal round pebble (default) |
+| `droplet` | coral teardrop |
+| `cloud` | lavender cloud |
+| `sun` | amber sun with petals |
+
+```bash
+cua face              # list (* = current)
+cua face pebble
+cua face droplet
+cua face cloud
+cua face sun
+# alias: cua blobatar sun
+```
+
+Pin one at startup with `FACE_OVERLAY_PRESET=droplet` in `.env`. Leave
+`FACE_OVERLAY_HUE` unset so each preset keeps its own color; that env value
+overrides hue for every blobatar.
 
 ### Phone gateway (optional)
 
@@ -610,10 +638,11 @@ When a task **completes**, reusable workflows are saved automatically as skills
 
 ## Extending it
 
-- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua observe` / `cua skills condense` / `cua skills merge`).
+- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua face` / `cua observe` / `cua skills condense` / `cua skills merge`).
 - `observe.py` — passive click/scroll observer; drafts under `.runtime/observe/proposed/`.
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
+- `face_overlay.py` — top-center blobatar (`cua face pebble|droplet|cloud|sun`).
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).

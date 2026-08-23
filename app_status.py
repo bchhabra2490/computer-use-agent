@@ -56,6 +56,7 @@ def _default_state() -> dict[str, Any]:
         "overlay_ack_hidden": False,
         "overlay_enabled": True,
         "face_overlay_enabled": True,
+        "face_preset": "pebble",
         "tts_playing": False,
         "tts_play_depth": 0,
         "phone_gateway_pid": None,
@@ -210,6 +211,14 @@ def set_face_overlay_enabled(enabled: bool) -> None:
     with _lock:
         data = _read()
         data["face_overlay_enabled"] = bool(enabled)
+        _write(data)
+
+
+def set_face_preset(name: str) -> None:
+    """Which blobatar the overlay draws (tray picks this up on the next poll)."""
+    with _lock:
+        data = _read()
+        data["face_preset"] = str(name).strip().lower()
         _write(data)
 
 

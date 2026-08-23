@@ -39,6 +39,14 @@ Fn-key dictation (hold Fn to paste speech into the focused field)::
     cua dictation start
     cua dictation stop
     cua dictation status
+
+Blobatar face overlay::
+
+    cua face
+    cua face pebble
+    cua face droplet
+    cua face cloud
+    cua face sun
 """
 
 from __future__ import annotations
@@ -382,6 +390,13 @@ DICTATION (hold Fn → paste speech into focused field; DICTATION=1 in .env)
   cua dictation stop
   cua dictation status
 
+FACE (blobatar overlay — pebble, droplet, cloud, sun)
+  cua face              List blobatars (* = current)
+  cua face pebble       Switch the live overlay
+  cua face droplet
+  cua face cloud
+  cua face sun
+
 SKILLS (playbooks under skills/*/SKILL.md)
   cua skills condense [--name SKILL] [--force] [--dry-run]
   cua skills merge [--name SKILL …] [--dry-run]
@@ -542,6 +557,17 @@ def main(argv: list[str] | None = None) -> int:
     dict_sub.add_parser("start", help="Start the dictation hotkey daemon")
     dict_sub.add_parser("stop", help="Stop the dictation daemon")
     dict_sub.add_parser("status", help="Show dictation pid")
+
+    face_p = sub.add_parser(
+        "face",
+        aliases=["blobatar"],
+        help="Choose the blobatar face overlay (pebble, droplet, cloud, sun)",
+    )
+    face_p.add_argument(
+        "name",
+        nargs="*",
+        help="pebble | droplet | cloud | sun (omit to list)",
+    )
 
     accept_p = obs_sub.add_parser(
         "accept",
@@ -740,6 +766,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.dictation_command == "status":
             return dictation_mod.cmd_status()
         return 2
+    if args.command in {"face", "blobatar"}:
+        from face_overlay import cmd_face
+
+        return cmd_face(args.name)
     if args.command == "speaker":
         from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
 

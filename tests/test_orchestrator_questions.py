@@ -22,6 +22,7 @@ from orchestrator import (  # noqa: E402
     _looks_like_question,
     _strip_wait_filler,
     _turn_already_spoke,
+    _turn_spoke_since,
     _user_turn_input,
 )
 
@@ -99,6 +100,15 @@ class RepeatSpeechTests(unittest.TestCase):
         self.assertFalse(_turn_already_spoke(turn))
         turn.add("spoken", "I created seven issues.")
         self.assertTrue(_turn_already_spoke(turn))
+
+    def test_turn_spoke_since_ignores_earlier_speech(self) -> None:
+        turn = TurnTrace("gpu advice")
+        turn.add("spoken", "Want me to search listings?")
+        start = len(turn.steps)
+        turn.add("llm", "follow-up answer in a plain message")
+        self.assertFalse(_turn_spoke_since(turn, start))
+        turn.add("spoken", "Orin Nano can run Whisper small.")
+        self.assertTrue(_turn_spoke_since(turn, start))
 
     def test_give_response_closes_turn(self) -> None:
         call = SimpleNamespace(name="give_response_to_user")

@@ -22,6 +22,7 @@ import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 # Before numpy/OpenBLAS (can SIGSEGV if over-threaded on macOS).
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -675,12 +676,14 @@ def listen_realtime(
     prompt: str | None = None,
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> tuple[str, bytes]:
     """
     Capture one utterance and return (transcript, wav_bytes).
 
     OpenAI: stream to Realtime transcription; end after idle with no new words.
     Sarvam: record until silence, then Saaras file STT.
+    ``on_partial`` (OpenAI path only) is called with the growing live transcript.
     """
     # Persistent wake owns the mic for barge-in — release it for STT.
     try:
@@ -716,6 +719,7 @@ def listen_realtime(
             prompt=prompt,
             mode=mode,
             max_wait_for_speech=max_wait_for_speech,
+            on_partial=on_partial,
         )
     finally:
         if set_stt_listening is not None:
@@ -782,12 +786,22 @@ def _listen_sarvam(
     return text, wav
 
 
+def _emit_partial(on_partial: Callable[[str], None] | None, live: str) -> None:
+    if on_partial is None:
+        return
+    try:
+        on_partial(live)
+    except Exception as e:
+        print(f"[stt] on_partial failed: {e}", flush=True)
+
+
 def _listen_realtime_body(
     client: OpenAI,
     *,
     prompt: str | None = None,
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> tuple[str, bytes]:
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     _prepare_mic()
@@ -1024,6 +1038,7 @@ def _listen_realtime_body(
                                         )
                                 live = shared["partial"]
                             _print_live(live)
+                            _emit_partial(on_partial, live)
                             try:
                                 from wake import transcript_has_end_phrase
 
@@ -1046,6 +1061,8 @@ def _listen_realtime_body(
                         with state_lock:
                             fallback = shared["partial"].strip()
                         final_text = _event_transcript(event) or fallback
+                        if final_text:
+                            _emit_partial(on_partial, final_text)
                         sys.stdout.write("\n")
                         stop.set()
                         committed.set()
@@ -1600,6 +1617,7 @@ def listen_once(
     max_attempts: int = 3,
     announce_retries: bool = True,
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> str:
     """Capture one utterance via the configured STT provider (OpenAI or Sarvam)."""
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
@@ -1643,6 +1661,7 @@ def listen_once(
                 prompt=prompt or default_prompt,
                 mode=mode,
                 max_wait_for_speech=max_wait_for_speech,
+                on_partial=on_partial,
             )
             try:
                 from wake import play_listen_end_chime

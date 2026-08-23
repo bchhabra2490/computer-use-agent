@@ -1,9 +1,9 @@
 """Parameterized desktop recipes: stable prefix, optional computer-use handoff.
 
 A recipe opens a URL or app (with ``{{placeholders}}``), then either finishes
-or hands leftover work to the vision agent. Matching recipes run before traces
-and before the screenshot loop. Slot values are filled with regex first; EVAL_MODEL
-only runs if bind fails. Screenshot-only leftover is saved here (no CU loop).
+or hands leftover work to the vision agent. Matching recipes run before the
+screenshot loop. Slot values are filled with regex first; EVAL_MODEL only runs
+if bind fails. Screenshot-only leftover is saved here (no CU loop).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from urllib.parse import quote, unquote, urlparse
 
 from task_log import TaskLog, _slugify
 from task_spec import is_procedure_brief
-from traces import (
+from utterance_match import (
     _HARD_TASK,
     _extract_urls,
     _norm,
@@ -225,7 +225,8 @@ def match_template(template: str, utterance: str) -> tuple[dict[str, str], str] 
             words = (value or "").split()
             if not words:
                 continue
-            parts.append(r"\s+".join(re.escape(w) for w in words))
+            # Word-bound literals so "play" does not match inside "plays".
+            parts.append(r"\b" + r"\s+".join(re.escape(w) for w in words) + r"\b")
             parts.append(r"\s*")
             continue
         names.append(value)
@@ -253,8 +254,19 @@ def match_template(template: str, utterance: str) -> tuple[dict[str, str], str] 
     return params, leftover
 
 
-def _safe_http_url(url: str) -> str:
+def _normalize_http_url(url: str) -> str:
+    """Prefix https:// for bare hosts (draw.io → https://draw.io)."""
     raw = (url or "").strip()
+    if not raw or "://" in raw:
+        return raw
+    # Host or host/path only — reject spaces / odd schemes slipped in without ://.
+    if re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]*)?", raw, flags=re.I):
+        return "https://" + raw
+    return raw
+
+
+def _safe_http_url(url: str) -> str:
+    raw = _normalize_http_url(url)
     parsed = urlparse(raw)
     if parsed.scheme not in {"http", "https"}:
         raise RecipeError(f"blocked URL scheme {parsed.scheme!r}")
@@ -381,9 +393,8 @@ def _valid_slot(name: str, value: str) -> bool:
     if not text:
         return False
     if name == "url":
-        probe = text if "://" in text else f"https://{text}"
         try:
-            _safe_http_url(probe)
+            _safe_http_url(text)
             return True
         except RecipeError:
             return False
@@ -405,6 +416,13 @@ def slot_grounded_in_utterance(utterance: str, value: str) -> bool:
     if not text or not slot:
         return False
     if slot in text:
+        return True
+    # Bare host ↔ https://host (recipe open-http-url).
+    if "://" in slot:
+        host = _norm(_normalize_http_url(value).split("://", 1)[-1])
+        if host and host in text:
+            return True
+    elif "." in slot and _norm(_normalize_http_url(value)) in text:
         return True
     words = [w for w in slot.split() if len(w) > 1]
     if not words:

@@ -25,6 +25,10 @@ class UtteranceTests(unittest.TestCase):
             "nothing else needed",
             "that's all",
             "stop the task",
+            "stop",
+            "Stop!",
+            "pause",
+            "cancel",
         ):
             self.assertTrue(st.is_mark_done_utterance(text), text)
 
@@ -34,6 +38,9 @@ class UtteranceTests(unittest.TestCase):
             "mark this unread",
             "I'm not done yet",
             "continue the task",
+            "stop listening",
+            "stop the music",
+            "don't stop",
         ):
             self.assertFalse(st.is_mark_done_utterance(text), text)
 

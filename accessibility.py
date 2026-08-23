@@ -135,6 +135,118 @@ def frontmost_app_name() -> str | None:
         return None
 
 
+_EDITABLE_ROLES = frozenset(
+    {
+        "AXTextField",
+        "AXTextArea",
+        "AXComboBox",
+        "AXSearchField",
+        "AXWebArea",  # many browsers / Electron focus web area while typing
+        "AXGroup",  # contenteditable often surfaces as a group
+    }
+)
+
+
+def focused_edit_info() -> dict[str, Any]:
+    """Describe the focused UI element for dictation guardrails.
+
+    Returns keys: role, title, secure, editable, app. When Accessibility is
+    unavailable, returns editable=True so dictation can still try paste.
+    """
+    out: dict[str, Any] = {
+        "role": "",
+        "title": "",
+        "secure": False,
+        "editable": True,
+        "app": frontmost_app_name() or "",
+    }
+    ok, _msg = accessibility_available()
+    if not ok:
+        return out
+    try:
+        from ApplicationServices import AXUIElementCreateApplication
+
+        app = _frontmost_app()
+        if app is None:
+            return out
+        pid = int(app.processIdentifier())
+        root = AXUIElementCreateApplication(pid)
+        focused = _ax_get(root, "AXFocusedUIElement")
+        if focused is None:
+            out["editable"] = False
+            return out
+        role = _ax_str(_ax_get(focused, "AXRole"))
+        subrole = _ax_str(_ax_get(focused, "AXSubrole"))
+        title = _ax_str(_ax_get(focused, "AXTitle")) or _ax_str(
+            _ax_get(focused, "AXDescription")
+        )
+        out["role"] = role or subrole
+        out["title"] = title
+        if role == "AXSecureTextField" or "secure" in (subrole or "").lower():
+            out["secure"] = True
+            out["editable"] = False
+            return out
+        # AXTextField / AXTextArea / combo / search — always treat as editable.
+        if role in _EDITABLE_ROLES or "Text" in role:
+            out["editable"] = True
+            return out
+        # Some apps expose AXValue + AXFocused without a classic text role.
+        if _ax_get(focused, "AXValue") is not None and role not in {
+            "AXButton",
+            "AXCheckBox",
+            "AXRadioButton",
+            "AXMenuItem",
+            "AXStaticText",
+        }:
+            out["editable"] = True
+            return out
+        out["editable"] = False
+        return out
+    except Exception:
+        return out
+
+
+def replace_focused_inserted_tail(old_tail: str, new_tail: str) -> bool:
+    """If the focused field's AXValue ends with ``old_tail``, swap that suffix.
+
+    Used by live dictation when the transcript revises (not just grows).
+    Returns True when the value was updated via Accessibility.
+    """
+    old_tail = old_tail or ""
+    new_tail = new_tail or ""
+    if old_tail == new_tail:
+        return True
+    ok, _msg = accessibility_available()
+    if not ok:
+        return False
+    try:
+        from ApplicationServices import (
+            AXUIElementSetAttributeValue,
+            kAXErrorSuccess,
+        )
+
+        app = _frontmost_app()
+        if app is None:
+            return False
+        from ApplicationServices import AXUIElementCreateApplication
+
+        root = AXUIElementCreateApplication(int(app.processIdentifier()))
+        focused = _ax_get(root, "AXFocusedUIElement")
+        if focused is None:
+            return False
+        cur = _ax_str(_ax_get(focused, "AXValue"))
+        if old_tail:
+            if not cur.endswith(old_tail):
+                return False
+            prefix = cur[: -len(old_tail)]
+        else:
+            prefix = cur
+        err = AXUIElementSetAttributeValue(focused, "AXValue", prefix + new_tail)
+        return err == kAXErrorSuccess
+    except Exception:
+        return False
+
+
 def _frontmost_app():
     from AppKit import NSWorkspace
 

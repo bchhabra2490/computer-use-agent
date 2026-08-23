@@ -106,9 +106,12 @@ from session_compact import (
 )
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
+from dictation import ensure_dictation_running, stop_dictation
 from stt import POST_TTS_COOLDOWN, NoSpeechError, ask_user, listen_once
 from task_spec import resolve_agent_task
+from task_feedback import collect_post_task_feedback, format_feedback_for_model
 from tools_registry import orchestrator_tools, run_tool
+from barge_router import classify_barge_utterance
 from wake import (
     format_wake_phrases,
 )
@@ -149,6 +152,9 @@ class AgentJob:
         self.result: str | None = None
         self.error: BaseException | None = None
         self.thread: threading.Thread | None = None
+        self.redirected_from_barge = False
+        self.log_dir: str | None = None
+        self.feedback_payload: dict[str, Any] | None = None
 
     @property
     def alive(self) -> bool:
@@ -192,8 +198,7 @@ def _log_speaker_round(session_speaker: Any) -> Any:
             return None
         if session_speaker is not None and session_speaker.name != match.name:
             print(
-                f"[orchestrator] speaker changed: "
-                f"{session_speaker.display_name} → {match.display_name}",
+                f"[orchestrator] speaker changed: " f"{session_speaker.display_name} → {match.display_name}",
                 flush=True,
             )
         print(
@@ -357,6 +362,13 @@ def _turn_already_spoke(turn: TurnTrace | None) -> bool:
     if turn is None:
         return False
     return any(kind == "spoken" for kind, _ in turn.steps)
+
+
+def _turn_spoke_since(turn: TurnTrace | None, start_index: int) -> bool:
+    """True if give_response_to_user spoke after `start_index` (this response only)."""
+    if turn is None:
+        return False
+    return any(kind == "spoken" for kind, _ in turn.steps[start_index:])
 
 
 def _give_response_closes_turn(call, out: dict | None) -> bool:
@@ -554,6 +566,10 @@ def _start_agent_thread(
 
     def _target() -> None:
         inbox = AgentMessageInbox()
+
+        def _on_log_dir(path: str) -> None:
+            job.log_dir = path
+
         try:
             job.result = computer_agent.run(
                 job.task,
@@ -565,6 +581,7 @@ def _start_agent_thread(
                 status_agent_id=job.call_id,
                 user_said=job.match_text,
                 speaker_context=job.speaker_context,
+                on_log_dir=_on_log_dir,
             )
         except BaseException as e:  # noqa: BLE001 — capture for main thread
             job.error = e
@@ -579,6 +596,125 @@ def _start_agent_thread(
         daemon=True,
     )
     job.thread.start()
+
+
+def _task_context_snippet(task_history: list[dict[str, str]]) -> str:
+    if not task_history:
+        return "(none)"
+    lines: list[str] = []
+    for item in task_history[-3:]:
+        task = str(item.get("task") or "").strip()
+        if task:
+            lines.append(f"- {task[:160]}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _launch_agent_job(
+    client: OpenAI,
+    *,
+    goal: str,
+    user_said: str,
+    call_id: str,
+    auto: bool,
+    max_steps: int,
+    ask_bridge: AskUserBridge,
+    redirected_from_barge: bool = False,
+) -> AgentJob:
+    spec = resolve_agent_task(user_said=user_said, planner_task=goal)
+    if spec.goal != goal:
+        print(
+            f"[orchestrator] dropped procedure brief; goal={spec.goal!r}",
+            flush=True,
+        )
+    print(f"\n[orchestrator] start_task: {spec.goal}")
+    speaker_context = ""
+    try:
+        from speaker_id import agent_speaker_context, get_last_speaker
+
+        speaker_context = agent_speaker_context(get_last_speaker())
+        if speaker_context.strip():
+            line = speaker_context.strip().split("\n", 1)[0]
+            print(f"[orchestrator] agent speaker context: {line}", flush=True)
+    except Exception:
+        pass
+    get_session().enter_and_log(
+        "agent",
+        f"Starting task: {spec.goal[:120]}",
+        task=spec.goal,
+    )
+    job = AgentJob(
+        task=spec.goal,
+        call_id=call_id,
+        match_text=spec.match_text,
+        speaker_context=speaker_context,
+    )
+    job.redirected_from_barge = redirected_from_barge
+    _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
+    _speak_later(client, "Starting that now.")
+    emit("agent_start", lane="agent", run_id=job.call_id, task=job.task[:120])
+    return job
+
+
+def _resolve_barge_utterance(
+    client: OpenAI,
+    barge: str,
+    *,
+    spoken_context: str,
+    user_said: str,
+    task_history: list[dict[str, str]],
+    publisher: AgentMessagePublisher,
+    auto: bool,
+    max_steps: int,
+    ask_bridge: AskUserBridge,
+    tool_call_id: str,
+) -> tuple[str | None, AgentJob | None]:
+    """
+    Classify barge-in; start a new agent task when the user redirected.
+
+    Returns (tool_output, deferred_job). When ``deferred_job`` is set, tool_output
+    is None (same contract as start_task).
+    """
+    decision = classify_barge_utterance(
+        client,
+        barge,
+        spoken_context=spoken_context,
+        user_turn=user_said,
+        task_context=_task_context_snippet(task_history),
+    )
+    if decision.is_new_task:
+        if active_agents():
+            _forward_to_agent(publisher, decision.task_goal)
+            return (
+                (
+                    f"Speech interrupted. User redirected while you were speaking: "
+                    f"{decision.task_goal}. Forwarded to the running agent as steer."
+                ),
+                None,
+            )
+        job = _launch_agent_job(
+            client,
+            goal=decision.task_goal,
+            user_said=barge,
+            call_id=tool_call_id,
+            auto=auto,
+            max_steps=max_steps,
+            ask_bridge=ask_bridge,
+            redirected_from_barge=True,
+        )
+        return None, job
+    if decision.kind == "steer" and active_agents():
+        _forward_to_agent(publisher, barge)
+        return (
+            f"Speech interrupted. User steer (forwarded to running agent): {barge}",
+            None,
+        )
+    return (
+        (
+            f"Speech interrupted. User then said: {barge}. "
+            "Act on that instruction next (do not assume the spoken reply finished)."
+        ),
+        None,
+    )
 
 
 def _listen_after_barge(
@@ -997,9 +1133,25 @@ def _supervise_agent(
 
     if job.thread is not None:
         job.thread.join(timeout=5.0)
+
+    result = job.result or "failed\nError: no result from agent"
+    try:
+        job.feedback_payload = collect_post_task_feedback(
+            client,
+            goal=job.task,
+            user_said=job.match_text,
+            result=result,
+            log_dir=job.log_dir,
+            run_id=job.call_id,
+            speak_fn=_speak,
+            should_skip=quit_requested,
+        )
+    except Exception as e:
+        print(f"[orchestrator] post-task feedback failed: {e}", flush=True)
+
     get_session().enter_and_log("ready", "Computer agent finished")
     emit("agent_end", lane="agent", run_id=job.call_id, task=job.task[:120])
-    return job.result or "failed\nError: no result from agent"
+    return result
 
 
 def _forward_to_agent(publisher: AgentMessagePublisher, text: str) -> None:
@@ -1059,6 +1211,7 @@ def _handle_tool(
             llm_tts is not None and getattr(call, "call_id", None) and llm_tts.took_call(call.call_id)
         )
         handled_barge = False
+        deferred_from_barge: AgentJob | None = None
         if message and already_streamed:
             # Playback continues on the TTS worker — do not block the agent.
             log_llm(message, source="tts")
@@ -1068,46 +1221,61 @@ def _handle_tool(
                 flush=True,
             )
             get_session().enter("speaking", message[:100])
-            if _looks_like_question(message) and not end_session:
-                interrupted = bool(llm_tts.wait_call(call.call_id))
-                llm_tts.acknowledge_call(call.call_id)
-                if interrupted:
-                    handled_barge = True
-                    end_session = False
-                    get_session().enter("listening", "barge-in")
-                    barge = _listen_after_barge(client)
-                    if barge:
-                        output = (
-                            f"Speech interrupted. User then said: {barge}. "
-                            "Act on that instruction next (do not assume the spoken reply finished)."
-                        )
-                    else:
-                        output = (
-                            "Speech interrupted but no follow-up command was heard. "
-                            "Ask briefly what they need, or wait for the next wake."
-                        )
-                else:
-                    output = f"Spoke to user. end_session={end_session}"
-            else:
-                llm_tts.acknowledge_call(call.call_id)
-                output = f"Spoke to user. end_session={end_session}"
-        elif message:
-            if _looks_like_question(message) and not end_session:
-                barge = _speak(client, message)
+            interrupted = bool(llm_tts.wait_call(call.call_id))
+            llm_tts.acknowledge_call(call.call_id)
+            if interrupted:
+                handled_barge = True
+                end_session = False
+                get_session().enter("listening", "barge-in")
+                barge = _listen_after_barge(client)
                 if barge:
-                    handled_barge = True
-                    end_session = False
-                    output = (
-                        f"Speech interrupted. User then said: {barge}. "
-                        "Act on that instruction next (do not assume the spoken reply finished)."
+                    output, deferred_from_barge = _resolve_barge_utterance(
+                        client,
+                        barge,
+                        spoken_context=message,
+                        user_said=user_said,
+                        task_history=task_history,
+                        publisher=publisher,
+                        auto=auto,
+                        max_steps=max_steps,
+                        ask_bridge=ask_bridge,
+                        tool_call_id=call.call_id,
                     )
                 else:
-                    output = f"Spoke to user. end_session={end_session}"
+                    output = (
+                        "Speech interrupted but no follow-up command was heard. "
+                        "Ask briefly what they need, or wait for the next wake."
+                    )
             else:
-                _speak_later(client, message)
+                output = f"Spoke to user. end_session={end_session}"
+        elif message:
+            barge = _speak(client, message)
+            if barge:
+                handled_barge = True
+                end_session = False
+                output, deferred_from_barge = _resolve_barge_utterance(
+                    client,
+                    barge,
+                    spoken_context=message,
+                    user_said=user_said,
+                    task_history=task_history,
+                    publisher=publisher,
+                    auto=auto,
+                    max_steps=max_steps,
+                    ask_bridge=ask_bridge,
+                    tool_call_id=call.call_id,
+                )
+            else:
                 output = f"Spoke to user. end_session={end_session}"
         else:
             output = f"Spoke to user. end_session={end_session}"
+
+        if deferred_from_barge is not None:
+            print(
+                f"[orchestrator] give_response_to_user → barge redirected to task",
+                flush=True,
+            )
+            return None, False, deferred_from_barge, None
 
         # give_response does not open the mic. If the model asked a question
         # here anyway, listen without a wake word so the user can answer.
@@ -1140,41 +1308,15 @@ def _handle_tool(
         if not task:
             output = "Error: empty task"
         else:
-            spec = resolve_agent_task(
+            job = _launch_agent_job(
+                client,
+                goal=task,
                 user_said=user_said or ((turn.user_input if turn else "") or ""),
-                planner_task=task,
-            )
-            if spec.goal != task:
-                print(
-                    f"[orchestrator] dropped procedure brief; goal={spec.goal!r}",
-                    flush=True,
-                )
-            print(f"\n[orchestrator] start_task: {spec.goal}")
-            speaker_context = ""
-            try:
-                from speaker_id import agent_speaker_context, get_last_speaker
-
-                speaker_context = agent_speaker_context(get_last_speaker())
-                if speaker_context.strip():
-                    line = speaker_context.strip().split("\n", 1)[0]
-                    print(f"[orchestrator] agent speaker context: {line}", flush=True)
-            except Exception:
-                pass
-            get_session().enter_and_log(
-                "agent",
-                f"Starting task: {spec.goal[:120]}",
-                task=spec.goal,
-            )
-            job = AgentJob(
-                task=spec.goal,
                 call_id=call.call_id,
-                match_text=spec.match_text,
-                speaker_context=speaker_context,
+                auto=auto,
+                max_steps=max_steps,
+                ask_bridge=ask_bridge,
             )
-            _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
-            _speak_later(client, "Starting that now.")
-            emit("agent_start", lane="agent", run_id=job.call_id, task=job.task[:120])
-            # Defer function_call_output until the agent thread finishes.
             return None, False, job, None
 
     elif call.name in {
@@ -1250,13 +1392,17 @@ def _process_response(
     """
     end_session = False
     while True:
+        # Only speech from *this* model response should suppress leftover TTS.
+        # Earlier give_response_to_user in the same turn (e.g. a mid-turn question)
+        # must not silence a later plain-message answer (stream often has chars=0).
+        steps_at_response_start = len(turn.steps) if turn is not None else 0
         _print_messages(response)
         _record_llm_step(turn, response)
         function_calls = [i for i in response.output if i.type == "function_call"]
         if not function_calls:
             leftover = _assistant_message_text(response)
-            already_spoke = _turn_already_spoke(turn)
-            if leftover and _looks_like_question(leftover) and not already_spoke:
+            spoke_this_response = _turn_spoke_since(turn, steps_at_response_start)
+            if leftover and _looks_like_question(leftover) and not spoke_this_response:
                 print(
                     "[orchestrator] model asked in a message instead of ask_user — "
                     "speaking and listening without wake word",
@@ -1281,16 +1427,16 @@ def _process_response(
                     ),
                 )
                 continue
-            if leftover and not already_spoke:
+            if leftover and not spoke_this_response:
                 print(
                     "[orchestrator] model replied with a message instead of "
                     "give_response_to_user — speaking it in the background",
                     flush=True,
                 )
                 _speak_later(client, leftover)
-            elif leftover and already_spoke:
+            elif leftover and spoke_this_response:
                 print(
-                    "[orchestrator] skipping leftover message " "(already spoke this turn)",
+                    "[orchestrator] skipping leftover message " "(already spoke this response)",
                     flush=True,
                 )
             return response, end_session, []
@@ -1349,13 +1495,25 @@ def _process_response(
                 turn.add("start_task_result", result or "", max_len=4000)
             task_summary = compact_state.task_summary if compact_state is not None else ""
             history_blob = _format_task_history(task_history, task_summary=task_summary)
+            redirect_note = ""
+            if getattr(deferred_job, "redirected_from_barge", False):
+                redirect_note = (
+                    "The user interrupted your spoken reply to redirect to this task. "
+                    "Do not restart earlier completed tasks.\n\n"
+                )
+            feedback_line = ""
+            fb = getattr(deferred_job, "feedback_payload", None)
+            if isinstance(fb, dict):
+                feedback_line = format_feedback_for_model(fb) + "\n\n"
             outputs.append(
                 {
                     "type": "function_call_output",
                     "call_id": deferred_job.call_id,
                     "output": (
+                        f"{redirect_note}"
                         f"Computer agent finished this task.\n"
                         f"Latest result:\n{result}\n\n"
+                        f"{feedback_line}"
                         f"Session task history (use this to decide next action):\n"
                         f"{history_blob}\n\n"
                         "Decide next:\n"
@@ -1405,6 +1563,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     register_orchestrator()
     ensure_tray_running()
     ensure_phone_gateway()
+    ensure_dictation_running()
     sess = Session()
     bind_session(sess)
 
@@ -1707,6 +1866,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         unregister_orchestrator()
         stop_phone_gateway()
         stop_tray()
+        stop_dictation()
         sess.enter("idle", "Orchestrator stopped")
         bind_audio(None)
         bind_session(None)
@@ -1728,6 +1888,7 @@ def main(argv: list[str] | None = None) -> None:
         print("\n[orchestrator] stopped.")
         stop_phone_gateway()
         stop_tray()
+        stop_dictation()
         sys.exit(0)
 
 

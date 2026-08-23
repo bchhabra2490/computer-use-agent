@@ -1,6 +1,6 @@
 """Planner vs actor: start_task is a goal, not a UI screenplay.
 
-The orchestrator chooses *whether* to drive the desktop. Recipes, traces, and
+The orchestrator chooses *whether* to drive the desktop. Recipes and
 the computer-use agent decide *how*. If the planner writes Chrome/Spotlight
 steps, drop them and keep the user's words.
 """
@@ -46,7 +46,7 @@ class AgentTaskSpec:
 
 def resolve_agent_task(*, user_said: str, planner_task: str) -> AgentTaskSpec:
     """
-    Recipes/traces match ``match_text`` (the spoken request).
+    Recipes match ``match_text`` (the spoken request).
 
     The computer-use prompt uses ``goal``: the planner's task only when it is a
     short restatement (anaphora, leftover step). Procedure briefs are discarded.

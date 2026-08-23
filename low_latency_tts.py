@@ -225,12 +225,22 @@ class LowLatencyTTS:
         )
         if detail:
             line += f" detail={detail}"
-        print(f"[tts-latency] {line}", flush=True)
+        try:
+            from tts import tts_latency_print
+
+            tts_latency_print(f"[tts-latency] {line}")
+        except Exception:
+            pass
         try:
             with self.log_path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except OSError as exc:
-            print(f"[tts-latency] log write failed: {exc}", flush=True)
+            try:
+                from tts import tts_print
+
+                tts_print(f"[tts-latency] log write failed: {exc}", force=True)
+            except Exception:
+                print(f"[tts-latency] log write failed: {exc}", flush=True)
 
     def _warm(self) -> None:
         started = time.monotonic()
@@ -476,7 +486,12 @@ class LowLatencyTTS:
                             response_id=response_id,
                             detail=detail,
                         )
-                    print(f"[tts] {text}", flush=True)
+                    try:
+                        from tts import tts_print
+
+                        tts_print(f"[tts] {text}")
+                    except Exception:
+                        pass
                     try:
                         from app_status import reply_sink
 
@@ -497,7 +512,12 @@ class LowLatencyTTS:
                             or (interrupt_event is not None and interrupt_event.is_set())
                         )
                         if interrupted:
-                            print("[tts] streaming interrupted", flush=True)
+                            try:
+                                from tts import tts_print
+
+                                tts_print("[tts] streaming interrupted")
+                            except Exception:
+                                pass
                             self._interrupt_session(response_id)
                     finally:
                         release()

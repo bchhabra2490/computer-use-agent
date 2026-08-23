@@ -35,6 +35,7 @@ import re
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 
 from openai import OpenAI
 
@@ -74,7 +75,6 @@ from task_log import TaskLog
 from terminal import run_command
 from tools_registry import SHARED_TOOL_NAMES, agent_tools, run_tool
 from recipes import RecipeHit, handoff_prompt, maybe_save_recipe, try_recipe
-from traces import maybe_save_trace, try_replay
 from tts import speak, speak_later
 
 # Manual override only — leave unset to let the difficulty router choose.
@@ -93,14 +93,11 @@ def _handoff_skill_blurb(recipe_name: str) -> str:
     hint = _RECIPE_SKILL.get(recipe_name or "")
     if not hint:
         return (
-            "Recipe leftover only. Do not load the skill catalog. "
-            "Finish the remaining visual work, then mark_done."
+            "Recipe leftover only. Do not load the skill catalog. " "Finish the remaining visual work, then mark_done."
         )
     skill = get_skill(hint)
     if skill is None:
-        return (
-            f"If needed, call read_skill for {hint}. Skip steps already done on screen."
-        )
+        return f"If needed, call read_skill for {hint}. Skip steps already done on screen."
     return (
         f"Relevant skill: {skill.name} — {skill.description}\n"
         f"Call read_skill only if you need the remaining checklist. "
@@ -201,6 +198,8 @@ def _handle_ask_user(client: OpenAI, call, log: TaskLog, ask_user_bridge=None) -
         f"Q: {question[:120]}",
         {"question": question, "answer": answer},
     )
+    if answer and is_mark_done_utterance(answer):
+        raise TaskMarkedDone("User said stop.")
     return {
         "type": "function_call_output",
         "call_id": call.call_id,
@@ -678,6 +677,7 @@ def run(
     status_agent_id: str | None = None,
     user_said: str | None = None,
     speaker_context: str = "",
+    on_log_dir: Callable[[str], None] | None = None,
 ) -> str:
     """Run the computer-use loop. Returns a status string for the orchestrator.
 
@@ -685,7 +685,7 @@ def run(
     directives are drained at the start of each turn and injected into context.
     If `ask_user_bridge` is provided, ask_user is routed through the orchestrator
     (main-thread TTS/STT) instead of capturing the mic from this worker thread.
-    `user_said` is the spoken request used to match recipes/traces. `task` is
+    `user_said` is the spoken request used to match recipes. `task` is
     the goal (user words or a short leftover step), never a UI screenplay.
     `speaker_context` is optional voice-ID text from the orchestrator (may be empty).
     """
@@ -705,6 +705,11 @@ def run(
 
     desktop = DesktopController()
     log = TaskLog(task)
+    if on_log_dir is not None:
+        try:
+            on_log_dir(str(log.dir))
+        except Exception:
+            pass
     agent_id = (status_agent_id or "").strip() or f"agent-{uuid.uuid4().hex[:8]}"
     upsert_agent(
         agent_id,
@@ -769,8 +774,7 @@ def run(
                 for msg in batch.next_run:
                     q.enqueue(msg.text)
                 print(
-                    f"[agent] deferred {len(batch.next_run)} next_run message(s) "
-                    "to orchestrator",
+                    f"[agent] deferred {len(batch.next_run)} next_run message(s) " "to orchestrator",
                     flush=True,
                 )
             except Exception as e:
@@ -786,8 +790,7 @@ def run(
             for msg in batch.follow_up:
                 _held_follow_ups.append(msg.text)
             print(
-                f"[agent] holding {len(batch.follow_up)} follow_up message(s) "
-                "until turn end",
+                f"[agent] holding {len(batch.follow_up)} follow_up message(s) " "until turn end",
                 flush=True,
             )
 
@@ -858,14 +861,6 @@ def run(
                 )
             except Exception as e:
                 print(f"[recipe] handoff screenshot failed ({e})", flush=True)
-        else:
-            replayed = try_replay(recipe_match, desktop=desktop)
-            if replayed:
-                log.record("trace_replay", replayed.split("\n", 1)[0], {"result": replayed})
-                log.finish("completed", "Replayed saved action trace.")
-                if voice:
-                    speak_later(client, "Done.")
-                return replayed
 
         if recipe_handoff:
             model = model_for_recipe_handoff(log)
@@ -879,10 +874,20 @@ def run(
         if speaker_block:
             speaker_block = speaker_block + "\n\n"
 
+        try:
+            from speaker_output import speaker_output_block
+
+            audio_block = speaker_output_block(force_media=True)
+        except Exception:
+            audio_block = ""
+        if audio_block:
+            audio_block = audio_block + "\n\n"
+
         if recipe_handoff:
             skill_block = _handoff_skill_blurb(recipe_result.recipe.name)
             prompt_body = (
                 f"{speaker_block}"
+                f"{audio_block}"
                 f"{model_task}\n\n"
                 f"Desktop occupancy:\n{display_ctx}\n\n"
                 f"{skill_block}\n\n"
@@ -894,6 +899,7 @@ def run(
         else:
             prompt_body = (
                 f"{speaker_block}"
+                f"{audio_block}"
                 f"{model_task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"
@@ -956,10 +962,16 @@ def run(
                 "(screenshot + description) — do not use the computer tool for that.\n"
                 "10. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
+                "10b. A line like “Media playing: yes|no” reports Music/Spotify "
+                "playback (not Jarvis TTS; not browser YouTube). Use it to verify "
+                "music started or stopped — screenshots alone cannot show sound.\n"
                 "11. You may periodically receive evaluator coaching — treat it as "
                 "advisory guidance and adapt.\n"
                 "12. When the request is complete and no other action is required, "
-                "call mark_done (do not keep using the computer tool)."
+                "call mark_done (do not keep using the computer tool).\n"
+                "13. Do not tell the user to say “stop” without the wake word while "
+                "you are clicking. Mid-task cancel is wake word then “stop”. During "
+                "ask_user, bare “stop” already cancels."
             )
         if handoff_shot_b64:
             api_input: str | list = [
@@ -1016,7 +1028,6 @@ def run(
                 log.finish("completed")
                 maybe_create_skill(client, log, voice=voice)
                 maybe_save_recipe(client, log, task)
-                maybe_save_trace(log, task)
                 _extract_memories_from_log(client, log, task)
                 summary = "\n".join(last_messages).strip()
                 if summary:
@@ -1025,16 +1036,27 @@ def run(
 
             tool_outputs: list[dict] = []
             last_shot_b64: str | None = None
-            read_screen_extras: list[dict] = []
 
             for call in function_calls:
                 if call.name == "read_screen":
                     out, png = _handle_read_screen(call, log)
-                    tool_outputs.append(out)
+                    # Computer tool + previous_response_id rejects extra input_image
+                    # ("Computer tool only allows input image without previous
+                    # response"). AX/display text is already in the tool output;
+                    # tell the model to use the computer tool for pixels.
                     if png:
-                        from context import read_screen_vision_input
-
-                        read_screen_extras.append(read_screen_vision_input(png))
+                        out = {
+                            **out,
+                            "output": (
+                                f"{out['output']}\n\n"
+                                "(Screenshot was captured but not attached: the "
+                                "computer tool forbids input_image when continuing "
+                                "with previous_response_id. Use the computer tool "
+                                "for a fresh screenshot if you need pixels; the "
+                                "accessibility and display text above is current.)"
+                            ),
+                        }
+                    tool_outputs.append(out)
                 else:
                     tool_outputs.append(
                         _handle_function_call(
@@ -1062,7 +1084,14 @@ def run(
 
             # Drain Jarvis / ZeroMQ messages; inject into next model turn.
             next_input: list = list(tool_outputs)
-            next_input.extend(read_screen_extras)
+            try:
+                from speaker_output import speaker_output_block
+
+                audio_now = speaker_output_block()
+                if audio_now and computer_calls:
+                    next_input.append(_user_input_item(audio_now))
+            except Exception:
+                pass
             mid_turn = _pending_user_context()
             if mid_turn:
                 next_input.append(_user_input_item(mid_turn))
@@ -1104,7 +1133,6 @@ def run(
         log.finish("completed", e.summary)
         maybe_create_skill(client, log, voice=voice)
         maybe_save_recipe(client, log, task)
-        maybe_save_trace(log, task)
         _extract_memories_from_log(client, log, task)
         return f"completed\nResult:\n{e.summary}"
     except KeyboardInterrupt:

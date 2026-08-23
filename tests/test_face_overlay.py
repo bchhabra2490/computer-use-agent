@@ -54,6 +54,16 @@ class FaceMoodTests(unittest.TestCase):
             "sleep",
         )
 
+    def test_stt_active_is_listen(self) -> None:
+        self.assertEqual(
+            face_mood_for_state("waiting", {"stt_active": True}),
+            "listen",
+        )
+        self.assertEqual(
+            face_mood_for_state("waiting", {"stt_active": True, "tts_playing": True}),
+            "speak",
+        )
+
 
 class FacePlacementTests(unittest.TestCase):
     def test_top_center(self) -> None:

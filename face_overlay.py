@@ -58,10 +58,13 @@ def face_mood_for_state(
 
     Prefer live TTS playback over session phase — async speak_later / streaming
     TTS often leaves the session on waiting while audio is still playing.
+    Mic capture (``stt_active``, including Fn dictation) maps to listen.
     """
     snap = data if data is not None else None
     if snap is not None and snap.get("tts_playing"):
         return "speak"
+    if snap is not None and snap.get("stt_active"):
+        return "listen"
     key = (state or "idle").strip().lower()
     if key in _SPEAK_STATES or key.startswith("speaking"):
         return "speak"

@@ -40,9 +40,9 @@ def _release_audio_for_capture() -> None:
 
 def _speak_prompt(client: OpenAI, text: str) -> None:
     """TTS for enrollment — no wake/keyboard barge (avoids mic conflicts)."""
-    from tts import play_wav, synthesize
+    from tts import play_wav, synthesize, tts_print
 
-    print(f"[tts] {text}", flush=True)
+    tts_print(f"[tts] {text}")
     try:
         play_wav(synthesize(client, text))
     except Exception as e:

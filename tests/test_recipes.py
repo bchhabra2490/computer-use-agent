@@ -46,6 +46,19 @@ class MatchTemplateTests(unittest.TestCase):
         self.assertEqual(params["query"], "lag ja gale")
         self.assertEqual(leftover, "")
 
+    def test_plays_a_sound_is_not_youtube_music(self) -> None:
+        """Regression: 'it plays a sound' must not bind play {{query}} → 's a sound'."""
+        utt = (
+            "I installed Kivi by Servam, but after installation, they added some sort of "
+            "sound which happens on every keyboard typing, like when I type clear in the "
+            "terminal, it plays a sound. Can you find that sound and remove it? I already "
+            "removed the Kivi app"
+        )
+        self.assertIsNone(rc.match_template("play {{query}}", utt))
+        self.assertIsNone(rc.extract_media_query(utt))
+        self.assertIsNone(rc.pick_matching_recipe(utt))
+        self.assertFalse(rc._phrase_in(utt, "play"))
+
     def test_youtube_brief_uses_song_not_playable_clause(self) -> None:
         prompt = (
             "(VEVO / official channel) or the highest-quality audio result and start "
@@ -81,6 +94,33 @@ class UrlSafetyTests(unittest.TestCase):
     def test_blocks_file(self) -> None:
         with self.assertRaises(rc.RecipeError):
             rc._safe_http_url("file:///etc/passwd")
+
+    def test_prefixes_bare_host(self) -> None:
+        self.assertEqual(rc._safe_http_url("draw.io"), "https://draw.io")
+        self.assertEqual(rc._safe_http_url("app.diagrams.net"), "https://app.diagrams.net")
+        self.assertEqual(
+            rc._safe_http_url("https://example.com/path"),
+            "https://example.com/path",
+        )
+
+    def test_open_http_url_accepts_bare_draw_io(self) -> None:
+        opened: list[str] = []
+
+        def capture(url: str, *, app: str | None = None) -> None:
+            opened.append(rc._safe_http_url(url))
+
+        with (
+            patch.object(rc, "open_url", side_effect=capture),
+            patch.object(rc, "verify_recipe", return_value=True),
+        ):
+            result = rc.try_recipe(
+                "Create a component diagram and open it in draw.io",
+                recipes_dir=_seed_dir(self),
+                settle=0,
+            )
+        self.assertEqual(opened, ["https://draw.io"])
+        # Leftover diagram work → hand off, do not claim completed.
+        self.assertIsInstance(result, rc.RecipeHit)
 
     def test_apply_params_encodes_query(self) -> None:
         url = rc.apply_params(

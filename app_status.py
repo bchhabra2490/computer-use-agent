@@ -623,7 +623,9 @@ _MARK_DONE_RE = re.compile(
     r"|mark done"
     r"|that(?:'s| is) done"
     r"|task is done"
-    r"|stop (?:the )?(?:task|agent)"
+    r"|stop (?:the )?(?:task|agent|job|run)"
+    r"|pause (?:the )?(?:task|agent|job|run)"
+    r"|cancel (?:the )?(?:task|agent|job|run)"
     r"|no (?:other|further) actions?(?: (?:is|are))? required"
     r"|no further action"
     r"|nothing else (?:to do|needed|required)"
@@ -632,15 +634,34 @@ _MARK_DONE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare stop/pause — what users say when the agent says "say stop anytime".
+# Keep these exact so "stop listening" / "stop the music" stay out.
+_MARK_DONE_EXACT = frozenset(
+    {
+        "stop",
+        "pause",
+        "cancel",
+        "abort",
+        "halt",
+        "done",
+        "finished",
+        "complete",
+        "that's it",
+        "thats it",
+    }
+)
+
 
 def is_mark_done_utterance(text: str) -> bool:
     """True when the user wants the running computer task marked complete."""
-    low = (text or "").strip().lower()
+    low = (text or "").strip().lower().rstrip(".!?")
     if not low:
         return False
+    if low in _MARK_DONE_EXACT:
+        return True
     if _MARK_DONE_RE.search(low):
         return True
-    return low in {"done", "finished", "complete", "that's it", "thats it"}
+    return False
 
 
 def request_mark_done(agent_id: str | None = None) -> None:

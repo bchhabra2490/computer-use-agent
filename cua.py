@@ -29,6 +29,12 @@ Speaker enrollment (who is talking)::
     cua speaker list
     cua speaker test
     cua speaker test --speak-prompts
+
+Fn-key dictation (paste speech into the focused field)::
+
+    cua dictation start
+    cua dictation stop
+    cua dictation status
 """
 
 from __future__ import annotations
@@ -439,6 +445,16 @@ def main(argv: list[str] | None = None) -> int:
     obs_sub.add_parser("stop", help="Stop the observer daemon")
     obs_sub.add_parser("status", help="Show observer pid and pending draft count")
     obs_sub.add_parser("list", help="List proposed drafts")
+
+    dict_p = sub.add_parser(
+        "dictation",
+        help="Fn-key dictation — Realtime STT into the focused text field",
+    )
+    dict_sub = dict_p.add_subparsers(dest="dictation_command", required=True)
+    dict_sub.add_parser("start", help="Start the dictation hotkey daemon")
+    dict_sub.add_parser("stop", help="Stop the dictation daemon")
+    dict_sub.add_parser("status", help="Show dictation pid / mode")
+
     accept_p = obs_sub.add_parser(
         "accept",
         help="Write a proposed draft into memory/ and skills/",
@@ -621,6 +637,16 @@ def main(argv: list[str] | None = None) -> int:
                 memories=args.memories,
                 skills=args.skills,
             )
+        return 2
+    if args.command == "dictation":
+        import dictation as dictation_mod
+
+        if args.dictation_command == "start":
+            return dictation_mod.cmd_start()
+        if args.dictation_command == "stop":
+            return dictation_mod.cmd_stop()
+        if args.dictation_command == "status":
+            return dictation_mod.cmd_status()
         return 2
     if args.command == "speaker":
         from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test

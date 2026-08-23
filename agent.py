@@ -863,10 +863,17 @@ def run(
                 print(f"[recipe] handoff screenshot failed ({e})", flush=True)
 
         if recipe_handoff:
-            model = model_for_recipe_handoff(log)
+            route = model_for_recipe_handoff(log)
         else:
-            model = resolve_agent_model(client, task, log)
-        print(f"[agent] model={model} eval_every={EVAL_EVERY}")
+            route = resolve_agent_model(
+                client, task, log, fallback_max_steps=max_steps
+            )
+        model = route.model
+        max_steps = route.max_steps
+        print(
+            f"[agent] model={model} difficulty={route.difficulty} "
+            f"max_steps={max_steps} eval_every={EVAL_EVERY}"
+        )
         if message_inbox is not None:
             print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
 

@@ -1,7 +1,8 @@
 """
 Cost-aware routing and periodic coaching for the computer-use agent.
 
-- Router: cheap text model picks easy/medium/hard → Luna / Terra / Sol.
+- Router: cheap text model picks easy/medium/hard → Luna / Terra / Sol
+  and a matching max-steps budget (25 / 100 / 200).
 - Evaluator: every N computer turns, cheap vision model coaches the agent
   (and may nudge wrap-up when likely done / stuck).
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
@@ -38,6 +40,26 @@ DIFFICULTY_MODELS = {
     "medium": MODEL_MEDIUM,
     "hard": MODEL_HARD,
 }
+
+DIFFICULTY_MAX_STEPS = {
+    "easy": int(os.environ.get("AGENT_STEPS_EASY", "25")),
+    "medium": int(os.environ.get("AGENT_STEPS_MEDIUM", "100")),
+    "hard": int(os.environ.get("AGENT_STEPS_HARD", "200")),
+}
+
+
+@dataclass(frozen=True)
+class AgentRoute:
+    model: str
+    difficulty: str
+    max_steps: int
+
+
+def max_steps_for_difficulty(difficulty: str) -> int:
+    key = (difficulty or "medium").strip().lower()
+    if key not in DIFFICULTY_MAX_STEPS:
+        key = "medium"
+    return DIFFICULTY_MAX_STEPS[key]
 
 
 def _response_text(response) -> str:
@@ -67,44 +89,80 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
         return None
+    return data if isinstance(data, dict) else None
 
 
-def model_for_recipe_handoff(log: TaskLog | None = None) -> str:
-    """Leftover zoom/click after a recipe — always the cheap CU model."""
+def _route(model: str, difficulty: str) -> AgentRoute:
+    return AgentRoute(
+        model=model,
+        difficulty=difficulty,
+        max_steps=max_steps_for_difficulty(difficulty),
+    )
+
+
+def model_for_recipe_handoff(log: TaskLog | None = None) -> AgentRoute:
+    """Leftover zoom/click after a recipe — always the cheap CU model (easy budget)."""
     override = (os.environ.get("AGENT_MODEL") or "").strip()
     if override:
+        route = _route(override, "easy")
         if log is not None:
-            log.record("router", f"override {override}", {"model": override})
-        return override
-    print(f"[router] recipe leftover → {MODEL_EASY}")
+            log.record(
+                "router",
+                f"override {override}",
+                {"model": override, "difficulty": "easy", "max_steps": route.max_steps},
+            )
+        return route
+    route = _route(MODEL_EASY, "easy")
+    print(f"[router] recipe leftover → {MODEL_EASY} (max_steps={route.max_steps})")
     if log is not None:
-        log.record("router", f"recipe-handoff → {MODEL_EASY}", {"model": MODEL_EASY})
-    return MODEL_EASY
+        log.record(
+            "router",
+            f"recipe-handoff → {MODEL_EASY}",
+            {"model": MODEL_EASY, "difficulty": "easy", "max_steps": route.max_steps},
+        )
+    return route
 
 
-def resolve_agent_model(client: OpenAI, task: str, log: TaskLog | None = None) -> str:
+def resolve_agent_model(
+    client: OpenAI,
+    task: str,
+    log: TaskLog | None = None,
+    *,
+    fallback_max_steps: int | None = None,
+) -> AgentRoute:
     """
-    Choose the computer-agent model.
+    Choose the computer-agent model and step budget.
 
-    If AGENT_MODEL is set, use it (manual override).
+    If AGENT_MODEL is set, use it (manual override) and keep fallback_max_steps
+    when provided, else the hard budget.
     Else if AGENT_ROUTE is on, classify difficulty with ROUTER_MODEL.
-    Else fall back to AGENT_MODEL_HARD.
+    Else fall back to AGENT_MODEL_HARD with the hard step budget.
     """
     override = (os.environ.get("AGENT_MODEL") or "").strip()
     if override:
-        print(f"[router] AGENT_MODEL override → {override}")
+        difficulty = "hard"
+        steps = fallback_max_steps if fallback_max_steps is not None else max_steps_for_difficulty(difficulty)
+        print(f"[router] AGENT_MODEL override → {override} (max_steps={steps})")
         if log is not None:
-            log.record("router", f"override {override}", {"model": override})
-        return override
+            log.record(
+                "router",
+                f"override {override}",
+                {"model": override, "difficulty": difficulty, "max_steps": steps},
+            )
+        return AgentRoute(model=override, difficulty=difficulty, max_steps=steps)
 
     if not AGENT_ROUTE:
-        print(f"[router] routing disabled → {MODEL_HARD}")
+        route = _route(MODEL_HARD, "hard")
+        print(f"[router] routing disabled → {MODEL_HARD} (max_steps={route.max_steps})")
         if log is not None:
-            log.record("router", f"disabled {MODEL_HARD}", {"model": MODEL_HARD})
-        return MODEL_HARD
+            log.record(
+                "router",
+                f"disabled {MODEL_HARD}",
+                {"model": MODEL_HARD, "difficulty": "hard", "max_steps": route.max_steps},
+            )
+        return route
 
     prompt = f"""Classify this desktop computer-use task difficulty.
 
@@ -128,21 +186,46 @@ Reply JSON only:
         difficulty = str(data.get("difficulty") or "medium").strip().lower()
         if difficulty not in DIFFICULTY_MODELS:
             difficulty = "medium"
-        model = DIFFICULTY_MODELS[difficulty]
+        route = _route(DIFFICULTY_MODELS[difficulty], difficulty)
         reason = str(data.get("reason") or "").strip()
-        print(f"[router] {difficulty} → {model}" + (f" ({reason})" if reason else ""))
+        print(
+            f"[router] {difficulty} → {route.model} "
+            f"(max_steps={route.max_steps})" + (f" ({reason})" if reason else "")
+        )
         if log is not None:
             log.record(
                 "router",
-                f"{difficulty} → {model}",
-                {"difficulty": difficulty, "model": model, "reason": reason},
+                f"{difficulty} → {route.model}",
+                {
+                    "difficulty": difficulty,
+                    "model": route.model,
+                    "max_steps": route.max_steps,
+                    "reason": reason,
+                },
             )
-        return model
+        return route
     except Exception as e:
-        print(f"[router] failed ({e}) — using {MODEL_HARD}", flush=True)
+        route = _route(MODEL_HARD, "hard")
+        print(
+            f"[router] failed ({e}) — using {MODEL_HARD} " f"(max_steps={route.max_steps})",
+            flush=True,
+        )
         if log is not None:
-            log.record("router", f"error → {MODEL_HARD}", {"error": str(e)})
-        return MODEL_HARD
+            log.record(
+                "router",
+                f"error → {MODEL_HARD}",
+                {"error": str(e), "max_steps": route.max_steps},
+            )
+        return route
+
+
+def resolve_agent_model_name(
+    client: OpenAI,
+    task: str,
+    log: TaskLog | None = None,
+) -> str:
+    """Back-compat: model id only."""
+    return resolve_agent_model(client, task, log).model
 
 
 def coach_agent(

@@ -334,7 +334,7 @@ python phone_gateway.py          # run the server alone (optional)
 **Models (cost-aware defaults)**
 - Orchestrator: `gpt-5-mini` (`ORCHESTRATOR_MODEL`)
 - Computer agent: difficulty router picks `gpt-5.6-luna` / `gpt-5.6-terra` /
-  `gpt-5.6` (`AGENT_ROUTE=1`; set `AGENT_MODEL` to force one model)
+  `gpt-5.6` and max-steps **25 / 100 / 200** (`AGENT_ROUTE=1`; set `AGENT_MODEL` to force one model)
 - N-step coach: every `EVAL_EVERY` turns (default 5) via `EVAL_MODEL=gpt-5-mini`
 - STT: `STT_PROVIDER=openai` (default) uses Realtime `gpt-live-transcribe`
   (`STT_MODEL`); ends after `STT_IDLE_SECONDS` with no new words.

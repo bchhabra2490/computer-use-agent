@@ -21,7 +21,7 @@ cd computer-use-agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # then set OPENAI_API_KEY (and optional WAKE_*)
+cp .env.example .env          # then configure voice (see below)
 # .env is loaded automatically by orchestrator.py / agent.py
 ```
 
@@ -37,6 +37,124 @@ or your IDE's terminal):
 
 You'll need to restart the terminal app after granting these.
 
+### Voice configuration
+
+Voice runs through `.env`. Copy the example file, set at least `OPENAI_API_KEY`,
+then tune STT, TTS, and wake word before `cua start` or `python orchestrator.py`.
+
+**1. API keys (required)**
+
+```bash
+cp .env.example .env
+# Edit .env:
+OPENAI_API_KEY=sk-...
+```
+
+OpenAI covers the orchestrator LLM, live STT, and TTS with the defaults below.
+For Sarvam speech in/out, also set `SARVAM_API_KEY` (from [Sarvam AI](https://sarvam.ai)).
+
+**2. Speech-to-text (`STT_PROVIDER`)**
+
+| Provider | When to use | Key settings |
+|----------|-------------|--------------|
+| `openai` (default) | Low-latency streaming mic; ends after silence | `STT_MODEL=gpt-live-transcribe`, `STT_IDLE_SECONDS=6` |
+| `sarvam` | Indian English / Hindi / codemix; record-then-upload | `SARVAM_API_KEY`, `SARVAM_STT_MODEL=saaras:v3`, optional `SARVAM_STT_LANGUAGE=en-IN` |
+
+```bash
+# OpenAI (default — nothing extra needed)
+STT_PROVIDER=openai
+
+# Sarvam example
+STT_PROVIDER=sarvam
+SARVAM_API_KEY=sk_...
+SARVAM_STT_MODEL=saaras:v3
+```
+
+Noise / VAD: `STT_NOISE_REDUCTION=far_field`, `STT_HIGHPASS_HZ=140`, `STT_VAD_THRESHOLD=0.55`.
+Wrong mic? Set `MIC_DEVICE` to a sounddevice index or name (list devices with
+`python -c "import sounddevice; print(sounddevice.query_devices())"`).
+
+**3. Text-to-speech (`TTS_PROVIDER`)**
+
+| Provider | When to use | Key settings |
+|----------|-------------|--------------|
+| `openai` (default) | `gpt-4o-mini-tts` | optional `TTS_VOICE=onyx` |
+| `sarvam` | Bulbul voices (Indian English) | `SARVAM_API_KEY`, `SARVAM_TTS_MODEL=bulbul:v3` |
+
+Wake word picks the Sarvam speaker when using Bulbul: **Hey Jarvis** → `shubh`,
+**Hey Rekha** → `priya` (`TTS_VOICE_JARVIS` / `TTS_VOICE_REKHA`).
+
+```bash
+# OpenAI (default)
+TTS_PROVIDER=openai
+
+# Sarvam example
+TTS_PROVIDER=sarvam
+SARVAM_API_KEY=sk_...
+SARVAM_TTS_MODEL=bulbul:v3
+TTS_VOICE_JARVIS=shubh
+TTS_VOICE_REKHA=priya
+```
+
+Streaming playback (default): `TTS_STREAM=1`, `TTS_CHUNK_MIN_CHARS=20`,
+`TTS_WARMUP=1`. Echo or hiss during speech? Set `TTS_BARGE_IN=0`. Skip the
+“I heard: …” confirmation with `TTS_CONFIRM_HEARD=0`.
+
+**4. Wake word**
+
+Defaults: offline openWakeWord (`WAKE_MODE=model`), `WAKE_MODEL=hey_jarvis`,
+`WAKE_PHRASE=Hey Jarvis`. Say **over and out** (or tray **Send**) to finish a
+listen. Sensitivity: `WAKE_THRESHOLD=0.5`, `WAKE_BARGE_THRESHOLD=0.6`.
+
+```bash
+WAKE_MODE=model
+WAKE_MODEL=hey_jarvis,Hey_Rekha.onnx   # custom ONNX in models/wake/
+WAKE_PHRASE=Hey Jarvis,Hey Rekha
+WAKE_END_PHRASE=over and out
+```
+
+Audio cues: `STT_START_CHIME=1` when the mic opens, `STT_END_CHIME=1` when it
+closes. Custom wake ONNX training and phrase-mode (`WAKE_MODE=phrase`) are covered
+in [Wake word (any phrase)](#wake-word-any-phrase) below.
+
+**5. Speaker ID (optional)**
+
+Recognize your voice on the Mac mic and pass your name into the agent context.
+
+```bash
+# In .env
+SPEAKER_ID=1
+
+# Enroll (reads five passages — allow mic access in Terminal.app)
+cua speaker enroll --name Bharat
+cua speaker list
+cua speaker test              # speak; prints match + scores
+cua speaker test --speak-prompts   # TTS reads prompts for you
+```
+
+Re-enroll after changing `SPEAKER_ID_MODEL` or if scores drift. Thresholds:
+`SPEAKER_ID_THRESHOLD`, `SPEAKER_ID_SHORT_THRESHOLD`.
+
+**6. Phone companion audio (optional)**
+
+With `PHONE_GATEWAY=1`, pass `"sink": "phone"` on `/v1/command`, `/v1/audio`, or
+`/v1/photo` so TTS is synthesized on the Mac but played on the phone via
+`GET /v1/speech`. See [Phone gateway](#phone-gateway-optional) below.
+
+**7. Start and smoke-test**
+
+```bash
+cua start --auto
+# or: python orchestrator.py --auto
+
+# Say "Hey Jarvis" → give a command → "over and out"
+# Tray icon should show listening / speaking states
+```
+
+If wake never fires: lower `WAKE_THRESHOLD`, confirm mic permission, try
+`WAKE_MODE=phrase WAKE_PHRASE="Hey Jarvis"` (uses STT instead of ONNX). If STT
+is empty or cuts off early: raise `STT_IDLE_SECONDS` or check `MIC_DEVICE`.
+
 ## Run
 
 ### Daemon (recommended)
@@ -46,6 +164,7 @@ cua start          # background orchestrator (--auto); installs `cua` on PATH
 cua stop           # SIGTERM, then SIGKILL if needed
 cua status
 cua restart
+cua help           # all commands: observe, speaker, skills, MCP, voice env, …
 cua skills condense            # rewrite verbose skills/*/SKILL.md (LLM)
 cua skills condense --dry-run  # show what would change; do not write
 cua skills merge --dry-run     # propose duplicate merges; do not delete
@@ -269,24 +388,35 @@ PHONE_GATEWAY=1 python orchestrator.py --auto
 | GET | `/v1/status` | state, logs (incl. LLM replies), last spoken / last LLM |
 | GET | `/v1/events` | SSE stream of the same payload |
 | GET | `/v1/screen` | last agent screenshot (JPEG) |
-| GET | `/v1/speech` | last Mac-synthesized reply WAV (phone turns only) |
-| POST | `/v1/command` | `{ "text": "play lag ja gale" }` |
-| POST | `/v1/audio` | clip → Mac STT → same command queue |
-| POST | `/v1/photo` | camera still → Jarvis looks at it (alias `/v1/image`) |
-| POST | `/v1/control` | `{ "action": "send" \| "mark_done" \| "quit" }` |
+| GET | `/v1/speech` | last Mac-synthesized reply WAV when `reply_sink` is `phone` |
+| POST | `/v1/command` | `{ "text": "…", "sink": "phone" }` — optional `sink` (`phone` \| `mac`) |
+| POST | `/v1/audio` | clip → Mac STT → command queue; optional `sink` in JSON/multipart |
+| POST | `/v1/photo` | camera still → Jarvis looks at it; optional `sink` in JSON/multipart |
+| POST | `/v1/control` | `{ "action": "send" \| "mark_done" \| "quit" \| "sink", "sink": "phone" }` |
 
 Send `Authorization: Bearer <token>` (or `?token=` on SSE / `/v1/screen` / `/v1/speech`). Same Wi‑Fi or an
 Android hotspot is enough. iPhone Personal Hotspot often blocks LAN to the Mac —
 use Tailscale or USB tethering. Tailscale is only required off the LAN.
 
+**Tailscale (phone on cellular).** Install Tailscale on Mac and phone (same tailnet). With
+`PHONE_GATEWAY=1`, startup prints LAN URLs plus `http://100.x.x.x:8742` and a MagicDNS hostname
+when the `tailscale` CLI is installed. Point the companion at that URL; token is in
+`.runtime/phone.token` (max 5 chars). Example:
+
+```bash
+tailscale ip -4   # on Mac, if URLs were not printed
+curl -s -H "Authorization: Bearer $TOKEN" http://100.x.x.x:8742/v1/health
+```
+
 `/v1/status` includes `screen_at` when the computer-use agent has captured a
 frame. Refetch `/v1/screen` when that timestamp changes — there is no extra
 screenshot; it is the same PNG the model just saw, saved as a phone-sized JPEG.
 
-TTS is always synthesized on the Mac. When the last user turn came from the
-phone (`/v1/command`, `/v1/audio`, or `/v1/photo`), playback skips Mac speakers
-and `speech_at` updates instead. Refetch `/v1/speech` (WAV) and play it on the
-phone. Mac wake-word turns still use `afplay` and do not publish that file.
+TTS is always synthesized on the Mac. Pass `"sink": "phone"` on `/v1/command`,
+`/v1/audio`, or `/v1/photo` (or `POST /v1/control` with `"action": "sink"`) to
+route replies to the phone: playback skips Mac speakers, `speech_at` updates, and
+you refetch `/v1/speech` (WAV) to play locally. Without `sink`, the current
+`reply_sink` is unchanged (Mac wake-word turns use `afplay`).
 
 LLM replies are in `logs` as `[llm]`, `[agent]`, `[tts]`, or `[mark_done]`
 lines (up to ~2000 characters). `last_llm` is the newest of those; `last_spoken`

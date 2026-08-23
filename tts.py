@@ -361,7 +361,7 @@ def play_wav(
     """
     Play WAV bytes. On macOS defaults to afplay (ignores force_rate).
 
-    When the current turn came from the phone, skip Mac speakers and publish
+    When ``reply_sink`` is ``phone`` (set via API ``sink`` param), skip Mac speakers and publish
     the WAV for ``GET /v1/speech`` instead.
 
     Returns True if interrupted via interrupt_event.

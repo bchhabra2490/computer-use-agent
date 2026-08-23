@@ -4,6 +4,10 @@ Runs the voice orchestrator in the background (detached session, logs to
 ``logs/cua.log``). ``cua start`` also installs a ``cua`` shim on PATH when
 possible so the command works from any directory.
 
+Full command reference::
+
+    cua help
+
 Passive desktop observer (separate process, drafts only)::
 
     cua observe start
@@ -331,12 +335,95 @@ def cmd_status() -> int:
     return 0
 
 
+def format_help() -> str:
+    """Full CLI reference for ``cua help``."""
+    return f"""\
+cua — personal computer-use agent (voice orchestrator + tools)
+
+DAEMON
+  cua start [--no-auto] [--max-steps N]
+      Start the voice orchestrator in the background (logs: logs/cua.log).
+      Installs a PATH shim on first run (~/.local/bin/cua).
+  cua stop              Stop the orchestrator, tray, and phone gateway.
+  cua restart           Stop then start.
+  cua status            Print whether the daemon is running.
+  cua install           Install the cua shim onto PATH.
+
+VOICE (foreground — same orchestrator, attached terminal)
+  python orchestrator.py [--auto]
+  python agent.py --voice [--auto]
+
+  Configure in .env (see README “Voice configuration”):
+    OPENAI_API_KEY          required
+    STT_PROVIDER=openai|sarvam
+    TTS_PROVIDER=openai|sarvam
+    WAKE_MODEL / WAKE_PHRASE / WAKE_MODE=model|phrase
+    TTS_BARGE_IN=1          wake word interrupts speech
+    TTS_CONFIRM_HEARD=1     speak “I heard: …” after each listen
+    MIC_DEVICE=             sounddevice input name or index
+
+OBSERVER (separate process — drafts only; not started by cua start)
+  cua observe start       Watch your clicks; draft memories/skills after ~10 min.
+  cua observe stop
+  cua observe status
+  cua observe list        Pending drafts (m1 / s1 item refs).
+  cua observe accept ID [m1 s2 …] [--memory NAME] [--skill NAME]
+  cua observe accept --all
+  cua observe reject ID [items…] [--all]
+
+SPEAKER ID (who is talking — set SPEAKER_ID=1 in .env)
+  cua speaker enroll [--name YourName] [--speak-prompts]
+  cua speaker list
+  cua speaker test [--verbose] [--speak-prompts]
+  cua speaker delete NAME
+
+DICTATION (Fn key → paste speech into focused field; DICTATION=1 in .env)
+  cua dictation start
+  cua dictation stop
+  cua dictation status
+
+SKILLS (playbooks under skills/*/SKILL.md)
+  cua skills condense [--name SKILL] [--force] [--dry-run]
+  cua skills merge [--name SKILL …] [--dry-run]
+
+MCP (Linear, GitHub, Notion, … — browser login)
+  cua mcp login linear|github|notion
+  cua mcp login SLUG --url https://…/mcp
+  cua mcp login github --token ghp_…
+  cua mcp logout NAME
+  cua mcp status
+  cua mcp apps
+
+PHONE GATEWAY (companion app — PHONE_GATEWAY=1 in .env)
+  Starts with cua start when enabled. HTTP on port 8742 (LAN / Tailscale).
+  Token: .runtime/phone.token (max 5 chars).
+  Pass "sink": "phone" on /v1/command|audio|photo for phone TTS playback.
+  Run standalone: python phone_gateway.py
+
+COMPUTER AGENT (typed task, no voice)
+  python agent.py "Open Notes and write today's date" [--auto] [--max-steps N]
+
+OTHER
+  python status_tray.py   Menu-bar icon alone (auto-starts with orchestrator).
+  cua help                Show this reference.
+
+Docs: README.md in {ROOT.name}/
+Env template: .env.example
+"""
+
+
+def cmd_help() -> int:
+    print(format_help())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cua",
         description="Start and stop the computer-use-agent daemon",
+        add_help=True,
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     start_p = sub.add_parser("start", help="Start the orchestrator in the background")
     start_p.add_argument(
@@ -357,6 +444,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("stop", help="Stop the background orchestrator")
     sub.add_parser("status", help="Print whether the daemon is running")
     sub.add_parser("install", help="Install the cua command on PATH")
+    sub.add_parser("help", help="Show all commands (daemon, observe, speaker, …)")
 
     mcp_p = sub.add_parser(
         "mcp",
@@ -568,6 +656,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if args.command is None:
+        return cmd_help()
+    if args.command == "help":
+        return cmd_help()
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
     if args.command == "stop":

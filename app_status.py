@@ -260,23 +260,30 @@ def set_phone_gateway_pid(pid: int | None) -> None:
         _write(data)
 
 
-def enqueue_utterance(text: str, *, source: str = "phone", photo: bool = False) -> None:
+def enqueue_utterance(
+    text: str,
+    *,
+    source: str = "phone",
+    photo: bool = False,
+    sink: str | None = None,
+) -> None:
     """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
     text = (text or "").strip()
     if not text:
         return
     source = (source or "phone").strip() or "phone"
+    item: dict[str, Any] = {
+        "text": text,
+        "source": source,
+        "ts": time.time(),
+        "photo": bool(photo),
+    }
+    if sink is not None:
+        item["sink"] = _normalize_sink(sink)
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
-        pending.append(
-            {
-                "text": text,
-                "source": source,
-                "ts": time.time(),
-                "photo": bool(photo),
-            }
-        )
+        pending.append(item)
         data["pending_utterances"] = pending[-20:]
         _write(data)
     kind = "photo" if photo else "queued"
@@ -291,6 +298,16 @@ def utterance_pending() -> bool:
 
 def _normalize_sink(sink: str | None) -> str:
     return "phone" if (sink or "").strip().lower() == "phone" else "mac"
+
+
+def parse_reply_sink_param(value: Any) -> str | None:
+    """Parse optional API ``sink`` / ``speaker``; ``None`` leaves reply_sink unchanged."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    return _normalize_sink(s)
 
 
 def set_reply_sink(sink: str) -> None:
@@ -316,11 +333,8 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
-        if isinstance(item, str):
-            data["reply_sink"] = "phone"
-        else:
-            src = str((item or {}).get("source") or "phone").strip().lower()
-            data["reply_sink"] = "phone" if src == "phone" else "mac"
+        if isinstance(item, dict) and item.get("sink") is not None:
+            data["reply_sink"] = _normalize_sink(str(item.get("sink")))
         _write(data)
     if isinstance(item, str):
         text = item.strip()

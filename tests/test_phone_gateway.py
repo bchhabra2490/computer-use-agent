@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -147,6 +148,30 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         )
         self.assertEqual(h._code, 200)
         self.assertEqual(st.consume_utterance(), "open notes")
+        self.assertEqual(st.reply_sink(), "mac")
+
+    def test_command_sink_phone(self) -> None:
+        h = self._handler(
+            "POST",
+            "/v1/command",
+            {"text": "open notes", "sink": "phone"},
+            token="test-token-abc",
+        )
+        self.assertEqual(h._code, 200)
+        body = json.loads(h.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(body.get("sink"), "phone")
+        self.assertEqual(st.consume_utterance(), "open notes")
+        self.assertEqual(st.reply_sink(), "phone")
+
+    def test_control_set_sink(self) -> None:
+        h = self._handler(
+            "POST",
+            "/v1/control",
+            {"action": "sink", "sink": "phone"},
+            token="test-token-abc",
+        )
+        self.assertEqual(h._code, 200)
+        self.assertEqual(st.reply_sink(), "phone")
 
     def test_control_mark_done(self) -> None:
         h = self._handler(
@@ -461,6 +486,25 @@ class EnsureGatewayTests(unittest.TestCase):
             with patch("phone_gateway.subprocess.Popen") as popen:
                 self.assertIsNone(pg.ensure_phone_gateway())
                 popen.assert_not_called()
+
+
+class AdvertiseUrlsTests(unittest.TestCase):
+    def test_includes_tailscale_ip_and_magic_dns(self) -> None:
+        status_json = json.dumps(
+            {"Self": {"DNSName": "macbook.tail12345.ts.net."}}
+        )
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["tailscale", "ip"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="100.64.0.1\n")
+            if cmd[:2] == ["tailscale", "status"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout=status_json)
+            raise AssertionError(f"unexpected cmd: {cmd}")
+
+        with patch("phone_gateway.subprocess.run", side_effect=fake_run):
+            urls = pg.advertise_urls(8742)
+        self.assertIn("http://100.64.0.1:8742", urls)
+        self.assertIn("http://macbook.tail12345.ts.net:8742", urls)
 
 
 if __name__ == "__main__":

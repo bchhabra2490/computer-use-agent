@@ -106,9 +106,14 @@ class FlagTests(unittest.TestCase):
         st.enqueue_utterance("  play a song  ")
         self.assertTrue(st.utterance_pending())
         self.assertEqual(st.consume_utterance(), "play a song")
-        self.assertEqual(st.reply_sink(), "phone")
+        self.assertEqual(st.reply_sink(), "mac")
         self.assertFalse(st.utterance_pending())
         self.assertIsNone(st.consume_utterance())
+
+    def test_enqueue_with_sink_sets_reply_on_consume(self) -> None:
+        st.enqueue_utterance("play a song", sink="phone")
+        self.assertEqual(st.consume_utterance(), "play a song")
+        self.assertEqual(st.reply_sink(), "phone")
 
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")

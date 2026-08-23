@@ -8,9 +8,9 @@ accepts a camera still (``POST /v1/photo``) for the orchestrator to look at
 (optional mic clip is transcribed as the caption),
 toggles tray flags (send / mark done / quit), and streams ``status.json``.
 
-TTS is synthesized on the Mac. Phone turns skip ``afplay`` and publish a WAV
-at ``GET /v1/speech`` when ``speech_at`` changes; Mac wake-word turns still
-play locally.
+TTS is synthesized on the Mac. Pass ``sink: "phone"`` on API requests to route
+replies to ``GET /v1/speech`` (skip Mac ``afplay``). Without ``sink``, the current
+``reply_sink`` is unchanged (Mac wake-word turns default to Mac speakers).
 
 Auth: Bearer token in ``Authorization`` or ``?token=`` (SSE). Token lives in
 ``.runtime/phone.token`` (or ``PHONE_GATEWAY_TOKEN``). Max 5 characters so it
@@ -41,15 +41,18 @@ from app_status import (
     RUNTIME_DIR,
     active_agents,
     enqueue_utterance,
+    parse_reply_sink_param,
     pid_alive,
     read_phone_screen,
     read_phone_speech,
     read_status,
+    reply_sink,
     request_mark_done,
     request_quit,
     request_send,
     request_cancel,
     set_phone_gateway_pid,
+    set_reply_sink,
     write_phone_photo,
 )
 
@@ -122,10 +125,64 @@ def advertise_urls(port: int = PORT) -> list[str]:
         ip = probe.getsockname()[0]
         probe.close()
         if ip not in seen and not ip.startswith("127."):
+            seen.add(ip)
             urls.append(f"http://{ip}:{port}")
     except OSError:
         pass
+    ts_ip = _tailscale_ipv4()
+    if ts_ip and ts_ip not in seen:
+        urls.append(f"http://{ts_ip}:{port}")
+    ts_host = _tailscale_magic_dns()
+    if ts_host:
+        url = f"http://{ts_host}:{port}"
+        if url not in urls:
+            urls.append(url)
     return urls
+
+
+def _tailscale_ipv4() -> str | None:
+    """Best-effort Tailscale IPv4 (100.x) for phone URLs when off-LAN."""
+    try:
+        out = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    line = (out.stdout or "").strip().splitlines()[0].strip() if out.stdout else ""
+    if not line or line.startswith("127."):
+        return None
+    return line
+
+
+def _tailscale_magic_dns() -> str | None:
+    """Machine name on tailnet (e.g. macbook.tail12345.ts.net) when MagicDNS is on."""
+    try:
+        out = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0 or not out.stdout:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return None
+    self_obj = data.get("Self") if isinstance(data, dict) else None
+    if not isinstance(self_obj, dict):
+        return None
+    dns = (self_obj.get("DNSName") or "").strip().rstrip(".")
+    return dns or None
 
 
 def phone_status_payload(data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -155,8 +212,13 @@ def phone_status_payload(data: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def apply_control(action: str) -> dict[str, Any]:
+def apply_control(action: str, *, sink: str | None = None) -> dict[str, Any]:
     key = (action or "").strip().lower()
+    if key in {"sink", "set_sink", "reply_sink", "speaker"}:
+        if sink is None:
+            return {"ok": False, "error": "sink required (phone or mac)"}
+        set_reply_sink(sink)
+        return {"ok": True, "action": "sink", "sink": reply_sink()}
     if key == "send":
         request_send()
         return {"ok": True, "action": "send"}
@@ -181,6 +243,16 @@ _PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif
 _PHOTO_FIELD_NAMES = {"photo", "image", "camera", "picture"}
 _AUDIO_FIELD_NAMES = {"audio", "voice", "recording", "caption_audio", "mic"}
 _TEXT_FIELD_NAMES = {"text", "command", "caption", "prompt", "transcript"}
+_SINK_FIELD_NAMES = {"sink", "speaker", "reply_sink"}
+
+
+def _sink_from_fields(**fields: Any) -> str | None:
+    for key in _SINK_FIELD_NAMES:
+        if key in fields:
+            parsed = parse_reply_sink_param(fields[key])
+            if parsed is not None:
+                return parsed
+    return None
 
 
 def _suffix_for_audio(*, filename: str = "", content_type: str = "") -> str:
@@ -304,6 +376,7 @@ def parse_audio_body(
         filename = ""
         text = ""
         part_type = ""
+        sink = None
         if msg.is_multipart():
             for part in msg.iter_parts():
                 name = str(part.get_param("name", header="content-disposition") or "")
@@ -313,7 +386,12 @@ def parse_audio_body(
                     continue
                 if isinstance(payload, str):
                     payload = payload.encode("utf-8")
-                if name in {"text", "command", "transcript"}:
+                key = name.lower()
+                if key in _SINK_FIELD_NAMES:
+                    sink = parse_reply_sink_param(
+                        payload.decode("utf-8", errors="replace").strip()
+                    )
+                elif key in {"text", "command", "transcript"}:
                     text = payload.decode("utf-8", errors="replace").strip()
                 elif name in {"audio", "file", "recording", "voice"} or fn:
                     audio = payload
@@ -324,6 +402,7 @@ def parse_audio_body(
             "filename": filename,
             "text": text,
             "content_type": part_type or ctype,
+            "sink": sink,
         }
     if ctype in {"application/json", "text/json"}:
         data = json.loads(body.decode("utf-8") or "{}")
@@ -336,12 +415,14 @@ def parse_audio_body(
             "filename": str(data.get("filename") or data.get("name") or ""),
             "text": str(data.get("text") or data.get("command") or "").strip(),
             "content_type": str(data.get("mime") or data.get("content_type") or ctype),
+            "sink": _sink_from_fields(**data),
         }
     return {
         "audio": body,
         "filename": "",
         "text": "",
         "content_type": ctype,
+        "sink": None,
     }
 
 
@@ -351,18 +432,25 @@ def ingest_phone_audio(
     filename: str = "",
     content_type: str = "",
     text: str = "",
+    sink: str | None = None,
 ) -> dict[str, Any]:
     """Transcribe phone audio (unless ``text`` is already set) and queue it."""
     text = (text or "").strip()
     if text:
-        enqueue_utterance(text, source="phone")
-        return {"ok": True, "queued": True, "text": text, "source": "text"}
+        enqueue_utterance(text, source="phone", sink=sink)
+        out = {"ok": True, "queued": True, "text": text, "source": "text"}
+        if sink is not None:
+            out["sink"] = sink
+        return out
     result = transcribe_phone_audio(audio, filename=filename, content_type=content_type)
     if not result.get("ok"):
         return result
     heard = str(result.get("text") or "").strip()
-    enqueue_utterance(heard, source="phone")
-    return {"ok": True, "queued": True, "text": heard, "source": "audio"}
+    enqueue_utterance(heard, source="phone", sink=sink)
+    out = {"ok": True, "queued": True, "text": heard, "source": "audio"}
+    if sink is not None:
+        out["sink"] = sink
+    return out
 
 
 def _sips_to_jpeg(src: Path, dst: Path, max_width: int) -> bool:
@@ -470,6 +558,7 @@ def parse_photo_body(
         "audio": b"",
         "audio_filename": "",
         "audio_content_type": "",
+        "sink": None,
     }
     if "multipart/form-data" in (content_type or "").lower():
         preamble = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
@@ -481,6 +570,7 @@ def parse_photo_body(
         audio = b""
         audio_filename = ""
         audio_type = ""
+        sink = None
         if msg.is_multipart():
             for part in msg.iter_parts():
                 name = str(part.get_param("name", header="content-disposition") or "")
@@ -490,6 +580,11 @@ def parse_photo_body(
                     continue
                 ptype = part.get_content_type() or ""
                 key = name.lower()
+                if key in _SINK_FIELD_NAMES:
+                    sink = parse_reply_sink_param(
+                        payload.decode("utf-8", errors="replace").strip()
+                    )
+                    continue
                 if key in _TEXT_FIELD_NAMES:
                     text = payload.decode("utf-8", errors="replace").strip()
                     continue
@@ -519,6 +614,7 @@ def parse_photo_body(
             "audio": audio,
             "audio_filename": audio_filename,
             "audio_content_type": audio_type,
+            "sink": sink,
         }
     if ctype in {"application/json", "text/json"}:
         data = json.loads(body.decode("utf-8") or "{}")
@@ -538,6 +634,7 @@ def parse_photo_body(
             "audio_content_type": str(
                 data.get("audio_mime") or data.get("audio_content_type") or ""
             ),
+            "sink": _sink_from_fields(**data),
         }
     return empty | {"photo": body, "content_type": ctype}
 
@@ -551,6 +648,7 @@ def ingest_phone_photo(
     audio: bytes = b"",
     audio_filename: str = "",
     audio_content_type: str = "",
+    sink: str | None = None,
 ) -> dict[str, Any]:
     """Resize a phone still, store it, and queue a vision request.
 
@@ -585,8 +683,8 @@ def ingest_phone_photo(
     except Exception as e:
         return {"ok": False, "error": f"unsupported image: {e}"}
     write_phone_photo(jpeg, width=width, height=height)
-    enqueue_utterance(text, source="phone", photo=True)
-    return {
+    enqueue_utterance(text, source="phone", photo=True, sink=sink)
+    out = {
         "ok": True,
         "queued": True,
         "text": text,
@@ -595,6 +693,9 @@ def ingest_phone_photo(
         "width": width,
         "height": height,
     }
+    if sink is not None:
+        out["sink"] = sink
+    return out
 
 
 def ensure_phone_gateway() -> subprocess.Popen | None:
@@ -801,6 +902,7 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
                 filename=str(parsed.get("filename") or ""),
                 content_type=str(parsed.get("content_type") or ""),
                 text=str(parsed.get("text") or ""),
+                sink=parsed.get("sink"),
             )
             code = 200 if result.get("ok") else 400
             self._send_json(code, result)
@@ -826,6 +928,7 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
                 audio=parsed.get("audio") or b"",
                 audio_filename=str(parsed.get("audio_filename") or ""),
                 audio_content_type=str(parsed.get("audio_content_type") or ""),
+                sink=parsed.get("sink"),
             )
             code = 200 if result.get("ok") else 400
             self._send_json(code, result)
@@ -840,11 +943,18 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
             if not text:
                 self._send_json(400, {"ok": False, "error": "text required"})
                 return
-            enqueue_utterance(text, source="phone")
-            self._send_json(200, {"ok": True, "queued": True, "text": text})
+            sink = _sink_from_fields(**body)
+            enqueue_utterance(text, source="phone", sink=sink)
+            out = {"ok": True, "queued": True, "text": text}
+            if sink is not None:
+                out["sink"] = sink
+            self._send_json(200, out)
             return
         if path == "/v1/control":
-            result = apply_control(str(body.get("action") or ""))
+            result = apply_control(
+                str(body.get("action") or ""),
+                sink=_sink_from_fields(**body),
+            )
             code = 200 if result.get("ok") else 400
             self._send_json(code, result)
             return

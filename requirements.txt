@@ -1,5 +1,16 @@
 openai[realtime]>=1.50.0
 sarvamai>=0.1.0
+# Local WhisperFlow STT. mlx-whisper if the HF snapshot is complete;
+# otherwise openai-whisper (~/.cache/whisper). Intel/Linux: faster-whisper
+# Local TTS: Piper (CPU ONNX) and Kokoro (mlx-audio on Apple Silicon).
+# Do not use misaki[en] on Python 3.14 — that extra pulls spacy 4.dev which
+# fails to build. Pin the English G2P deps instead.
+piper-tts>=1.3.0
+mlx-audio>=0.2.0; sys_platform == "darwin"
+misaki>=0.7.4; sys_platform == "darwin"
+num2words>=0.5.14; sys_platform == "darwin"
+spacy==3.8.16; sys_platform == "darwin"
+phonemizer>=3.3.0; sys_platform == "darwin"
 pyautogui>=0.9.54
 pillow>=10.0.0
 sounddevice>=0.5.0

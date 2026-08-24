@@ -147,7 +147,11 @@ class LowLatencyTTS:
 
     def __init__(self, client: OpenAI, project_root: str | Path | None = None):
         self.client = client
-        root = Path(project_root) if project_root else Path(__file__).resolve().parent
+        root = (
+            Path(project_root)
+            if project_root
+            else Path(__file__).resolve().parent.parent
+        )
         self.log_path = root / "tts_latency.log"
         # Unbounded queues avoid shutdown deadlocks when both stages back up.
         self._synth_q: queue.Queue[Any] = queue.Queue()

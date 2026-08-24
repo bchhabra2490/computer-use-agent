@@ -59,6 +59,7 @@ For Sarvam speech in/out, also set `SARVAM_API_KEY` (from [Sarvam AI](https://sa
 |----------|-------------|--------------|
 | `openai` (default) | Low-latency streaming mic; ends after silence | `STT_MODEL=gpt-live-transcribe`, `STT_IDLE_SECONDS=6` |
 | `sarvam` | Indian English / Hindi / codemix; record-then-upload | `SARVAM_API_KEY`, `SARVAM_STT_MODEL=saaras:v3`, optional `SARVAM_STT_LANGUAGE=en-IN` |
+| `whisperflow` | Local Whisper (audio stays on the Mac) | `mlx-whisper` on Apple Silicon, or `faster-whisper`; optional `WHISPERFLOW_URL` |
 
 ```bash
 # OpenAI (default — nothing extra needed)
@@ -68,6 +69,13 @@ STT_PROVIDER=openai
 STT_PROVIDER=sarvam
 SARVAM_API_KEY=sk_...
 SARVAM_STT_MODEL=saaras:v3
+
+# Local WhisperFlow (record until silence, then on-device Whisper)
+STT_PROVIDER=whisperflow
+# WHISPERFLOW_MODEL=mlx-community/whisper-large-v3-turbo
+# WHISPERFLOW_LANGUAGE=en
+# Or point at a local OpenAI-compatible server:
+# WHISPERFLOW_URL=http://127.0.0.1:7777/v1
 ```
 
 Noise / VAD: `STT_NOISE_REDUCTION=far_field`, `STT_HIGHPASS_HZ=140`, `STT_VAD_THRESHOLD=0.55`.
@@ -80,9 +88,12 @@ Wrong mic? Set `MIC_DEVICE` to a sounddevice index or name (list devices with
 |----------|-------------|--------------|
 | `openai` (default) | `gpt-4o-mini-tts` | optional `TTS_VOICE=onyx` |
 | `sarvam` | Bulbul voices (Indian English) | `SARVAM_API_KEY`, `SARVAM_TTS_MODEL=bulbul:v3` |
+| `piper` | Local ONNX (CPU, fast) | `pip install piper-tts`; `PIPER_VOICE=en_GB-alan-medium` |
+| `kokoro` | Local Kokoro-82M | `pip install mlx-audio` (Mac) or `KOKORO_ONNX_MODEL`; `KOKORO_VOICE=bm_george` |
 
-Wake word picks the Sarvam speaker when using Bulbul: **Hey Jarvis** → `shubh`,
-**Hey Rekha** → `priya` (`TTS_VOICE_JARVIS` / `TTS_VOICE_REKHA`).
+Wake word picks a speaker: **Hey Jarvis** / **Hey Rekha**
+(`TTS_VOICE_JARVIS` / `TTS_VOICE_REKHA`). Sarvam defaults are `shubh` / `priya`;
+Piper `en_GB-alan-medium` / `en_US-lessac-medium`; Kokoro `bm_george` / `af_heart`.
 
 ```bash
 # OpenAI (default)
@@ -94,11 +105,28 @@ SARVAM_API_KEY=sk_...
 SARVAM_TTS_MODEL=bulbul:v3
 TTS_VOICE_JARVIS=shubh
 TTS_VOICE_REKHA=priya
+
+# Local Piper (first run downloads the ONNX into models/piper/)
+TTS_PROVIDER=piper
+PIPER_VOICE=en_GB-alan-medium
+
+# Local Kokoro (Apple Silicon)
+TTS_PROVIDER=kokoro
+KOKORO_VOICE=bm_george
 ```
 
 Streaming playback (default): `TTS_STREAM=1`, `TTS_CHUNK_MIN_CHARS=20`,
 `TTS_WARMUP=1`. Echo or hiss during speech? Set `TTS_BARGE_IN=0`. Skip the
 “I heard: …” confirmation with `TTS_CONFIRM_HEARD=0`.
+
+Compare synthesis time across providers (warmup is on by default so model load
+is not counted):
+
+```bash
+python tts_race.py
+python tts_race.py --providers piper,kokoro --rounds 3 --play
+python stt_race.py   # same idea for STT
+```
 
 **4. Wake word**
 
@@ -177,7 +205,8 @@ cua observe reject <id> m2     # drop one item from a draft
 cua observe reject --all       # discard every proposed draft
 cua observe stop
 cua face                       # list blobatars (* = current)
-cua face droplet               # switch the live face overlay
+cua face droplet               # curated shortcut
+cua face jarvis                # any name hashes to a unique blobatar
 ```
 
 `cua start` detaches the voice orchestrator, writes a pid file under `.runtime/`,
@@ -241,7 +270,7 @@ hiss; `WAKE_BARGE_THRESHOLD` defaults higher than idle wake to reduce echo trigg
 Agent `ask_user` prompts skip the wake word (answer directly).
 
 **Low-latency TTS** (default on): the orchestrator streams Responses API
-partial `give_response_to_user` arguments into `low_latency_tts.py`, which
+partial `give_response_to_user` arguments into `tts/low_latency.py`, which
 chunks text and overlaps synthesis with playback (afplay on macOS — not
 PortAudio). Status lines and `start_task` do not wait for playback — the
 computer agent starts immediately while speech continues. Markers go to
@@ -253,8 +282,10 @@ barge-in-capable lines).
 
 `TTS_PROVIDER=openai` (default) uses `gpt-4o-mini-tts`. `TTS_PROVIDER=sarvam`
 streams Bulbul audio (`SARVAM_TTS_MODEL=bulbul:v3`; needs `SARVAM_API_KEY`).
-Wake word picks the speaker: **Hey Jarvis** → `shubh`, **Hey Rekha** → `priya`
-(`TTS_VOICE_JARVIS` / `TTS_VOICE_REKHA`).
+`TTS_PROVIDER=piper` runs local ONNX (downloads into `models/piper/`).
+`TTS_PROVIDER=kokoro` uses mlx-audio Kokoro on Apple Silicon (`pip install mlx-audio num2words 'spacy==3.8.16' phonemizer` — do not use `misaki[en]` on Python 3.14), or `kokoro-onnx`
+when `KOKORO_ONNX_MODEL` is set. Wake word picks the speaker: **Hey Jarvis** /
+**Hey Rekha** (`TTS_VOICE_JARVIS` / `TTS_VOICE_REKHA`).
 
 ### Wake word (any phrase)
 
@@ -359,7 +390,7 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   (prefers a second display). Hides for each screenshot, then comes back.
   Toggle **Log Overlay** in the menu-bar icon.
 - **Face overlay** — a click-through blobatar at the top center of the main
-  display. Mood follows session state (sleep / listen / speak / think). Hidden
+  display. Mood follows session state (sleep / listen / unsure / speak / think). Hidden
   from computer-use screenshots. Toggle **Face Overlay** in the menu-bar icon,
   or set `FACE_OVERLAY=0`.
 - **Click** — **Send** (while listening: stop recording and transcribe now;
@@ -377,7 +408,9 @@ python status_tray.py          # run the icon alone (optional)
 STATUS_TRAY=0 python orchestrator.py   # disable auto-start
 ```
 
-**Blobatars.** Four faces; switch without restarting:
+**Blobatars.** Switch without restarting. `pebble`, `droplet`, `cloud`, and
+`sun` are curated shortcuts; **any other name** hashes to a unique creature
+(same seed always looks the same, in the spirit of [blobatar.dev](https://blobatar.dev/)):
 
 | Name | Look |
 |------|------|
@@ -385,18 +418,19 @@ STATUS_TRAY=0 python orchestrator.py   # disable auto-start
 | `droplet` | coral teardrop |
 | `cloud` | lavender cloud |
 | `sun` | amber sun with petals |
+| *anything else* | hashed silhouette + hue from the name |
 
 ```bash
 cua face              # list (* = current)
 cua face pebble
 cua face droplet
-cua face cloud
-cua face sun
+cua face jarvis
+cua face rekha
 # alias: cua blobatar sun
 ```
 
-Pin one at startup with `FACE_OVERLAY_PRESET=droplet` in `.env`. Leave
-`FACE_OVERLAY_HUE` unset so each preset keeps its own color; that env value
+Pin one at startup with `FACE_OVERLAY_PRESET=jarvis` in `.env`. Leave
+`FACE_OVERLAY_HUE` unset so each name keeps its own color; that env value
 overrides hue for every blobatar.
 
 ### Phone gateway (optional)
@@ -498,6 +532,8 @@ python phone_gateway.py          # run the server alone (optional)
   (`STT_MODEL`); ends after `STT_IDLE_SECONDS` with no new words.
   `STT_PROVIDER=sarvam` records until silence then Sarvam Saaras
   (`SARVAM_STT_MODEL=saaras:v3`, needs `SARVAM_API_KEY`).
+  `STT_PROVIDER=whisperflow` records until silence then local Whisper
+  (`mlx-whisper` / `faster-whisper`, or `WHISPERFLOW_URL`).
 - Wake models download once into `models/wake/` (`WAKE_MODEL`, `WAKE_PHRASE`,
   `WAKE_MODE=model|phrase`, `WAKE_THRESHOLD`)
 
@@ -642,7 +678,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `observe.py` — passive click/scroll observer; drafts under `.runtime/observe/proposed/`.
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
-- `face_overlay.py` — top-center blobatar (`cua face pebble|droplet|cloud|sun`).
+- `face_overlay.py` — top-center blobatar (`cua face NAME`, or curated pebble/droplet/cloud/sun).
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).
@@ -657,7 +693,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `whoami.py` — `who_am_i` reads `README.md` when the user asks about this agent.
 - `mcp.json` + `mcp_client.py` + `mcp_auth.py` — MCP servers (`cua mcp login linear`).
 - `task_log.py` — per-run logs under `logs/`.
-- `stt.py` / `sarvam_stt.py` / `tts.py` / `sarvam_tts.py` — speech in/out
-  (OpenAI or Sarvam).
+- `stt/` — speech-in (`stt.openai`, `stt.sarvam`, `stt.whisperflow`; `STT_PROVIDER`).
+- `tts/` — speech-out (`tts.openai`, `tts.sarvam`, `tts.piper`, `tts.kokoro`, `tts.low_latency`; `TTS_PROVIDER`).
 - **Windows/Linux**: `pyautogui` is cross-platform; check display scaling vs the
   Retina handling in `DesktopController`.

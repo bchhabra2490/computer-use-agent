@@ -1,9 +1,14 @@
 """
 Text-to-speech for agent prompts via OpenAI or Sarvam + local playback.
 
-Providers (TTS_PROVIDER):
-  - openai — gpt-4o-mini-tts (default voice onyx) with steerable delivery
-  - sarvam — Bulbul streaming TTS (default bulbul:v3 / shubh)
+Providers live as modules in this package (``TTS_PROVIDER``):
+  - ``tts.openai`` — gpt-4o-mini-tts (default voice onyx) with steerable delivery
+  - ``tts.sarvam`` — Bulbul streaming TTS (default bulbul:v3 / shubh)
+  - ``tts.piper`` — local Piper ONNX (CPU)
+  - ``tts.kokoro`` — local Kokoro (mlx-audio on Apple Silicon, or kokoro-onnx)
+  - ``tts.low_latency`` — chunked overlap of synthesis and playback
+
+Add another backend as ``tts/<name>.py`` and branch on ``TTS_PROVIDER``.
 
 Playback on macOS uses `afplay` (system audio path) to avoid PortAudio duplex
 crackle. Wake-word barge-in ("Hey Jarvis") and keyboard barge-in (Space / Esc /
@@ -30,23 +35,19 @@ from openai import OpenAI
 # numpy / sounddevice are loaded lazily so afplay-only paths (and streaming TTS
 # workers) do not import PortAudio at module import time.
 
-# openai | sarvam
+# openai | sarvam | piper | kokoro
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
-
-TTS_MODEL = "gpt-4o-mini-tts"
-TTS_FALLBACK_MODEL = "tts-1-hd"
-TTS_FALLBACK_VOICE = "onyx"
-TTS_INSTRUCTIONS = (
-    "Voice: adult male, warm and human, slightly British, like a composed "
-    "personal AI butler (Jarvis-like). Speak naturally and conversationally—"
-    "not robotic, not overly dramatic. Calm confidence, clear diction, "
-    "moderate pace. Keep confirmations brief and polite."
-)
 
 if TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}:
     TTS_VOICE = (
         os.environ.get("TTS_VOICE") or os.environ.get("SARVAM_TTS_VOICE") or "shubh"
     ).strip().lower() or "shubh"
+elif TTS_PROVIDER in {"piper"}:
+    TTS_VOICE = (
+        os.environ.get("TTS_VOICE") or os.environ.get("PIPER_VOICE") or "en_GB-alan-medium"
+    ).strip() or "en_GB-alan-medium"
+elif TTS_PROVIDER in {"kokoro", "mlx-audio", "mlx_audio"}:
+    TTS_VOICE = (os.environ.get("TTS_VOICE") or os.environ.get("KOKORO_VOICE") or "bm_george").strip() or "bm_george"
 else:
     TTS_VOICE = (os.environ.get("TTS_VOICE") or "onyx").strip() or "onyx"
 
@@ -92,6 +93,14 @@ def _use_sarvam() -> bool:
     return TTS_PROVIDER in {"sarvam", "sarvamai", "bulbul"}
 
 
+def _use_piper() -> bool:
+    return TTS_PROVIDER in {"piper"}
+
+
+def _use_kokoro() -> bool:
+    return TTS_PROVIDER in {"kokoro", "mlx-audio", "mlx_audio"}
+
+
 def _wake_blob() -> str:
     try:
         from wake import get_last_wake
@@ -104,14 +113,13 @@ def _wake_blob() -> str:
     return f"{hit.label or ''} {hit.key or ''}".lower()
 
 
-def active_tts_voice() -> str:
-    """
-    Voice for this turn: Rekha → Priya, Jarvis → Shubh (Sarvam).
+def _wake_voice_defaults() -> tuple[str, str]:
+    """Rekha / Jarvis voice names for the active provider.
 
-    Override with TTS_VOICE_REKHA / TTS_VOICE_JARVIS (or SARVAM_TTS_VOICE_*).
-    Falls back to TTS_VOICE when no wake has fired yet.
+    Kokoro/Piper keep ``KOKORO_VOICE`` / ``PIPER_VOICE`` unless
+    ``TTS_VOICE_JARVIS`` / ``TTS_VOICE_REKHA`` are set. Sarvam still maps
+    Jarvis → Shubh and Rekha → Priya by default.
     """
-    blob = _wake_blob()
     if _use_sarvam():
         rekha = (
             os.environ.get("TTS_VOICE_REKHA") or os.environ.get("SARVAM_TTS_VOICE_REKHA") or "priya"
@@ -119,15 +127,40 @@ def active_tts_voice() -> str:
         jarvis = (
             os.environ.get("TTS_VOICE_JARVIS") or os.environ.get("SARVAM_TTS_VOICE_JARVIS") or "shubh"
         ).strip().lower() or "shubh"
-        if "rekha" in blob:
-            return rekha
-        if "jarvis" in blob:
-            return jarvis
-        return TTS_VOICE
+        return rekha, jarvis
+    if _use_piper():
+        default = (os.environ.get("PIPER_VOICE") or TTS_VOICE).strip() or TTS_VOICE
+        rekha = (os.environ.get("TTS_VOICE_REKHA") or default).strip() or default
+        jarvis = (os.environ.get("TTS_VOICE_JARVIS") or default).strip() or default
+        return rekha, jarvis
+    if _use_kokoro():
+        default = (os.environ.get("KOKORO_VOICE") or TTS_VOICE).strip() or TTS_VOICE
+        rekha = (os.environ.get("TTS_VOICE_REKHA") or default).strip() or default
+        jarvis = (os.environ.get("TTS_VOICE_JARVIS") or default).strip() or default
+        return rekha, jarvis
+    rekha = (os.environ.get("TTS_VOICE_REKHA") or TTS_VOICE).strip() or TTS_VOICE
+    jarvis = (os.environ.get("TTS_VOICE_JARVIS") or TTS_VOICE).strip() or TTS_VOICE
+    return rekha, jarvis
+
+
+def active_tts_voice() -> str:
+    """
+    Voice for this turn from the last wake word.
+
+    Sarvam: Rekha → Priya, Jarvis → Shubh.
+    Piper: Rekha → en_US-lessac-medium, Jarvis → en_GB-alan-medium.
+    Kokoro: ``KOKORO_VOICE`` (both wakes) unless TTS_VOICE_JARVIS / TTS_VOICE_REKHA.
+    Piper: ``PIPER_VOICE`` the same way.
+
+    Override with TTS_VOICE_REKHA / TTS_VOICE_JARVIS (or SARVAM_TTS_VOICE_*).
+    Falls back to TTS_VOICE when no wake has fired yet.
+    """
+    blob = _wake_blob()
+    rekha, jarvis = _wake_voice_defaults()
     if "rekha" in blob:
-        return (os.environ.get("TTS_VOICE_REKHA") or TTS_VOICE).strip() or TTS_VOICE
+        return rekha
     if "jarvis" in blob:
-        return (os.environ.get("TTS_VOICE_JARVIS") or TTS_VOICE).strip() or TTS_VOICE
+        return jarvis
     return TTS_VOICE
 
 
@@ -163,27 +196,21 @@ def synthesize(client: OpenAI, text: str, voice: str | None = None) -> bytes:
         voice = active_tts_voice()
 
     if _use_sarvam():
-        from sarvam_tts import synthesize_wav
+        from .sarvam import synthesize_wav
 
         return synthesize_wav(text, speaker=voice)
+    if _use_piper():
+        from .piper import synthesize_wav
 
-    try:
-        speech = client.audio.speech.create(
-            model=TTS_MODEL,
-            voice=voice,
-            input=text,
-            instructions=TTS_INSTRUCTIONS,
-            response_format="wav",
-        )
-    except Exception:
-        speech = client.audio.speech.create(
-            model=TTS_FALLBACK_MODEL,
-            voice=TTS_FALLBACK_VOICE,
-            input=text,
-            response_format="wav",
-        )
+        return synthesize_wav(text, voice=voice)
+    if _use_kokoro():
+        from .kokoro import synthesize_wav
 
-    return speech.content
+        return synthesize_wav(text, voice=voice)
+
+    from .openai import synthesize_wav as openai_synthesize_wav
+
+    return openai_synthesize_wav(client, text, voice)
 
 
 def _wav_to_float_audio(wav_bytes: bytes):

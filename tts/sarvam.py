@@ -57,7 +57,7 @@ def synthesize_wav(text: str, *, speaker: str | None = None) -> bytes:
     if not text:
         raise ValueError("Nothing to speak.")
 
-    from sarvam_stt import get_client
+    from stt.sarvam import get_client
 
     client = get_client()
     model = SARVAM_TTS_MODEL

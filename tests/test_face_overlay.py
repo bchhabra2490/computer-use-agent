@@ -44,7 +44,18 @@ class FaceMoodTests(unittest.TestCase):
 
     def test_listen_on_wake(self) -> None:
         self.assertEqual(face_mood_for_state("listening"), "listen")
-        self.assertEqual(face_mood_for_state("ask"), "listen")
+
+    def test_ask_user_is_unsure(self) -> None:
+        self.assertEqual(face_mood_for_state("ask"), "unsure")
+        self.assertEqual(face_mood_for_state("ask_user"), "unsure")
+        self.assertEqual(
+            face_mood_for_state("ask", {"tts_playing": True}),
+            "unsure",
+        )
+        self.assertEqual(
+            face_mood_for_state("ask", {"stt_active": True}),
+            "unsure",
+        )
 
     def test_speak_and_think(self) -> None:
         self.assertEqual(face_mood_for_state("speaking"), "speak")
@@ -105,6 +116,12 @@ class BlobatarStyleTests(unittest.TestCase):
         self.assertEqual(pose["left_tilt"], pose["right_tilt"])
         self.assertGreater(pose["eye_h"], mood_eye_pose("listen", 1.0)["eye_h"])
 
+    def test_unsure_squeezes_one_eye(self) -> None:
+        pose = mood_eye_pose("unsure", 0.0)
+        self.assertLess(pose["right_eye_h"], pose["left_eye_h"])
+        self.assertNotAlmostEqual(pose["left_tilt"], pose["right_tilt"], places=4)
+        self.assertLess(abs(pose["body_dy"]), abs(mood_eye_pose("sleep", 0.0)["body_dy"]))
+
     def test_blob_outline_is_closed_loop(self) -> None:
         pts = blob_outline_points(0.0, 0.0, 40.0, 36.0)
         self.assertEqual(len(pts), 8)
@@ -118,7 +135,20 @@ class BlobatarPresetTests(unittest.TestCase):
     def test_resolve_aliases(self) -> None:
         self.assertEqual(resolve_blobatar("drop").id, "droplet")
         self.assertEqual(resolve_blobatar("amber").id, "sun")
-        self.assertIsNone(resolve_blobatar("nope"))
+        self.assertIsNone(resolve_blobatar(""))
+        self.assertIsNone(resolve_blobatar("nope/slash"))
+
+    def test_any_name_hashes_stably(self) -> None:
+        a = resolve_blobatar("jarvis")
+        b = resolve_blobatar("JARVIS")
+        assert a is not None and b is not None
+        self.assertEqual(a.id, "jarvis")
+        self.assertEqual(a.hue, b.hue)
+        self.assertEqual(a.shape, b.shape)
+        self.assertTrue(a.blurb.startswith("hashed "))
+        other = resolve_blobatar("jarvus")
+        assert other is not None
+        self.assertNotEqual((a.hue, a.blurb), (other.hue, other.blurb))
 
     def test_presets_differ_in_hue_and_shape(self) -> None:
         hues = {resolve_blobatar(n).hue for n in blobatar_ids()}
@@ -129,6 +159,11 @@ class BlobatarPresetTests(unittest.TestCase):
     def test_status_snapshot_selects_preset(self) -> None:
         spec = current_blobatar({"face_preset": "cloud"})
         self.assertEqual(spec.id, "cloud")
+
+    def test_status_snapshot_accepts_hashed_name(self) -> None:
+        spec = current_blobatar({"face_preset": "Jarvis"})
+        self.assertEqual(spec.id, "jarvis")
+        self.assertTrue(spec.blurb.startswith("hashed "))
 
     def test_set_blobatar_writes_file(self) -> None:
         from pathlib import Path
@@ -144,6 +179,20 @@ class BlobatarPresetTests(unittest.TestCase):
             self.assertEqual(spec.id, "sun")
             self.assertEqual(path.read_text(encoding="utf-8").strip(), "sun")
             persist.assert_called_once_with("sun")
+
+    def test_set_blobatar_accepts_any_seed(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "face_preset"
+            with (
+                patch("face_overlay.PRESET_PATH", path),
+                patch("app_status.set_face_preset") as persist,
+            ):
+                spec = set_blobatar("Rekha")
+            self.assertEqual(spec.id, "rekha")
+            self.assertEqual(path.read_text(encoding="utf-8").strip(), "rekha")
+            persist.assert_called_once_with("rekha")
 
 
 class FaceVisibilityTests(unittest.TestCase):

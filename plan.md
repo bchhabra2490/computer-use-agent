@@ -8,16 +8,16 @@ Follow-on tracks. The voice loop (wake → STT → orchestrator → computer age
 
 Cloud providers are already switched by env (`STT_PROVIDER`, `TTS_PROVIDER`, `ORCHESTRATOR_MODEL`). Add a **local** implementation behind the same functions so the orchestrator and agent do not care where inference runs.
 
-**STT** (`stt.py` / `listen_for_utterance`). Same contract: mic PCM in, transcript out. Local options: Whisper.cpp / faster-whisper, or a small streaming model. Keep Sarvam/OpenAI as other providers. Idle / Send / over-and-out stay in the capture loop, not in the model.
+**STT** (`stt/` / `listen_for_utterance`). Same contract: mic PCM in, transcript out. **Shipped:** `STT_PROVIDER=whisperflow` (`stt/whisperflow.py`) — mlx-whisper on Apple Silicon, faster-whisper fallback, or `WHISPERFLOW_URL`. Keep Sarvam/OpenAI as other providers (`stt/openai.py`, `stt/sarvam.py`). Idle / Send / over-and-out stay in the capture loop, not in the model.
 
-**TTS** (`tts.py` / `synthesize` → WAV). Same contract: text in, WAV out. Local options: Piper, Kokoro, or MLX speech. Keep wake-based speaker mapping (Jarvis → Shubh, Rekha → Priya) as a *voice name* the adapter resolves (cloud speaker vs local voice file).
+**TTS** (`tts/` / `synthesize` → WAV). Same contract: text in, WAV out. **Shipped:** `TTS_PROVIDER=piper` (`tts/piper.py`, CPU ONNX) and `TTS_PROVIDER=kokoro` (`tts/kokoro.py`, mlx-audio or kokoro-onnx). Clause streaming still goes through `tts/low_latency.py`. Keep wake-based speaker mapping (Jarvis / Rekha) as a *voice name* the adapter resolves. Cloud: `tts/openai.py`, `tts/sarvam.py`.
 
 **LLM** (orchestrator + computer-use + memory captions).
 
 - Orchestrator: OpenAI-compatible HTTP (`localhost:11434`, LM Studio, vLLM, MLX) so tool calling stays the same.
 - Computer-use: harder — today’s path is OpenAI’s `computer` tool. Local CU needs either a CU-capable cloud model still, or a thinner loop (screenshot → local VLM → `DesktopController` actions). Ship the adapter interface first; local CU can lag STT/TTS/orchestrator.
 
-**Config sketch.** `STT_PROVIDER=local`, `TTS_PROVIDER=local`, `LLM_PROVIDER=local` plus endpoint/model env vars. One adapter module per modality (`local_stt.py`, `local_tts.py`, `local_llm.py`) so cloud code paths stay untouched.
+**Config sketch.** `STT_PROVIDER=local`, `TTS_PROVIDER=local`, `LLM_PROVIDER=local` plus endpoint/model env vars. One adapter module per provider (`stt/local.py`, `tts/local.py`, `local_llm.py`) so cloud code paths stay untouched.
 
 ## 2. Virtual layer (don’t take over mouse and keyboard)
 
@@ -98,15 +98,19 @@ Surveyed: [e2b-dev/open-computer-use](https://github.com/e2b-dev/open-computer-u
 
 ### What we should steal
 
-| Idea | From | Why it helps us |
-|------|------|-----------------|
-| Isolated GUI guest, host pointer free | E2B, trycua | §2 — prefer **local VM + VNC**, not E2B cloud RTT |
-| Screenshot downscale / token cap | OOTB | Every CU step ships an image; smaller image = faster `computer` calls |
-| Cap image turns in the trajectory | Agent S | Don’t resend 20 full-res screenshots |
-| Code/script instead of GUI when possible | Agent S `call_code_agent`, E2B shell | Files, git, EasyEDA/KiCad APIs — 0 screenshots |
-| Experience memory so we don’t re-explore | Agent S narrative/episodic, AWM | **Recipes** + skills for repeatable prefixes; expand coverage |
-| AX / named UI before pixels | Fazm, Terminator, our `read_ui_text` | Grounding VLM is a whole extra inference |
-| Fast cheap model for routing only | OOTB planner+actor, our evaluator | Keep one CU model; use a small model to pick skill / skip CU |
+
+| Idea                                     | From                                 | Why it helps us                                                       |
+| ---------------------------------------- | ------------------------------------ | --------------------------------------------------------------------- |
+| Isolated GUI guest, host pointer free    | E2B, trycua                          | §2 — prefer **local VM + VNC**, not E2B cloud RTT                     |
+| Screenshot downscale / token cap         | OOTB                                 | Every CU step ships an image; smaller image = faster `computer` calls |
+| Cap image turns in the trajectory        | Agent S                              | Don’t resend 20 full-res screenshots                                  |
+| Code/script instead of GUI when possible | Agent S `call_code_agent`, E2B shell | Files, git, EasyEDA/KiCad APIs — 0 screenshots                        |
+| Experience memory so we don’t re-explore | Agent S narrative/episodic, AWM      | **Recipes** + skills for repeatable prefixes; expand coverage         |
+| AX / named UI before pixels              | Fazm, Terminator, our `read_ui_text` | Grounding VLM is a whole extra inference                              |
+| Fast cheap model for routing only        | OOTB planner+actor, our evaluator    | Keep one CU model; use a small model to pick skill / skip CU          |
+
+
+
 
 ### What we should not copy (latency)
 
@@ -115,6 +119,8 @@ Surveyed: [e2b-dev/open-computer-use](https://github.com/e2b-dev/open-computer-u
 - **Behavior Best-of-N / reflection every turn.** Fine for OSWorld overnight; not for “Hey Jarvis, open Chrome.” Reflect only on **stuck** (evaluator already coaches).
 - **Cloud sandbox as the default path.** Extra screenshot upload + input inject latency. Local guest on the LAN (or same machine) is the low-latency virtual layer.
 - **Gradio/demo loops** that wait for a full screenshot round-trip before the next keystroke. Batch type/hotkey; don’t screenshot between every character.
+
+
 
 ### Latency plan (remaining)
 
@@ -151,7 +157,7 @@ Reuse the existing click-through overlay window class. Add a drawn cursor/label 
 
 ## 7. macOS `.app` + DMG (ship as an Apple application)
 
-Today the product is a **Python daemon** (`cua start` → `orchestrator.py`) with mic, Accessibility, Screen Recording, tray, skills, and `.env` secrets — not a normal GUI app. Goal: double-clickable **`Jarvis.app`** (or `CUA.app`) and an installer **`Jarvis.dmg`** that drags into `/Applications`, without forcing users to clone the repo and activate a venv.
+Today the product is a **Python daemon** (`cua start` → `orchestrator.py`) with mic, Accessibility, Screen Recording, tray, skills, and `.env` secrets — not a normal GUI app. Goal: double-clickable `Jarvis.app` (or `CUA.app`) and an installer `Jarvis.dmg` that drags into `/Applications`, without forcing users to clone the repo and activate a venv.
 
 **What ships.**
 
@@ -164,7 +170,7 @@ Jarvis.app/Contents/
 
 DMG wraps that `.app` with the usual “drag to Applications” layout (`create-dmg` or `hdiutil`).
 
-**Preferred build path: PyInstaller → `.app` → DMG.**
+**Preferred build path: PyInstaller →** `.app` **→ DMG.**
 
 1. Entry point = `cua start` (or a tiny `app_main.py` that starts orchestrator + tray), `--windowed` so no Terminal window.
 2. Bundle `skills/`, `recipes/`, `models/`, `not_to_do.md` via `--add-data`. Expect hidden-import fights for `pyautogui`, `sounddevice`, ONNX wake models, ZeroMQ — use `--collect-all` where needed.
@@ -210,7 +216,7 @@ Ship a **second product slice** for (a) hosts whose model/API has no `computer` 
 1. **Mode flag.** `COMPUTER_USE=0` or `CUA_MODE=voice` (env + `cua start --voice-only`). Single source of truth in `tools_registry.orchestrator_tools()` — omit `START_TASK_TOOL` and agent-only paths in `orchestrator.py` (`_launch_agent_job`, `_supervise_agent`, bus to agent).
 2. **Prompt.** Voice-only variant of `orchestrator_prompts.py`: never mention `start_task`; on “open Chrome / click / play music” → `give_response_to_user` explaining the limit, or `mcp_call` if an API can do it; never pretend desktop work ran.
 3. **Packaging.** Separate artifact: `Jarvis Voice.app` / `cua-voice` PyInstaller spec — entry `orchestrator.py --voice-only`, exclude `agent.py`, `actions.py`, `recipes` shell steps, heavy CU deps. Document in README as **Voice** vs **Desktop** SKU.
-4. **Model choice.** Orchestrator model only (`gpt-5-mini`, Electron, local LLM via §1). No `AGENT_MODEL_*` / difficulty router / computer tool registration.
+4. **Model choice.** Orchestrator model only (`gpt-5-mini`, Electron, local LLM via §1). No `AGENT_MODEL_`* / difficulty router / computer tool registration.
 5. **Permissions copy.** First-run sheet: **Microphone** required; Screen Recording / Accessibility **not** requested unless user toggles “Read my screen” or “List open apps” in tray settings.
 
 **Relationship to §2 virtual layer.** Virtual CU is for users who *want* automation in a guest. Voice-only is for users who *reject* host control entirely — do not conflate; optional future “remote CU you opt into” is a third SKU.

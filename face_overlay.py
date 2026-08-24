@@ -4,12 +4,17 @@ Soft geometric body + two capsule eyes (no mouth), in the spirit of
 https://blobatar.dev/ — a pebble silhouette, high-contrast capsules, and
 poses that only move parts the blob already has.
 
+Any string is a blobatar. ``pebble`` / ``droplet`` / ``cloud`` / ``sun`` are
+curated shortcuts; every other name hashes to a stable silhouette (same
+shape bands as blobatar gen2). Switch with ``cua face NAME``.
+
 Click-through NSPanel with ``NSWindowSharingNone`` so it stays out of
 screenshots when possible; ``pause_overlay_for_capture`` also hides it.
 
 Moods (from ``status.json`` state / live TTS):
   sleep   — waiting / idle (sleepy lids, sunk body)
-  listen  — listening / ask (open capsules, blink + glance)
+  listen  — listening (open capsules, blink + glance)
+  unsure  — ask_user (one eye squeezed, pair barely moved)
   speak   — TTS playing (tall happy capsules, bounce)
   think   — thinking / agent (seesaw eye heights)
 """
@@ -19,7 +24,9 @@ from __future__ import annotations
 import math
 import os
 import time
+import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from app_status import RUNTIME_DIR, read_status
@@ -51,6 +58,8 @@ class BlobatarSpec:
     extras: tuple[tuple[float, float, float, float], ...] = ()
     pair_dx: float = 0.30
     pair_dy: float = 0.0
+    shape: str = "organic"  # organic | round | boxy | capsule
+    rot: float = 0.0
 
 
 BLOBATARS: dict[str, BlobatarSpec] = {
@@ -132,18 +141,227 @@ _PRESET_ALIASES = {
     "amber": "sun",
 }
 
+# Blobatar gen2 shape bands (https://blobatar.dev) — round/organic everyday, louder shapes rarer.
+_SHAPE_BANDS: tuple[tuple[str, float], ...] = (
+    ("round", 0.22),
+    ("organic", 0.48),
+    ("boxy", 0.6),
+    ("capsule", 0.7),
+    ("nub", 0.79),
+    ("cloud", 0.86),
+    ("droplet", 0.915),
+    ("hexagon", 0.95),
+    ("sun", 0.98),
+    ("triangle", 1.0),
+)
+_SHAPE_CORE = {
+    "round": 1.0,
+    "organic": 0.98,
+    "boxy": 0.86,
+    "capsule": 1.02,
+    "nub": 0.88,
+    "cloud": 0.78,
+    "droplet": 0.78,
+    "hexagon": 1.05,
+    "sun": 0.70,
+    "triangle": 1.15,
+}
+_MAX_SEED_LEN = 128
+_RESERVED_FACE_ARGS = frozenset({"list", "ls", "status"})
+
 
 def blobatar_ids() -> tuple[str, ...]:
     return tuple(BLOBATARS)
 
 
+def _normalize_seed(name: str) -> str:
+    return unicodedata.normalize("NFC", str(name)).strip().lower()
+
+
+def _valid_seed(name: str) -> bool:
+    if not name or len(name) > _MAX_SEED_LEN:
+        return False
+    if any(ch in name for ch in ("\n", "\r", "\0", "/", "\\")):
+        return False
+    return True
+
+
+def _i32(n: int) -> int:
+    n &= 0xFFFFFFFF
+    return n - 0x100000000 if n >= 0x80000000 else n
+
+
+def _u32(n: int) -> int:
+    return n & 0xFFFFFFFF
+
+
+def _imul(a: int, b: int) -> int:
+    return _i32(a * b)
+
+
+def _feed(h: int, data: bytes) -> int:
+    for byte in data:
+        h = _imul(h ^ byte, 3432918353)
+        h = _i32((h << 13) | (_u32(h) >> 19))
+    return h
+
+
+def _finalize(h: int) -> int:
+    h = _imul(h ^ (_u32(h) >> 16), 2246822507)
+    h = _imul(h ^ (_u32(h) >> 13), 3266489909)
+    return _u32(h ^ (_u32(h) >> 16))
+
+
+def _seed_state(name: str) -> int:
+    return _feed(1779033703 ^ len(name), name.encode("utf-8"))
+
+
+def _trait(state: int, key: str) -> float:
+    return _finalize(_feed(_feed(state, b"\xff"), key.encode("utf-8"))) / 4294967296.0
+
+
+def _num(state: int, key: str, lo: float, hi: float) -> float:
+    return lo + _trait(state, key) * (hi - lo)
+
+
+def _int(state: int, key: str, lo: int, hi: int) -> int:
+    return lo + int(_trait(state, key) * (hi - lo + 1))
+
+
+def _jitter(state: int, key: str, amount: float) -> float:
+    return (_trait(state, key) * 2.0 - 1.0) * amount
+
+
+def _pick_shape(value: float) -> str:
+    for name, up_to in _SHAPE_BANDS:
+        if value < up_to:
+            return name
+    return "triangle"
+
+
+def _extras_circle(dx: float, dy: float, radius: float) -> tuple[float, float, float, float]:
+    span = max(0.16, radius * 2.0)
+    return (dx, dy, span, span)
+
+
+@lru_cache(maxsize=64)
+def _hashed_blobatar(name: str) -> BlobatarSpec:
+    """Deterministic silhouette from any seed, using blobatar gen2 bands."""
+    state = _seed_state(name)
+    kind = _pick_shape(_trait(state, "shape"))
+    hue = _trait(state, "hue") * 360.0
+    sat = _num(state, "tone", 0.40, 0.62)
+    core = _SHAPE_CORE[kind]
+    r = 0.36 * core
+    ratio = _num(state, "body.ratio", 0.92, 1.08)
+    rx, ry = r, r * ratio
+    perturb: tuple[float, ...] = _BLOB_PERTURB
+    extras: tuple[tuple[float, float, float, float], ...] = ()
+    pair_dx = 0.24 + _trait(state, "eye.gap") * 0.12
+    pair_dy = _num(state, "gaze.y", -0.08, 0.06)
+    rot = 0.0
+    draw = "organic"
+
+    if kind == "round":
+        draw = "round"
+        perturb = (0.0,) * 8
+    elif kind == "organic":
+        n = _int(state, "body.pts", 6, 8)
+        perturb = tuple(_jitter(state, f"body.r{i}", 0.16) for i in range(n))
+    elif kind == "boxy":
+        draw = "boxy"
+        rot = _num(state, "body.rot", -20.0, 20.0)
+        perturb = (0.02, -0.01, 0.02, -0.01, 0.02, -0.01, 0.02, -0.01)
+    elif kind == "capsule":
+        draw = "capsule"
+        ry *= _num(state, "capsule.squat", 0.55, 0.68)
+        perturb = (0.0,) * 8
+        pair_dy = 0.0
+    elif kind == "nub":
+        draw = "round"
+        count = _int(state, "nub.n", 1, 2)
+        extras = tuple(
+            _extras_circle(
+                math.cos(_num(state, f"nub.a{i}", 0.0, 2.0 * math.pi)) * 0.88,
+                math.sin(_num(state, f"nub.a{i}", 0.0, 2.0 * math.pi)) * 0.88,
+                _num(state, f"nub.r{i}", 0.24, 0.40),
+            )
+            for i in range(count)
+        )
+    elif kind == "cloud":
+        n = _int(state, "body.pts", 6, 8)
+        perturb = tuple(_jitter(state, f"body.r{i}", 0.10) for i in range(n))
+        count = _int(state, "cloud.n", 4, 6)
+        extras = tuple(
+            _extras_circle(
+                math.cos(math.pi + (math.pi * (i + 0.5)) / count) * 0.80,
+                math.sin(math.pi + (math.pi * (i + 0.5)) / count) * 0.50,
+                _num(state, f"cloud.r{i}", 0.44, 0.62),
+            )
+            for i in range(count)
+        )
+        pair_dy = 0.04
+    elif kind == "droplet":
+        ry *= 1.12
+        rx *= 0.88
+        perturb = (0.04, -0.06, 0.02, 0.08, 0.22, 0.08, 0.02, -0.06)
+        extras = ((0.0, -0.62, 0.42, 0.36),)
+        pair_dy = -0.06
+    elif kind == "hexagon":
+        perturb = tuple(_jitter(state, f"body.r{i}", 0.04) for i in range(6))
+        rot = _num(state, "body.rot", -12.0, 12.0)
+        pair_dy = 0.02
+    elif kind == "sun":
+        draw = "round"
+        rx = ry = 0.30 * core / 0.70
+        count = _int(state, "sun.n", 6, 9)
+        dist = _num(state, "sun.dist", 1.0, 1.08)
+        pr = _num(state, "sun.r", 0.20, 0.26)
+        off = _num(state, "sun.rot", 0.0, 2.0 * math.pi)
+        extras = tuple(
+            _extras_circle(
+                dist * math.cos(off + 2.0 * math.pi * i / count),
+                dist * math.sin(off + 2.0 * math.pi * i / count),
+                pr,
+            )
+            for i in range(count)
+        )
+        pair_dy = -0.02
+    else:  # triangle
+        perturb = tuple(_jitter(state, f"body.r{i}", 0.05) for i in range(3))
+        rot = _num(state, "body.rot", -5.0, 5.0)
+        pair_dx = 0.22
+        pair_dy = 0.10
+
+    return BlobatarSpec(
+        id=name,
+        title=name,
+        blurb=f"hashed {kind}",
+        hue=hue,
+        sat=sat,
+        rx=rx,
+        ry=ry,
+        perturb=perturb,
+        extras=extras,
+        pair_dx=pair_dx,
+        pair_dy=pair_dy,
+        shape=draw,
+        rot=rot,
+    )
+
+
 def resolve_blobatar(name: str | None) -> BlobatarSpec | None:
     if not name:
         return None
-    key = _PRESET_ALIASES.get(str(name).strip().lower())
-    if key is None:
+    key = _normalize_seed(name)
+    if not key:
         return None
-    return BLOBATARS[key]
+    alias = _PRESET_ALIASES.get(key)
+    if alias is not None:
+        return BLOBATARS[alias]
+    if not _valid_seed(key):
+        return None
+    return _hashed_blobatar(key)
 
 
 def _read_preset_file() -> str | None:
@@ -183,8 +401,7 @@ def current_blobatar(data: dict[str, Any] | None = None) -> BlobatarSpec:
 def set_blobatar(name: str) -> BlobatarSpec:
     spec = resolve_blobatar(name)
     if spec is None:
-        known = ", ".join(blobatar_ids())
-        raise ValueError(f"unknown blobatar {name!r} (try {known})")
+        raise ValueError(f"invalid blobatar name {name!r}")
     PRESET_PATH.parent.mkdir(parents=True, exist_ok=True)
     PRESET_PATH.write_text(spec.id + "\n", encoding="utf-8")
     try:
@@ -197,13 +414,17 @@ def set_blobatar(name: str) -> BlobatarSpec:
 
 
 def format_blobatar_list() -> str:
-    current = current_blobatar().id
+    current = current_blobatar()
     lines = ["Blobatars (switch with: cua face NAME)", ""]
     for spec in BLOBATARS.values():
-        mark = "*" if spec.id == current else " "
+        mark = "*" if spec.id == current.id else " "
         lines.append(f"  {mark} {spec.id:<8}  {spec.blurb}")
     lines.append("")
-    lines.append(f"current: {current}")
+    lines.append("any other name hashes to a unique blobatar (same seed → same face)")
+    if current.id not in BLOBATARS:
+        lines.append(f"  * {current.id:<8}  {current.blurb}")
+    lines.append("")
+    lines.append(f"current: {current.id}")
     return "\n".join(lines)
 
 
@@ -211,11 +432,11 @@ def cmd_face(parts: list[str] | None = None) -> int:
     args = [str(p).strip() for p in (parts or []) if str(p).strip()]
     if args and args[0] == "set":
         args = args[1:]
-    if not args or args[0] in {"list", "ls", "status"}:
+    if not args or args[0] in _RESERVED_FACE_ARGS:
         print(format_blobatar_list())
         return 0
     try:
-        spec = set_blobatar(args[0])
+        spec = set_blobatar(" ".join(args))
     except ValueError as e:
         print(e)
         print()
@@ -227,7 +448,8 @@ def cmd_face(parts: list[str] | None = None) -> int:
 
 
 _SLEEP_STATES = frozenset({"idle", "ready", "waiting", "done", "error"})
-_LISTEN_STATES = frozenset({"listening", "ask"})
+_LISTEN_STATES = frozenset({"listening"})
+_ASK_STATES = frozenset({"ask"})
 _SPEAK_STATES = frozenset({"speaking"})
 _THINK_STATES = frozenset({"thinking", "agent", "running"})
 
@@ -261,16 +483,19 @@ def face_mood_for_state(
     Prefer live TTS playback over session phase — async speak_later / streaming
     TTS often leaves the session on waiting while audio is still playing.
     Mic capture (``stt_active``, including Fn dictation) maps to listen.
+    ``ask`` / ``ask_user`` stays unsure for the whole question, including TTS.
     """
     snap = data if data is not None else None
+    key = (state or "idle").strip().lower()
+    if key in _ASK_STATES or key.startswith("ask"):
+        return "unsure"
     if snap is not None and snap.get("tts_playing"):
         return "speak"
     if snap is not None and snap.get("stt_active"):
         return "listen"
-    key = (state or "idle").strip().lower()
     if key in _SPEAK_STATES or key.startswith("speaking"):
         return "speak"
-    if key in _LISTEN_STATES or key.startswith("listen") or key.startswith("ask"):
+    if key in _LISTEN_STATES or key.startswith("listen"):
         return "listen"
     if key in _THINK_STATES or key.startswith("think") or key.startswith("agent"):
         return "think"
@@ -372,6 +597,11 @@ def mood_eye_pose(mood: str, t: float) -> dict[str, float]:
     hue_shift = 0.0
     light = 0.58
 
+    left_eye_w = eye_w
+    left_eye_h = eye_h
+    right_eye_w = eye_w
+    right_eye_h = eye_h
+
     if mood == "sleep":
         body_dy = 5.0 + 1.1 * math.sin(t * 0.85)
         body_scale = 0.97 + 0.018 * math.sin(t * 1.05)
@@ -389,6 +619,23 @@ def mood_eye_pose(mood: str, t: float) -> dict[str, float]:
         eye_h = 0.22
         pair_dy = -0.07
         glance = 2.4 * math.sin(t * 0.42)
+    elif mood == "unsure":
+        # blobatar unsure: one eye squeezed, the pair barely moved.
+        body_dy = 0.6 * math.sin(t * 1.05)
+        body_scale = 1.0 + 0.012 * math.sin(t * 1.35)
+        pair_dx = 0.31
+        pair_dy = -0.02
+        left_tilt = 4.0
+        right_tilt = -22.0
+        left_dy = -0.02
+        right_dy = 0.01
+        left_eye_w = 0.114
+        left_eye_h = 0.204
+        right_eye_w = 0.143
+        right_eye_h = 0.116
+        eye_w = left_eye_w
+        eye_h = left_eye_h
+        light = 0.56
     elif mood == "speak":
         pulse = 0.05 * abs(math.sin(t * 9.5))
         eye_w = 0.09
@@ -410,12 +657,23 @@ def mood_eye_pose(mood: str, t: float) -> dict[str, float]:
         glance = 1.4
         hue_shift = -12.0
 
-    eye_h *= 1.0 - 0.90 * blink
+    if mood != "unsure":
+        left_eye_w = right_eye_w = eye_w
+        left_eye_h = right_eye_h = eye_h
+
+    lid = 1.0 - 0.90 * blink
+    eye_h *= lid
+    left_eye_h *= lid
+    right_eye_h *= lid
     return {
         "body_dy": body_dy,
         "body_scale": body_scale,
         "eye_w": eye_w,
         "eye_h": max(0.03, eye_h),
+        "left_eye_w": left_eye_w,
+        "left_eye_h": max(0.03, left_eye_h),
+        "right_eye_w": right_eye_w,
+        "right_eye_h": max(0.03, right_eye_h),
         "pair_dx": pair_dx,
         "pair_dy": pair_dy,
         "left_dy": left_dy,
@@ -561,6 +819,40 @@ class FaceOverlay:
         y = vis.origin.y + vis.size.height - height - float(FACE_MARGIN_TOP)
         return NSMakeRect(x, y, width, height)
 
+    def _body_path(self, cx: float, cy: float, rx: float, ry: float, spec: BlobatarSpec):
+        NSBezierPath = self._NSBezierPath
+        NSMakeRect = self._NSMakeRect
+        kind = spec.shape
+        if kind == "round":
+            path = NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(cx - rx, cy - ry, rx * 2.0, ry * 2.0)
+            )
+        elif kind in {"boxy", "capsule"}:
+            rad = min(rx, ry) * (0.95 if kind == "capsule" else 0.28)
+            path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(cx - rx, cy - ry, rx * 2.0, ry * 2.0),
+                rad,
+                rad,
+            )
+        else:
+            path = self._closed_spline(
+                blob_outline_points(
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    n=max(3, len(spec.perturb)),
+                    perturb=spec.perturb,
+                )
+            )
+        if abs(spec.rot) > 0.2:
+            xf = self._NSAffineTransform.transform()
+            xf.translateXBy_yBy_(cx, cy)
+            xf.rotateByDegrees_(spec.rot)
+            xf.translateXBy_yBy_(-cx, -cy)
+            path.transformUsingAffineTransform_(xf)
+        return path
+
     def _closed_spline(self, points: list[tuple[float, float]]):
         NSBezierPath = self._NSBezierPath
         n = len(points)
@@ -613,9 +905,7 @@ class FaceOverlay:
         w = float(bounds.size.width)
         h = float(bounds.size.height)
         t = time.monotonic() - self._t0
-        spec = current_blobatar()
-        if self._preset_id in BLOBATARS:
-            spec = BLOBATARS[self._preset_id]
+        spec = resolve_blobatar(self._preset_id) or current_blobatar()
         pose = mood_eye_pose(self._mood, t)
 
         cx = w / 2.0
@@ -645,22 +935,24 @@ class FaceOverlay:
         NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.10, 0.14, 0.22).setFill()
         shadow.fill()
 
-        body = self._closed_spline(
-            blob_outline_points(cx, cy, rx, ry, perturb=spec.perturb)
-        )
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(br, bg, bb, 1.0).setFill()
+        fill = NSColor.colorWithCalibratedRed_green_blue_alpha_(br, bg, bb, 1.0)
+        body = self._body_path(cx, cy, rx, ry, spec)
+        fill.setFill()
         body.fill()
 
+        rot = spec.rot
         for dx, dy, ew, eh in spec.extras:
+            ex = cx + dx * rx
+            ey = cy + dy * ry
+            if abs(rot) > 0.2:
+                ang = math.radians(rot)
+                ox, oy = ex - cx, ey - cy
+                ex = cx + ox * math.cos(ang) - oy * math.sin(ang)
+                ey = cy + ox * math.sin(ang) + oy * math.cos(ang)
             extra = NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(
-                    cx + dx * rx - (ew * rx) / 2.0,
-                    cy + dy * ry - (eh * ry) / 2.0,
-                    ew * rx,
-                    eh * ry,
-                )
+                NSMakeRect(ex - (ew * rx) / 2.0, ey - (eh * ry) / 2.0, ew * rx, eh * ry)
             )
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(br, bg, bb, 1.0).setFill()
+            fill.setFill()
             extra.fill()
 
         shine = NSBezierPath.bezierPathWithOvalInRect_(
@@ -670,18 +962,16 @@ class FaceOverlay:
         shine.fill()
 
         eye_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(er, eg, eb, 1.0)
-        hw = rx * pose["eye_w"]
-        hh = ry * pose["eye_h"]
         base_y = cy + ry * (pose["pair_dy"] + spec.pair_dy)
         glance = pose["glance"]
         pair_dx = pose["pair_dx"] + spec.pair_dx - 0.30
-        for side, tilt, extra_dy in (
-            (-1.0, pose["left_tilt"], pose["left_dy"]),
-            (1.0, pose["right_tilt"], pose["right_dy"]),
+        for side, tilt, extra_dy, ew, eh in (
+            (-1.0, pose["left_tilt"], pose["left_dy"], pose["left_eye_w"], pose["left_eye_h"]),
+            (1.0, pose["right_tilt"], pose["right_dy"], pose["right_eye_w"], pose["right_eye_h"]),
         ):
             ex = cx + side * rx * pair_dx + glance
             ey = base_y + extra_dy * ry
-            self._fill_capsule(ex, ey, hw, hh, tilt, eye_color)
+            self._fill_capsule(ex, ey, rx * ew, ry * eh, tilt, eye_color)
 
     def hide(self) -> None:
         if self.panel is not None:

@@ -117,7 +117,7 @@ from wake import (
 )
 
 try:
-    from low_latency_tts import LowLatencyTTS, decoded_message_prefix, extract_message_field
+    from tts.low_latency import LowLatencyTTS, decoded_message_prefix, extract_message_field
 except Exception:  # pragma: no cover - optional at import time
     LowLatencyTTS = None  # type: ignore[misc, assignment]
     decoded_message_prefix = None  # type: ignore[misc, assignment]
@@ -130,6 +130,77 @@ TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "no",
     "off",
 }
+
+_CREDIT_MARKERS = (
+    "no credits remaining",
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "insufficient_funds",
+    "billing_hard_limit",
+)
+_AUTH_MARKERS = (
+    "invalid_api_key",
+    "incorrect api key",
+    "invalid api key",
+    "authentication",
+)
+
+
+class LlmUnavailableError(RuntimeError):
+    """LLM call failed; speak it and return to the wake loop instead of crashing."""
+
+
+def _exception_blob(exc: BaseException) -> str:
+    parts = [type(exc).__name__, str(exc)]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(str(body))
+    for attr in ("code", "type", "message"):
+        val = getattr(exc, attr, None)
+        if val:
+            parts.append(str(val))
+    return " ".join(parts)
+
+
+def is_fatal_llm_error(exc: BaseException) -> bool:
+    """Quota / auth failures will also fail the non-streaming fallback."""
+    blob = _exception_blob(exc).lower()
+    if any(m in blob for m in _CREDIT_MARKERS + _AUTH_MARKERS):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status in {401, 403}:
+        return True
+    if status == 429 and any(m in blob for m in ("quota", "credit", "billing", "balance")):
+        return True
+    name = type(exc).__name__.lower()
+    if name in {"authenticationerror", "permissiondeniederror"}:
+        return True
+    if name == "ratelimiterror" and any(m in blob for m in _CREDIT_MARKERS + ("quota", "credit", "billing")):
+        return True
+    return False
+
+
+def llm_error_speech(exc: BaseException) -> str:
+    """Short spoken form of an OpenAI error (no URLs)."""
+    blob = _exception_blob(exc)
+    match = re.search(r"['\"]message['\"]\s*:\s*['\"]([^'\"]+)['\"]", blob)
+    if match:
+        msg = re.sub(r"https?://\S+", "", match.group(1)).strip()
+        msg = re.sub(r"\s+", " ", msg).strip(" .")
+        if msg:
+            return msg + "."
+    lower = blob.lower()
+    if any(m in lower for m in _CREDIT_MARKERS):
+        return "You have no credits remaining. Add credits to continue using the API."
+    if any(m in lower for m in _AUTH_MARKERS):
+        return "The OpenAI API key is invalid. Check your environment file."
+    brief = re.sub(r"https?://\S+", "", str(exc))
+    brief = re.sub(r"\s+", " ", brief).strip()
+    if len(brief) > 180:
+        brief = brief[:177].rstrip() + "…"
+    return f"I hit an OpenAI error. {brief}" if brief else "I hit an OpenAI error and could not complete that."
+
+
 _phone_photo_in_session = False
 
 
@@ -399,6 +470,23 @@ def _listen_for_answer(client: OpenAI) -> str:
         )
 
 
+def _announce_llm_failure(client: OpenAI, exc: BaseException) -> None:
+    """Speak the API error and stay in the wake loop."""
+    spoken = llm_error_speech(exc)
+    print(f"[orchestrator] {spoken}", flush=True)
+    try:
+        _speak(client, spoken)
+    except Exception as e:
+        print(f"[orchestrator] could not speak error ({e})", flush=True)
+
+
+def _sync_create_response(client: OpenAI, kwargs: dict[str, Any]):
+    try:
+        return client.responses.create(**kwargs)
+    except Exception as e:
+        raise LlmUnavailableError(llm_error_speech(e)) from e
+
+
 def _create_response(
     client: OpenAI,
     *,
@@ -410,17 +498,21 @@ def _create_response(
 
     When streaming TTS is enabled, partial ``give_response_to_user`` message
     arguments are fed into LowLatencyTTS as they arrive. Falls back to a
-    non-streaming create on error.
+    non-streaming create on error, except quota/auth failures which are spoken
+    instead of retried.
     """
     use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
     if not use_stream:
-        return client.responses.create(**kwargs)
+        return _sync_create_response(client, kwargs)
 
     try:
         stream = client.responses.create(**kwargs, stream=True)
     except Exception as e:
+        if is_fatal_llm_error(e):
+            print(f"[orchestrator] stream create failed ({e})", flush=True)
+            raise LlmUnavailableError(llm_error_speech(e)) from e
         print(f"[orchestrator] stream create failed ({e}); falling back", flush=True)
-        return client.responses.create(**kwargs)
+        return _sync_create_response(client, kwargs)
 
     response_id: str | None = None
     # item_id -> {name, call_id, arguments}
@@ -515,14 +607,17 @@ def _create_response(
             elif etype == "response.failed":
                 print(f"[orchestrator] stream failed: {event}", flush=True)
     except Exception as e:
-        print(f"[orchestrator] stream error ({e}); falling back", flush=True)
+        print(f"[orchestrator] stream error ({e})", flush=True)
         if response_id and llm_tts is not None:
             try:
                 # Do not flush partial speech — sync path will speak once.
                 llm_tts.abandon(response_id)
             except Exception:
                 pass
-        return client.responses.create(**kwargs)
+        if is_fatal_llm_error(e):
+            raise LlmUnavailableError(llm_error_speech(e)) from e
+        print("[orchestrator] falling back to non-streaming", flush=True)
+        return _sync_create_response(client, kwargs)
 
     if final_response is None:
         print("[orchestrator] stream ended without response.completed; falling back", flush=True)
@@ -531,7 +626,10 @@ def _create_response(
                 llm_tts.abandon(response_id)
             except Exception:
                 pass
-        return client.responses.create(**kwargs)
+        try:
+            return _sync_create_response(client, kwargs)
+        except LlmUnavailableError:
+            raise
 
     if response_id and llm_tts is not None:
         # Prefer message extracted during stream; else scan final output.
@@ -1784,6 +1882,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                             input=turn_input,
                         )
                     break
+                except LlmUnavailableError as e:
+                    _announce_llm_failure(client, e)
+                    response = None
+                    break
                 except Exception as e:
                     if overflow_attempt == 0 and is_context_overflow_error(e):
                         print(f"[orchestrator] context overflow ({e}); recovering once", flush=True)
@@ -1809,24 +1911,40 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                             desktop_screenshot_png=desktop.screenshot_png,
                         )
                         continue
-                    raise
+                    _announce_llm_failure(client, e)
+                    response = None
+                    break
             if response is None:
-                raise RuntimeError("Orchestrator response failed after overflow recovery")
+                print("[orchestrator] ready for next task.")
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
 
-            response, end_session, pending_fn_outputs = _process_response(
-                client,
-                response,
-                auto=auto,
-                max_steps=max_steps,
-                task_history=task_history,
-                publisher=publisher,
-                ask_bridge=ask_bridge,
-                llm_tts=llm_tts,
-                turn=turn,
-                user_said=utterance,
-                record_speaker=_record_speaker,
-                compact_state=compact_state,
-            )
+            try:
+                response, end_session, pending_fn_outputs = _process_response(
+                    client,
+                    response,
+                    auto=auto,
+                    max_steps=max_steps,
+                    task_history=task_history,
+                    publisher=publisher,
+                    ask_bridge=ask_bridge,
+                    llm_tts=llm_tts,
+                    turn=turn,
+                    user_said=utterance,
+                    record_speaker=_record_speaker,
+                    compact_state=compact_state,
+                )
+            except LlmUnavailableError as e:
+                _announce_llm_failure(client, e)
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
+            except Exception as e:
+                _announce_llm_failure(client, e)
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
             previous_id = response.id
             compact_state.record_turn(utterance, turn.as_text())
             emit("turn_end", lane="main", utterance=utterance[:160])
@@ -1886,6 +2004,32 @@ def main(argv: list[str] | None = None) -> None:
         run_orchestrator(auto=args.auto, max_steps=args.max_steps)
     except KeyboardInterrupt:
         print("\n[orchestrator] stopped.")
+        stop_phone_gateway()
+        stop_tray()
+        stop_dictation()
+        sys.exit(0)
+    except LlmUnavailableError as e:
+        print(f"[orchestrator] {e}", flush=True)
+        try:
+            from openai import OpenAI
+
+            _announce_llm_failure(OpenAI(), e)
+        except Exception as speak_err:
+            print(f"[orchestrator] could not speak error ({speak_err})", flush=True)
+        stop_phone_gateway()
+        stop_tray()
+        stop_dictation()
+        sys.exit(0)
+    except Exception as e:
+        if not is_fatal_llm_error(e):
+            raise
+        print(f"[orchestrator] {llm_error_speech(e)}", flush=True)
+        try:
+            from openai import OpenAI
+
+            _announce_llm_failure(OpenAI(), e)
+        except Exception as speak_err:
+            print(f"[orchestrator] could not speak error ({speak_err})", flush=True)
         stop_phone_gateway()
         stop_tray()
         stop_dictation()

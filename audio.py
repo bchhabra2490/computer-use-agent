@@ -1,6 +1,6 @@
 """Single owner for wake, STT, TTS, and barge-in.
 
-The capture implementations stay in ``wake.py`` / ``stt.py`` / ``tts.py``. This
+The capture implementations stay in ``wake.py`` / ``stt/`` / ``tts/``. This
 session decides who has the mic and projects phase onto ``Session``.
 """
 

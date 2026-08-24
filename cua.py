@@ -44,9 +44,7 @@ Blobatar face overlay::
 
     cua face
     cua face pebble
-    cua face droplet
-    cua face cloud
-    cua face sun
+    cua face jarvis
 """
 
 from __future__ import annotations
@@ -363,8 +361,8 @@ VOICE (foreground — same orchestrator, attached terminal)
 
   Configure in .env (see README “Voice configuration”):
     OPENAI_API_KEY          required
-    STT_PROVIDER=openai|sarvam
-    TTS_PROVIDER=openai|sarvam
+    STT_PROVIDER=openai|sarvam|whisperflow
+    TTS_PROVIDER=openai|sarvam|piper|kokoro
     WAKE_MODEL / WAKE_PHRASE / WAKE_MODE=model|phrase
     TTS_BARGE_IN=1          wake word interrupts speech
     TTS_CONFIRM_HEARD=1     speak “I heard: …” after each listen
@@ -390,12 +388,10 @@ DICTATION (hold Fn → paste speech into focused field; DICTATION=1 in .env)
   cua dictation stop
   cua dictation status
 
-FACE (blobatar overlay — pebble, droplet, cloud, sun)
+FACE (blobatar overlay — any name, or pebble / droplet / cloud / sun)
   cua face              List blobatars (* = current)
-  cua face pebble       Switch the live overlay
-  cua face droplet
-  cua face cloud
-  cua face sun
+  cua face pebble       Curated shortcut
+  cua face jarvis       Any other name hashes to a unique blobatar
 
 SKILLS (playbooks under skills/*/SKILL.md)
   cua skills condense [--name SKILL] [--force] [--dry-run]
@@ -561,12 +557,12 @@ def main(argv: list[str] | None = None) -> int:
     face_p = sub.add_parser(
         "face",
         aliases=["blobatar"],
-        help="Choose the blobatar face overlay (pebble, droplet, cloud, sun)",
+        help="Choose the blobatar face overlay (any name, or pebble/droplet/cloud/sun)",
     )
     face_p.add_argument(
         "name",
         nargs="*",
-        help="pebble | droplet | cloud | sun (omit to list)",
+        help="preset name, or any seed (omit to list)",
     )
 
     accept_p = obs_sub.add_parser(

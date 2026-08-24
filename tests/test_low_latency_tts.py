@@ -16,7 +16,7 @@ os.environ["TTS_CHUNK_MAX_CHARS"] = "100"
 os.environ["TTS_WARMUP"] = "0"
 os.environ["TTS_KEYBOARD_BARGE"] = "0"
 
-from low_latency_tts import (  # noqa: E402
+from tts.low_latency import (  # noqa: E402
     LowLatencyTTS,
     decoded_message_prefix,
     extract_message_field,
@@ -41,8 +41,8 @@ class DecodedMessagePrefixTests(unittest.TestCase):
 
 
 class PublicApiTests(unittest.TestCase):
-    @patch("low_latency_tts.play_wav")
-    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    @patch("tts.low_latency.play_wav")
+    @patch("tts.low_latency.synthesize", return_value=b"RIFF....")
     def test_start_add_stop(self, _synth, play) -> None:
         eng = _engine()
         try:
@@ -61,8 +61,8 @@ class PublicApiTests(unittest.TestCase):
         finally:
             eng.close()
 
-    @patch("low_latency_tts.play_wav")
-    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    @patch("tts.low_latency.play_wav")
+    @patch("tts.low_latency.synthesize", return_value=b"RIFF....")
     def test_abandon_clears_streamed_flag(self, _synth, _play) -> None:
         eng = _engine()
         try:
@@ -74,16 +74,16 @@ class PublicApiTests(unittest.TestCase):
         finally:
             eng.close()
 
-    @patch("low_latency_tts.play_wav")
-    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    @patch("tts.low_latency.play_wav")
+    @patch("tts.low_latency.synthesize", return_value=b"RIFF....")
     def test_close_joins_workers(self, _synth, _play) -> None:
         eng = _engine()
         eng.close()
         self.assertFalse(eng._synth_thread.is_alive())
         self.assertFalse(eng._play_thread.is_alive())
 
-    @patch("low_latency_tts.play_wav")
-    @patch("low_latency_tts.synthesize", return_value=b"RIFF....")
+    @patch("tts.low_latency.play_wav")
+    @patch("tts.low_latency.synthesize", return_value=b"RIFF....")
     def test_logs_chunk_available_and_first_audio(self, _synth, play) -> None:
         log_dir = ROOT / ".runtime" / "tts-test"
         log_dir.mkdir(parents=True, exist_ok=True)

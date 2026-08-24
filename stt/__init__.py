@@ -1,10 +1,14 @@
 """
 Speech-to-text for dictating tasks and answering spoken questions.
 
-Providers (STT_PROVIDER):
-  - openai — stream mic PCM to OpenAI Realtime (`gpt-live-transcribe` by default);
+Providers live as modules in this package (``STT_PROVIDER``):
+  - ``stt.openai`` — stream mic PCM to OpenAI Realtime (`gpt-live-transcribe`);
     ends after STT_IDLE_SECONDS with no new transcribed words.
-  - sarvam — record locally until silence, then Sarvam Saaras (`saaras:v3`) file STT.
+  - ``stt.sarvam`` — record locally until silence, then Sarvam Saaras (`saaras:v3`).
+  - ``stt.whisperflow`` — record locally until silence, then on-device Whisper
+    (mlx-whisper / faster-whisper / optional local HTTP).
+
+Add another backend as ``stt/<name>.py`` and branch on ``STT_PROVIDER``.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import sounddevice as sd
 from openai import OpenAI
 
 from tts import speak
+from .timing import timed
 
 # Device capture → Realtime API expects 24 kHz mono PCM16.
 REALTIME_RATE = 24_000
@@ -43,7 +48,7 @@ CHANNELS = 1
 # Saved clips use the same rate we send to the API.
 SAMPLE_RATE = REALTIME_RATE
 
-# openai | sarvam
+# openai | sarvam | whisperflow
 STT_PROVIDER = os.environ.get("STT_PROVIDER", "openai").strip().lower()
 # Live Realtime transcription model (OpenAI path).
 TRANSCRIBE_MODEL = os.environ.get("STT_MODEL", "gpt-live-transcribe")
@@ -52,7 +57,8 @@ REFINE_MODEL = os.environ.get("STT_REFINE_MODEL", "gpt-4o-transcribe")
 JUDGE_MODEL = os.environ.get("STT_JUDGE_MODEL", "gpt-5-mini")
 # near_field | far_field | off — laptop mics + room fan → far_field
 NOISE_REDUCTION = os.environ.get("STT_NOISE_REDUCTION", "far_field").strip().lower()
-RECORDINGS_DIR = Path(__file__).resolve().parent / "recordings"
+_ROOT = Path(__file__).resolve().parent.parent
+RECORDINGS_DIR = _ROOT / "recordings"
 MIC_DEVICE = os.environ.get("MIC_DEVICE") or None
 
 SILENCE_SECONDS = 3.0
@@ -480,6 +486,22 @@ def _use_sarvam() -> bool:
     return STT_PROVIDER in {"sarvam", "saaras", "sarvamai"}
 
 
+def _use_whisperflow() -> bool:
+    return STT_PROVIDER in {
+        "whisperflow",
+        "whisper-flow",
+        "whisper_flow",
+        "whisper",
+        "mlx",
+        "mlx-whisper",
+    }
+
+
+def _use_file_stt() -> bool:
+    """Providers that record a clip, then run file STT (no live partials)."""
+    return _use_sarvam() or _use_whisperflow()
+
+
 def _send_requested() -> bool:
     """True once when the menu-bar Send item is clicked during this listen."""
     try:
@@ -682,7 +704,7 @@ def listen_realtime(
     Capture one utterance and return (transcript, wav_bytes).
 
     OpenAI: stream to Realtime transcription; end after idle with no new words.
-    Sarvam: record until silence, then Saaras file STT.
+    Sarvam / WhisperFlow: record until silence, then file STT.
     ``on_partial`` (OpenAI path only) is called with the growing live transcript.
     """
     # Persistent wake owns the mic for barge-in — release it for STT.
@@ -708,19 +730,29 @@ def listen_realtime(
         set_stt_listening = None  # type: ignore[assignment]
     try:
         if _use_sarvam():
-            return _listen_sarvam(
+            with timed("listen_sarvam"):
+                return _listen_sarvam(
+                    client,
+                    prompt=prompt,
+                    mode=mode,
+                    max_wait_for_speech=max_wait_for_speech,
+                )
+        if _use_whisperflow():
+            with timed("listen_whisperflow"):
+                return _listen_whisperflow(
+                    client,
+                    prompt=prompt,
+                    mode=mode,
+                    max_wait_for_speech=max_wait_for_speech,
+                )
+        with timed("listen_openai_realtime"):
+            return _listen_realtime_body(
                 client,
                 prompt=prompt,
                 mode=mode,
                 max_wait_for_speech=max_wait_for_speech,
+                on_partial=on_partial,
             )
-        return _listen_realtime_body(
-            client,
-            prompt=prompt,
-            mode=mode,
-            max_wait_for_speech=max_wait_for_speech,
-            on_partial=on_partial,
-        )
     finally:
         if set_stt_listening is not None:
             try:
@@ -731,6 +763,66 @@ def listen_realtime(
             resume_persistent_wake()
 
 
+def _listen_record_then_transcribe(
+    client: OpenAI,
+    *,
+    transcribe,
+    fail_label: str,
+    banner: str,
+    max_record_seconds: float,
+    prompt: str | None = None,
+    mode: str = "freeform",
+    max_wait_for_speech: float | None = None,
+) -> tuple[str, bytes]:
+    """Record until pause, then run a file STT ``transcribe(wav) -> str``."""
+    idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
+    wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
+    max_secs = min(MAX_RECORD_SECONDS, float(max_record_seconds))
+    hint = _listen_end_hint()
+    default_prompt = (
+        f"Listening for yes/no… (sends after {idle:g}s silence, {hint} → {banner})"
+        if mode == "confirm"
+        else f"Listening… (sends after {idle:g}s silence, {hint} → {banner})"
+    )
+
+    spotter = _listen_end_spotter()
+    watch = None
+    # File STT already uses the ONNX over-and-out spotter. The live OpenAI
+    # sidecar is for the streaming provider only — and it is a connection
+    # error on local WhisperFlow when the Realtime socket is unused.
+    if _end_phrase_live_enabled() and not _use_whisperflow():
+        watch = _EndPhraseWatcher(client)
+        watch.start()
+    try:
+        with timed("record_until_silence", mode=mode):
+            wav = record_until_silence(
+                silence_seconds=idle,
+                speech_peak=SPEECH_PEAK,
+                max_wait_for_speech=wait_limit,
+                max_record_seconds=max_secs,
+                prompt=prompt or default_prompt,
+                require_speech=True,
+                wake_spotter=spotter,
+                end_watch=watch,
+            )
+    finally:
+        if watch is not None:
+            watch.stop()
+    try:
+        with timed("transcribe", label=fail_label, bytes=len(wav)):
+            text = transcribe(wav)
+    except Exception as e:
+        raise NoSpeechError(f"{fail_label} failed: {e}") from e
+    with timed("strip_listen_wake"):
+        text = _strip_listen_wake(
+            text or "",
+            wake_ended=bool((spotter and spotter.hit) or (watch and watch.hit.is_set())),
+        )
+    if not text:
+        raise NoSpeechError("Transcription came back empty — try speaking again.")
+    return text, wav
+
+
 def _listen_sarvam(
     client: OpenAI,
     *,
@@ -739,51 +831,40 @@ def _listen_sarvam(
     max_wait_for_speech: float | None = None,
 ) -> tuple[str, bytes]:
     """Record until pause, then transcribe with Sarvam Saaras (REST ≤ ~30s)."""
-    from sarvam_stt import SARVAM_MAX_SECONDS, SARVAM_STT_MODEL, transcribe_wav
+    from .sarvam import SARVAM_MAX_SECONDS, SARVAM_STT_MODEL, transcribe_wav
 
-    idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
-    wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
-    max_secs = min(MAX_RECORD_SECONDS, SARVAM_MAX_SECONDS)
-    hint = _listen_end_hint()
-    default_prompt = (
-        f"Listening for yes/no… (sends after {idle:g}s silence, {hint} → Sarvam)"
-        if mode == "confirm"
-        else (
-            f"Listening… (sends after {idle:g}s silence, {hint} "
-            f"→ Sarvam {SARVAM_STT_MODEL})"
-        )
+    return _listen_record_then_transcribe(
+        client,
+        transcribe=transcribe_wav,
+        fail_label="Sarvam STT",
+        banner=f"Sarvam {SARVAM_STT_MODEL}",
+        max_record_seconds=SARVAM_MAX_SECONDS,
+        prompt=prompt,
+        mode=mode,
+        max_wait_for_speech=max_wait_for_speech,
     )
 
-    spotter = _listen_end_spotter()
-    watch = None
-    if _end_phrase_live_enabled():
-        watch = _EndPhraseWatcher(client)
-        watch.start()
-    try:
-        wav = record_until_silence(
-            silence_seconds=idle,
-            speech_peak=SPEECH_PEAK,
-            max_wait_for_speech=wait_limit,
-            max_record_seconds=max_secs,
-            prompt=prompt or default_prompt,
-            require_speech=True,
-            wake_spotter=spotter,
-            end_watch=watch,
-        )
-    finally:
-        if watch is not None:
-            watch.stop()
-    try:
-        text = transcribe_wav(wav)
-    except Exception as e:
-        raise NoSpeechError(f"Sarvam STT failed: {e}") from e
-    text = _strip_listen_wake(
-        text or "",
-        wake_ended=bool((spotter and spotter.hit) or (watch and watch.hit.is_set())),
+
+def _listen_whisperflow(
+    client: OpenAI,
+    *,
+    prompt: str | None = None,
+    mode: str = "freeform",
+    max_wait_for_speech: float | None = None,
+) -> tuple[str, bytes]:
+    """Record until pause, then transcribe with local WhisperFlow."""
+    from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav
+
+    return _listen_record_then_transcribe(
+        client,
+        transcribe=transcribe_wav,
+        fail_label="WhisperFlow STT",
+        banner=f"WhisperFlow {WHISPERFLOW_MODEL}",
+        max_record_seconds=MAX_RECORD_SECONDS,
+        prompt=prompt,
+        mode=mode,
+        max_wait_for_speech=max_wait_for_speech,
     )
-    if not text:
-        raise NoSpeechError("Transcription came back empty — try speaking again.")
-    return text, wav
 
 
 def _emit_partial(on_partial: Callable[[str], None] | None, live: str) -> None:
@@ -1444,32 +1525,32 @@ def record_until_enter(*args, **kwargs) -> bytes:
 
 
 def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str | None = None) -> str:
-    """One-shot file transcription (OpenAI audio API or Sarvam Saaras)."""
+    """One-shot file transcription (OpenAI, Sarvam Saaras, or local WhisperFlow)."""
     if not wav_bytes:
         raise NoSpeechError("No audio to transcribe.")
 
     model_name = (model or "").strip()
     if _use_sarvam() or model_name.startswith("saaras:"):
-        from sarvam_stt import transcribe_wav
+        from .sarvam import transcribe_wav
 
         text = transcribe_wav(wav_bytes, model=model_name or None)
         if not text:
             raise NoSpeechError("Transcription came back empty — try speaking again.")
         return text
 
+    if _use_whisperflow():
+        from .whisperflow import transcribe_wav as whisperflow_transcribe
+
+        text = whisperflow_transcribe(wav_bytes, model=model_name or None)
+        if not text:
+            raise NoSpeechError("Transcription came back empty — try speaking again.")
+        return text
+
+    from .openai import transcribe_wav as openai_transcribe_wav
+
     client = client or OpenAI()
     model = model or REFINE_MODEL
-    bio = io.BytesIO(wav_bytes)
-    bio.name = "audio.wav"
-    kwargs: dict = {
-        "model": model,
-        "file": bio,
-    }
-    # File models accept language; live-only models may not be used here.
-    if model not in {"gpt-live-transcribe"}:
-        kwargs["language"] = "en"
-    result = client.audio.transcriptions.create(**kwargs)
-    text = (getattr(result, "text", None) or str(result) or "").strip()
+    text = openai_transcribe_wav(client, wav_bytes, model=model)
     if not text:
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     print(f"[stt] model={model}")
@@ -1619,10 +1700,10 @@ def listen_once(
     max_wait_for_speech: float | None = None,
     on_partial: Callable[[str], None] | None = None,
 ) -> str:
-    """Capture one utterance via the configured STT provider (OpenAI or Sarvam)."""
+    """Capture one utterance via the configured STT provider."""
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
     hint = _listen_end_hint()
-    if _use_sarvam():
+    if _use_file_stt():
         default_prompt = (
             f"Say yes or no now… (sends after {idle:g}s silence, {hint})"
             if mode == "confirm"
@@ -1656,22 +1737,25 @@ def listen_once(
                     clear_last_speaker()
             except Exception:
                 pass
-            live, wav = listen_realtime(
-                client,
-                prompt=prompt or default_prompt,
-                mode=mode,
-                max_wait_for_speech=max_wait_for_speech,
-                on_partial=on_partial,
-            )
+            with timed("listen_once", attempt=attempt, mode=mode):
+                live, wav = listen_realtime(
+                    client,
+                    prompt=prompt or default_prompt,
+                    mode=mode,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                )
             try:
                 from wake import play_listen_end_chime
 
                 play_listen_end_chime()
             except Exception:
                 pass
-            save_recording(wav, transcript=live, kind=mode, live_transcript=live)
+            with timed("save_recording"):
+                save_recording(wav, transcript=live, kind=mode, live_transcript=live)
             print(f'Heard: "{live}"')
-            _tag_speaker(wav)
+            with timed("tag_speaker"):
+                _tag_speaker(wav)
             return live
         except ListenCancelled:
             print("[stt] listen cancelled.", flush=True)

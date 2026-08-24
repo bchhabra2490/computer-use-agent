@@ -229,11 +229,7 @@ def cmd_chat(mode: str | None) -> int:
         print("chat window " + ("off" if now else "on (Electron)"))
         return 0
     if key == "status":
-        print(
-            "chat window "
-            + ("on" if chat_overlay_enabled() else "off")
-            + " (Electron · ⌘⌥C)"
-        )
+        print("chat window " + ("on" if chat_overlay_enabled() else "off") + " (Electron · ⌘⌥C)")
         return 0
     print("usage: cua chat [on|off|toggle|status]  (hotkey ⌘⌥C)")
     return 2

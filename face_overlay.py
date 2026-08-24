@@ -889,6 +889,9 @@ def chat_avatar_pngs(*, size: int = 128) -> dict[str, Any]:
         "assistant_png": blobatar_png_bytes(size, mood="wink", spec=assistant),
         "user_png": blobatar_png_bytes(size, mood="listen", seed=user_seed),
     }
+
+
+class FaceOverlay:
     """Animated face NSPanel. Construct only on the AppKit main thread."""
 
     def __init__(self) -> None:

@@ -224,6 +224,12 @@ async function loadAvatars() {
     if (data.assistant_b64) {
       state.avatars.assistant = `data:image/png;base64,${data.assistant_b64}`;
       state.avatars.assistantId = data.assistant_id;
+      const mark = $("brand-mark");
+      if (mark) {
+        mark.src = state.avatars.assistant;
+        mark.alt = data.assistant_id || "Jarvis";
+        mark.title = data.assistant_id ? `Face: ${data.assistant_id}` : "Jarvis";
+      }
     }
     if (data.user_b64) {
       state.avatars.user = `data:image/png;base64,${data.user_b64}`;

@@ -101,12 +101,13 @@ select,
 }
 
 .brand-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 12px;
-  background:
-    radial-gradient(circle at 30% 30%, #ffd089, var(--accent) 55%, #b86b1e);
-  box-shadow: 0 8px 24px rgba(232, 160, 74, 0.25);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: transparent;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 
 .brand-name {

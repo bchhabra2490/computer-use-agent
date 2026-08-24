@@ -38,9 +38,21 @@ PRIMARY = {
 
 
 class FaceMoodTests(unittest.TestCase):
-    def test_sleep_states(self) -> None:
+    def test_idle_is_wink_when_awake(self) -> None:
         for state in ("idle", "ready", "waiting", "done", "error"):
-            self.assertEqual(face_mood_for_state(state), "sleep", state)
+            self.assertEqual(
+                face_mood_for_state(state, {"sleep_mode": False}),
+                "wink",
+                state,
+            )
+
+    def test_sleep_mode_forces_sleep(self) -> None:
+        for state in ("idle", "waiting", "listening", "thinking"):
+            self.assertEqual(
+                face_mood_for_state(state, {"sleep_mode": True}),
+                "sleep",
+                state,
+            )
 
     def test_listen_on_wake(self) -> None:
         self.assertEqual(face_mood_for_state("listening"), "listen")
@@ -69,7 +81,7 @@ class FaceMoodTests(unittest.TestCase):
         )
         self.assertEqual(
             face_mood_for_state("waiting", {"tts_playing": False}),
-            "sleep",
+            "wink",
         )
 
     def test_stt_active_is_listen(self) -> None:
@@ -104,6 +116,10 @@ class BlobatarStyleTests(unittest.TestCase):
         listen = mood_eye_pose("listen", 1.0)
         self.assertLess(sleep["eye_h"], listen["eye_h"])
         self.assertGreater(sleep["body_dy"], listen["body_dy"])
+
+    def test_wink_is_asymmetric(self) -> None:
+        pose = mood_eye_pose("wink", 0.0)
+        self.assertGreater(pose["left_eye_h"], pose["right_eye_h"])
 
     def test_think_seesaw_is_asymmetric(self) -> None:
         pose = mood_eye_pose("think", 0.225)
@@ -193,6 +209,19 @@ class BlobatarPresetTests(unittest.TestCase):
             self.assertEqual(spec.id, "rekha")
             self.assertEqual(path.read_text(encoding="utf-8").strip(), "rekha")
             persist.assert_called_once_with("rekha")
+
+    def test_render_blobatar_avatar_size(self) -> None:
+        try:
+            from AppKit import NSApplication  # type: ignore
+        except ImportError:
+            self.skipTest("AppKit required")
+        from face_overlay import render_blobatar_avatar
+
+        NSApplication.sharedApplication()
+        spec = current_blobatar({"face_preset": "pebble"})
+        img = render_blobatar_avatar(48, spec=spec, mood="wink")
+        self.assertAlmostEqual(float(img.size().width), 48.0)
+        self.assertAlmostEqual(float(img.size().height), 48.0)
 
 
 class FaceVisibilityTests(unittest.TestCase):

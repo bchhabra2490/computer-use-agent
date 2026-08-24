@@ -484,9 +484,12 @@ def face_mood_for_state(
     TTS often leaves the session on waiting while audio is still playing.
     Mic capture (``stt_active``, including Fn dictation) maps to listen.
     ``ask`` / ``ask_user`` stays unsure for the whole question, including TTS.
+    Sleep mode forces the sleep expression; otherwise idle/waiting uses wink.
     """
     snap = data if data is not None else None
     key = (state or "idle").strip().lower()
+    if snap is not None and snap.get("sleep_mode"):
+        return "sleep"
     if key in _ASK_STATES or key.startswith("ask"):
         return "unsure"
     if snap is not None and snap.get("tts_playing"):
@@ -500,8 +503,8 @@ def face_mood_for_state(
     if key in _THINK_STATES or key.startswith("think") or key.startswith("agent"):
         return "think"
     if key in _SLEEP_STATES or key.startswith("wait") or key.startswith("idle"):
-        return "sleep"
-    return "sleep"
+        return "wink"
+    return "wink"
 
 
 def face_should_show(data: dict[str, Any] | None = None) -> bool:
@@ -656,15 +659,42 @@ def mood_eye_pose(mood: str, t: float) -> dict[str, float]:
         pair_dy = -0.08
         glance = 1.4
         hue_shift = -12.0
+    elif mood == "wink":
+        # Awake idle: one eye open, the other squeezed — ready for the wake word.
+        body_dy = 1.1 * math.sin(t * 1.35)
+        body_scale = 1.0 + 0.02 * math.sin(t * 1.9)
+        pair_dx = 0.30
+        pair_dy = -0.05
+        left_tilt = 4.0
+        right_tilt = -10.0
+        left_dy = -0.01
+        right_dy = 0.02
+        left_eye_w = 0.11
+        left_eye_h = 0.22
+        right_eye_w = 0.15
+        right_eye_h = 0.045
+        eye_w = left_eye_w
+        eye_h = left_eye_h
+        glance = 1.6 * math.sin(t * 0.38)
+        light = 0.60
+        # Soft blink on the open eye only.
+        period = 4.2
+        phase = t % period
+        if phase < 0.07:
+            blink = 0.55 * (phase / 0.07)
+        elif phase < 0.14:
+            blink = 0.55 * (1.0 - (phase - 0.07) / 0.07)
 
-    if mood != "unsure":
+    if mood not in {"unsure", "wink"}:
         left_eye_w = right_eye_w = eye_w
         left_eye_h = right_eye_h = eye_h
 
     lid = 1.0 - 0.90 * blink
     eye_h *= lid
     left_eye_h *= lid
-    right_eye_h *= lid
+    if mood != "wink":
+        # Wink keeps the closed eye flat; only the open eye blinks via left_eye_h.
+        right_eye_h *= lid
     return {
         "body_dy": body_dy,
         "body_scale": body_scale,
@@ -684,6 +714,130 @@ def mood_eye_pose(mood: str, t: float) -> dict[str, float]:
         "hue_shift": hue_shift,
         "light": light,
     }
+
+
+def render_blobatar_avatar(
+    size: int = 64,
+    *,
+    mood: str = "wink",
+    spec: BlobatarSpec | None = None,
+    data: dict[str, Any] | None = None,
+):
+    """Draw the current (or given) blobatar into an ``NSImage`` for chat avatars."""
+    from AppKit import (  # type: ignore
+        NSAffineTransform,
+        NSBezierPath,
+        NSColor,
+        NSImage,
+        NSMakeRect,
+    )
+
+    spec = spec or current_blobatar(data)
+    pose = mood_eye_pose(mood, 0.35)
+    img = NSImage.alloc().initWithSize_((float(size), float(size)))
+    img.lockFocus()
+    try:
+        w = h = float(size)
+        cx = w / 2.0
+        cy = h / 2.0 + pose["body_dy"] * (size / 128.0)
+        span = min(w, h)
+        rx = span * spec.rx * pose["body_scale"]
+        ry = span * spec.ry * pose["body_scale"]
+
+        hue = spec.hue + pose["hue_shift"]
+        env_hue = (os.environ.get("FACE_OVERLAY_HUE") or "").strip()
+        if env_hue:
+            try:
+                hue = float(env_hue) + pose["hue_shift"]
+            except ValueError:
+                pass
+        br, bg, bb = hsl_to_rgb(hue, spec.sat, pose["light"])
+        lum = 0.2126 * br + 0.7152 * bg + 0.0722 * bb
+        if lum > 0.45:
+            er, eg, eb = 0.12, 0.13, 0.16
+        else:
+            er, eg, eb = 0.96, 0.97, 0.98
+
+        fill = NSColor.colorWithCalibratedRed_green_blue_alpha_(br, bg, bb, 1.0)
+        kind = spec.shape
+        if kind == "round":
+            body = NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(cx - rx, cy - ry, rx * 2.0, ry * 2.0)
+            )
+        elif kind in {"boxy", "capsule"}:
+            rad = min(rx, ry) * (0.95 if kind == "capsule" else 0.28)
+            body = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(cx - rx, cy - ry, rx * 2.0, ry * 2.0),
+                rad,
+                rad,
+            )
+        else:
+            pts = blob_outline_points(
+                cx, cy, rx, ry, n=max(3, len(spec.perturb)), perturb=spec.perturb
+            )
+            body = NSBezierPath.bezierPath()
+            body.moveToPoint_(pts[0])
+            n = len(pts)
+            for i in range(n):
+                p0 = pts[(i - 1) % n]
+                p1 = pts[i]
+                p2 = pts[(i + 1) % n]
+                p3 = pts[(i + 2) % n]
+                c1 = (p1[0] + (p2[0] - p0[0]) / 6.0, p1[1] + (p2[1] - p0[1]) / 6.0)
+                c2 = (p2[0] - (p3[0] - p1[0]) / 6.0, p2[1] - (p3[1] - p1[1]) / 6.0)
+                body.curveToPoint_controlPoint1_controlPoint2_(p2, c1, c2)
+            body.closePath()
+        if abs(spec.rot) > 0.2:
+            xf = NSAffineTransform.transform()
+            xf.translateXBy_yBy_(cx, cy)
+            xf.rotateByDegrees_(spec.rot)
+            xf.translateXBy_yBy_(-cx, -cy)
+            body.transformUsingAffineTransform_(xf)
+        fill.setFill()
+        body.fill()
+
+        rot = spec.rot
+        for dx, dy, ew, eh in spec.extras:
+            ex = cx + dx * rx
+            ey = cy + dy * ry
+            if abs(rot) > 0.2:
+                ang = math.radians(rot)
+                ox, oy = ex - cx, ey - cy
+                ex = cx + ox * math.cos(ang) - oy * math.sin(ang)
+                ey = cy + ox * math.sin(ang) + oy * math.cos(ang)
+            extra = NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(ex - (ew * rx) / 2.0, ey - (eh * ry) / 2.0, ew * rx, eh * ry)
+            )
+            fill.setFill()
+            extra.fill()
+
+        eye_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(er, eg, eb, 1.0)
+        base_y = cy + ry * (pose["pair_dy"] + spec.pair_dy)
+        glance = pose["glance"]
+        pair_dx = pose["pair_dx"] + spec.pair_dx - 0.30
+        for side, tilt, extra_dy, ew, eh in (
+            (-1.0, pose["left_tilt"], pose["left_dy"], pose["left_eye_w"], pose["left_eye_h"]),
+            (1.0, pose["right_tilt"], pose["right_dy"], pose["right_eye_w"], pose["right_eye_h"]),
+        ):
+            ex = cx + side * rx * pair_dx + glance
+            ey = base_y + extra_dy * ry
+            hw, hh = rx * ew, ry * eh
+            if hw <= 0.4 or hh <= 0.4:
+                continue
+            rect = NSMakeRect(ex - hw, ey - hh, hw * 2.0, hh * 2.0)
+            rad = min(hw, hh)
+            path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, rad, rad)
+            if abs(tilt) > 0.2:
+                xf = NSAffineTransform.transform()
+                xf.translateXBy_yBy_(ex, ey)
+                xf.rotateByDegrees_(tilt)
+                xf.translateXBy_yBy_(-ex, -ey)
+                path.transformUsingAffineTransform_(xf)
+            eye_color.setFill()
+            path.fill()
+    finally:
+        img.unlockFocus()
+    return img
 
 
 class FaceOverlay:

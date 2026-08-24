@@ -3,7 +3,7 @@ macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
 Click for a menu with Send (while listening), Add Memory, Log Overlay, Face Overlay,
-Mark Task Done, logs, and quit.
+Chat (⌘⌥C), Sleep (⌘⌥S), Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -35,9 +35,12 @@ from app_status import (
     request_send,
     set_face_overlay_enabled,
     set_overlay_enabled,
+    set_chat_overlay_enabled,
     set_tray_pid,
     signal_quit_orchestrator,
+    sleep_mode_enabled,
     status_label,
+    toggle_sleep_mode,
 )
 from task_log import LOGS_DIR
 
@@ -168,7 +171,9 @@ def _add_memory_from_tray() -> None:
     threading.Thread(target=_describe_and_save, name="tray-add-memory", daemon=True).start()
 
 
-def _glyph_for(state: str) -> str:
+def _glyph_for(state: str, data: dict | None = None) -> str:
+    if data is not None and data.get("sleep_mode"):
+        return "☾"
     key = (state or "idle").lower().strip()
     if key in STATE_GLYPH:
         return STATE_GLYPH[key]
@@ -254,6 +259,59 @@ def main() -> None:
             self.lastSig = None
             self.overlay = None
             self.face = None
+            self._hotkeyAt = 0.0
+            self._hotkeyMonitors = []
+            try:
+                from AppKit import (  # type: ignore
+                    NSEvent,
+                    NSEventMaskKeyDown,
+                    NSEventModifierFlagCommand,
+                    NSEventModifierFlagOption,
+                    NSEventModifierFlagControl,
+                    NSEventModifierFlagShift,
+                )
+
+                cmd = int(NSEventModifierFlagCommand)
+                opt = int(NSEventModifierFlagOption)
+                shift = int(NSEventModifierFlagShift)
+                ctrl = int(NSEventModifierFlagControl)
+                need = cmd | opt
+                extras = shift | ctrl
+                owner = self
+
+                def _cmd_opt_hotkey(event):
+                    # ⌘⌥C = chat toggle, ⌘⌥S = sleep toggle
+                    try:
+                        flags = int(event.modifierFlags())
+                        if (flags & need) != need:
+                            return event
+                        if flags & extras:
+                            return event
+                        chars = (event.charactersIgnoringModifiers() or "").lower()
+                        if chars not in {"c", "s"}:
+                            return event
+                        now = time.monotonic()
+                        if now - float(getattr(owner, "_hotkeyAt", 0.0) or 0.0) < 0.45:
+                            return None
+                        owner._hotkeyAt = now
+                        if chars == "c":
+                            owner.toggleChat_(None)
+                        else:
+                            owner.toggleSleep_(None)
+                        return None
+                    except Exception:
+                        return event
+
+                g = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    NSEventMaskKeyDown, _cmd_opt_hotkey
+                )
+                loc = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                    NSEventMaskKeyDown, _cmd_opt_hotkey
+                )
+                self._hotkeyMonitors = [m for m in (g, loc) if m is not None]
+                print("[tray] hotkeys ⌘⌥C (chat) · ⌘⌥S (sleep) armed", flush=True)
+            except Exception as e:
+                print(f"[tray] hotkeys unavailable: {e}", flush=True)
             try:
                 from log_overlay import OVERLAY_HIDE_NOTE, OVERLAY_SHOW_NOTE
 
@@ -292,6 +350,13 @@ def main() -> None:
                     face.destroy()
                 except Exception:
                     pass
+            chat = getattr(self, "chat", None)
+            self.chat = None
+            if chat is not None:
+                try:
+                    chat.destroy()
+                except Exception:
+                    pass
 
         def applicationWillTerminate_(self, _notif) -> None:
             self.teardownOverlay()
@@ -311,6 +376,12 @@ def main() -> None:
             if face is not None:
                 try:
                     face.hide()
+                except Exception:
+                    pass
+            chat = getattr(self, "chat", None)
+            if chat is not None:
+                try:
+                    chat.hide()
                 except Exception:
                     pass
             ack_overlay_hidden(True)
@@ -339,6 +410,17 @@ def main() -> None:
                         face.hide()
                 except Exception:
                     pass
+            chat = getattr(self, "chat", None)
+            if chat is not None:
+                try:
+                    from chat_overlay import chat_should_show
+
+                    if chat_should_show(data):
+                        chat.show()
+                    else:
+                        chat.hide()
+                except Exception:
+                    pass
             ack_overlay_hidden(False)
 
         def tick_(self, _timer) -> None:
@@ -351,6 +433,8 @@ def main() -> None:
                 f"{data.get('send_requested')}|{data.get('cancel_requested')}|"
                 f"{data.get('overlay_hidden')}|"
                 f"{data.get('overlay_enabled')}|{data.get('face_overlay_enabled')}|"
+                f"{data.get('chat_overlay_enabled')}|"
+                f"{data.get('sleep_mode')}|"
                 f"{data.get('tts_playing')}|{data.get('tts_play_depth')}|"
                 f"{data.get('orchestrator_pid')}|"
                 f"{data.get('agent_pid')}"
@@ -377,13 +461,14 @@ def main() -> None:
         def applyStatus(self, data: dict) -> None:
             button = self.statusItem.button()
             if button is not None:
-                glyph = _glyph_for(str(data.get("state") or "idle"))
+                glyph = _glyph_for(str(data.get("state") or "idle"), data)
                 if button.image() is None:
                     button.setTitle_(glyph)
                 button.setToolTip_(format_tooltip(data))
             self.rebuildMenu(data)
             self.syncOverlay(data)
             self.syncFace(data)
+            self.syncChat(data)
 
         @objc.python_method
         def syncOverlay(self, data: dict) -> None:
@@ -432,6 +517,35 @@ def main() -> None:
             if face is not None:
                 try:
                     face.apply_status(data)
+                except Exception:
+                    pass
+
+        @objc.python_method
+        def syncChat(self, data: dict) -> None:
+            from chat_overlay import ChatOverlay, chat_overlay_enabled
+
+            want = chat_overlay_enabled(data)
+            chat = getattr(self, "chat", None)
+            # Dead panel (unexpected real close) — drop so we can rebuild.
+            if chat is not None and not chat.is_alive():
+                try:
+                    chat.destroy()
+                except Exception:
+                    pass
+                self.chat = None
+                chat = None
+            if want and chat is None:
+                try:
+                    self.chat = ChatOverlay()
+                    print("[tray] chat window on", flush=True)
+                except Exception as e:
+                    print(f"[tray] chat window unavailable: {e}", flush=True)
+            # Keep the panel alive when toggled off / red-closed — only hide.
+            # Destroying + recreating breaks PyObjC nested NSObject classes.
+            chat = getattr(self, "chat", None)
+            if chat is not None:
+                try:
+                    chat.apply_status(data)
                 except Exception:
                     pass
 
@@ -572,6 +686,7 @@ def main() -> None:
 
             from log_overlay import overlay_enabled as overlay_is_on
             from face_overlay import face_overlay_enabled as face_is_on
+            from chat_overlay import chat_overlay_enabled as chat_is_on
 
             overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Log Overlay",
@@ -590,6 +705,25 @@ def main() -> None:
             face_item.setTarget_(self)
             face_item.setState_(1 if face_is_on(data) else 0)
             self.menu.addItem_(face_item)
+
+            chat_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Chat ⌘⌥C",
+                "toggleChat:",
+                "",
+            )
+            chat_item.setTarget_(self)
+            chat_item.setState_(1 if chat_is_on(data) else 0)
+            self.menu.addItem_(chat_item)
+
+            sleep_on = sleep_mode_enabled(data)
+            sleep_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Sleep (ignore wake) ⌘⌥S",
+                "toggleSleep:",
+                "",
+            )
+            sleep_item.setTarget_(self)
+            sleep_item.setState_(1 if sleep_on else 0)
+            self.menu.addItem_(sleep_item)
 
             if agents:
                 mark_all = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -679,6 +813,25 @@ def main() -> None:
 
             data = read_status()
             set_face_overlay_enabled(not face_overlay_enabled(data))
+            self.applyStatus(read_status())
+
+        def toggleChat_(self, _sender) -> None:
+            from chat_overlay import chat_overlay_enabled
+
+            data = read_status()
+            on = not chat_overlay_enabled(data)
+            set_chat_overlay_enabled(on)
+            status_log("Chat window on" if on else "Chat window off")
+            print("[tray] chat on" if on else "[tray] chat off", flush=True)
+            self.applyStatus(read_status())
+
+        def toggleSleep_(self, _sender) -> None:
+            on = toggle_sleep_mode()
+            status_log("Sleep on — wake word ignored" if on else "Sleep off — listening")
+            print(
+                "[tray] sleep on" if on else "[tray] sleep off",
+                flush=True,
+            )
             self.applyStatus(read_status())
 
         def sendAudio_(self, _sender) -> None:

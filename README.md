@@ -14,6 +14,15 @@ tool in the Responses API (`gpt-5.6`). Built for macOS; the executor uses
   <a href="https://youtu.be/j0y-5g9Z_FU"><strong>▶ Watch demo on YouTube</strong></a>
 </p>
 
+## Ecosystem
+
+Companion projects that pair with this Mac agent:
+
+| Repo | What it does |
+|------|----------------|
+| [computer-use-mobile-app](https://github.com/bchhabra2490/computer-use-mobile-app) | **Jarvis Remote** — Expo phone app. Send text / hold-to-talk / camera stills to the Mac phone gateway (`PHONE_GATEWAY=1`); live status + last screen/speech over HTTP + SSE. Not a second agent. |
+| [computer-use-hardware](https://github.com/bchhabra2490/computer-use-hardware) | ESP32 + MQTT + MCP middleware so the agent can turn lamps/fans on and off and wait for `action_end` confirmation. |
+
 ## Setup
 
 ```bash
@@ -390,12 +399,27 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   (prefers a second display). Hides for each screenshot, then comes back.
   Toggle **Log Overlay** in the menu-bar icon.
 - **Face overlay** — a click-through blobatar at the top center of the main
-  display. Mood follows session state (sleep / listen / unsure / speak / think). Hidden
+  display. Mood follows session state (wink when awake / sleep when Sleep mode /
+  listen / unsure / speak / think). Hidden
   from computer-use screenshots. Toggle **Face Overlay** in the menu-bar icon,
   or set `FACE_OVERLAY=0`.
+- **Sleep** — ignore the wake word (menu **Sleep** or **⌘⌥S** / `cua sleep on`).
+  Face uses the sleep expression; turn Sleep off to wink and listen again.
+- **Chat** — a floating window with a **sidebar** of saved chats (+ New chat;
+  ⋯ **Delete** removes the chat, messages, and screenshots),
+  a **model** popup (OpenAI gpt-4o-mini / gpt-4o, DeepSeek Flash / Pro / Vision;
+  selection is remembered), and a Claude-style composer: camera icon (screenshot
+  on/off by color), mic, a wide message field, and a paper-plane send. History is stored
+  in SQLite under `.runtime/chat/`; screenshots go in `screenshots/` and show as
+  inline thumbnails (click to zoom; **Open in Preview** in the viewer). Assistant
+  replies sit on the left with the current face blobatar; your messages sit on
+  the right. DeepSeek text models auto-use the vision model when a
+  screenshot is attached. Toggle **Chat** in the menu bar, **⌘⌥C**, `cua chat on`,
+  or `CHAT_OVERLAY=1`. Window defaults to ~55%×72% of the screen (resizable, min 720×480).
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
   **Add Memory** (screenshot + description), **Log Overlay**, **Face Overlay**,
+  **Chat**,
   in-progress agents, **Mark Task Done**, recent logs, **Quit Orchestrator**,
   open latest `logs/` run folder, quit the icon
 
@@ -674,11 +698,13 @@ When a task **completes**, reusable workflows are saved automatically as skills
 
 ## Extending it
 
-- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua face` / `cua observe` / `cua skills condense` / `cua skills merge`).
+- `cua` / `cua.py` — daemon CLI (`cua start` / `cua stop` / `cua chat` / `cua face` / `cua observe` / `cua skills condense` / `cua skills merge`).
 - `observe.py` — passive click/scroll observer; drafts under `.runtime/observe/proposed/`.
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `face_overlay.py` — top-center blobatar (`cua face NAME`, or curated pebble/droplet/cloud/sun).
+- `chat_overlay.py` / `chat_llm.py` / `chat_store.py` — floating chat (sidebar,
+  model picker, SQLite history + screenshots; `cua chat on`).
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).

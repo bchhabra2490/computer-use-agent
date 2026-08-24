@@ -987,6 +987,7 @@ def wait_for_wake(
     Returns True on wake, False if should_stop() became true first.
     When a persistent barge-in monitor is already running, waits on that
     instead of opening a second mic (except from the monitor thread itself).
+    While Sleep mode is on, wake hits are ignored until Sleep is toggled off.
     The listen-start chime plays when STT opens the mic, not here.
     """
     _set_wake_remainder(None)
@@ -994,31 +995,94 @@ def wait_for_wake(
     if prompt is None:
         prompt = f"Waiting for {format_wake_phrases()}…"
 
-    mon = get_persistent_wake()
-    if (
-        mon is not None
-        and not mon._paused.is_set()
-        and mon._thread is not None
-        and threading.current_thread() is not mon._thread
-    ):
-        # Keep last_wake from the monitor thread; do not clear a pending hit.
-        return mon.wait(should_stop=should_stop, prompt=prompt)
+    sleeping_announced = False
+    while True:
+        if should_stop is not None:
+            try:
+                if should_stop():
+                    return False
+            except Exception:
+                return False
+        if _sleep_mode_on():
+            if not sleeping_announced:
+                print(
+                    f"[wake] Sleep — ignoring {format_wake_phrases()} "
+                    "(⌘⌥S or cua sleep off)",
+                    flush=True,
+                )
+                sleeping_announced = True
+            while _sleep_mode_on():
+                if should_stop is not None:
+                    try:
+                        if should_stop():
+                            return False
+                    except Exception:
+                        return False
+                time.sleep(0.15)
+            sleeping_announced = False
+            continue
 
-    _set_last_wake(None)
-    mode = WAKE_MODE
-    if mode in {"phrase", "stt", "text", "any"}:
-        return _wait_for_wake_phrase(
-            should_stop=should_stop,
-            prompt=prompt,
-            play_chime=play_chime,
-        )
-    return _wait_for_wake_model(
-        threshold=thresh,
-        should_stop=should_stop,
-        poll_hz=poll_hz,
-        prompt=prompt,
-        play_chime=play_chime,
-    )
+        mon = get_persistent_wake()
+        if (
+            mon is not None
+            and not mon._paused.is_set()
+            and mon._thread is not None
+            and threading.current_thread() is not mon._thread
+        ):
+            # Keep last_wake from the monitor thread; do not clear a pending hit.
+            hit = mon.wait(should_stop=should_stop, prompt=prompt)
+        else:
+            _set_last_wake(None)
+            mode = WAKE_MODE
+            if mode in {"phrase", "stt", "text", "any"}:
+                hit = _wait_for_wake_phrase(
+                    should_stop=should_stop,
+                    prompt=prompt,
+                    play_chime=play_chime,
+                )
+            else:
+                hit = _wait_for_wake_model(
+                    threshold=thresh,
+                    should_stop=should_stop,
+                    poll_hz=poll_hz,
+                    prompt=prompt,
+                    play_chime=play_chime,
+                )
+        if hit and _sleep_mode_on():
+            # Race: Sleep flipped on just as a wake landed.
+            continue
+        return hit
+
+
+def _sleep_mode_on() -> bool:
+    try:
+        from app_status import sleep_mode_enabled
+
+        return sleep_mode_enabled()
+    except Exception:
+        return False
+
+
+def on_sleep_mode_changed(enabled: bool) -> None:
+    """Pause/resume the persistent wake mic when Sleep toggles."""
+    mon = get_persistent_wake()
+    if mon is None:
+        return
+    if enabled:
+        mon.woken.clear()
+        mon.pause()
+        print("[wake] Sleep on — mic paused", flush=True)
+        return
+    try:
+        from app_status import read_status
+
+        if read_status().get("stt_active"):
+            print("[wake] Sleep off — wake stays paused until STT ends", flush=True)
+            return
+    except Exception:
+        pass
+    mon.resume()
+    print("[wake] Sleep off — listening again", flush=True)
 
 
 class WakeMonitor:
@@ -1075,11 +1139,17 @@ class WakeMonitor:
                     time.sleep(0.05)
                 if self._stop.is_set():
                     break
+                # Sleep mode: do not open the mic / fire barge-in.
+                if _sleep_mode_on():
+                    self._listening.clear()
+                    self.woken.clear()
+                    time.sleep(0.12)
+                    continue
                 # Hold here while a wake is already pending acknowledgment.
                 while self.woken.is_set() and not self._stop.is_set():
                     self._listening.clear()
                     time.sleep(0.05)
-                if self._stop.is_set() or self._paused.is_set():
+                if self._stop.is_set() or self._paused.is_set() or _sleep_mode_on():
                     continue
 
                 self._listening.set()
@@ -1088,14 +1158,17 @@ class WakeMonitor:
                 hit = _wait_for_wake_model(
                     threshold=self.threshold,
                     should_stop=lambda: (
-                        self._stop.is_set() or self._paused.is_set() or self.woken.is_set()
+                        self._stop.is_set()
+                        or self._paused.is_set()
+                        or self.woken.is_set()
+                        or _sleep_mode_on()
                     ),
                     poll_hz=20.0,
                     prompt=f"Listening for {format_wake_phrases()}…",
                     play_chime=False,
                 )
                 self._listening.clear()
-                if self._stop.is_set() or self._paused.is_set():
+                if self._stop.is_set() or self._paused.is_set() or _sleep_mode_on():
                     continue
                 if hit:
                     self.woken.set()
@@ -1201,6 +1274,8 @@ def pause_persistent_wake() -> None:
 def resume_persistent_wake() -> None:
     mon = get_persistent_wake()
     if mon is not None:
+        if _sleep_mode_on():
+            return
         mon.resume()
 
 

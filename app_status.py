@@ -56,6 +56,8 @@ def _default_state() -> dict[str, Any]:
         "overlay_ack_hidden": False,
         "overlay_enabled": True,
         "face_overlay_enabled": True,
+        "chat_overlay_enabled": False,
+        "sleep_mode": False,
         "face_preset": "pebble",
         "tts_playing": False,
         "tts_play_depth": 0,
@@ -212,6 +214,65 @@ def set_face_overlay_enabled(enabled: bool) -> None:
         data = _read()
         data["face_overlay_enabled"] = bool(enabled)
         _write(data)
+
+
+def set_chat_overlay_enabled(enabled: bool) -> None:
+    """Show or hide the desktop chat window (tray menu / cua chat)."""
+    with _lock:
+        data = _read()
+        data["chat_overlay_enabled"] = bool(enabled)
+        _write(data)
+
+
+def sleep_mode_enabled(data: dict[str, Any] | None = None) -> bool:
+    """When True, wake word is ignored (Sleep)."""
+    snap = data if data is not None else read_status()
+    return bool(snap.get("sleep_mode"))
+
+
+def set_sleep_mode(enabled: bool) -> bool:
+    """Enable/disable Sleep (ignore wake). Returns the new value."""
+    on = bool(enabled)
+    with _lock:
+        data = _read()
+        data["sleep_mode"] = on
+        _write(data)
+    try:
+        from wake import on_sleep_mode_changed
+
+        on_sleep_mode_changed(on)
+    except Exception:
+        pass
+    return on
+
+
+def toggle_sleep_mode() -> bool:
+    """Flip Sleep mode; returns True when Sleep is now on."""
+    now = not sleep_mode_enabled()
+    set_sleep_mode(now)
+    return now
+
+
+def cmd_sleep(mode: str | None) -> int:
+    """``cua sleep`` / ``on`` / ``off`` / ``toggle``."""
+    key = (mode or "status").strip().lower()
+    if key in {"on", "sleep", "1", "true"}:
+        set_sleep_mode(True)
+        print("sleep on — wake word ignored (⌘⌥S to wake)")
+        return 0
+    if key in {"off", "wake", "0", "false"}:
+        set_sleep_mode(False)
+        print("sleep off — listening for wake word")
+        return 0
+    if key in {"toggle", ""}:
+        on = toggle_sleep_mode()
+        print("sleep on — wake word ignored" if on else "sleep off — listening for wake word")
+        return 0
+    if key == "status":
+        print("on" if sleep_mode_enabled() else "off")
+        return 0
+    print("usage: cua sleep [on|off|toggle|status]")
+    return 2
 
 
 def set_face_preset(name: str) -> None:
@@ -591,7 +652,15 @@ def register_orchestrator(pid: int | None = None) -> None:
         data["send_requested"] = False
         data["cancel_requested"] = False
         data["stt_active"] = False
+        # Always start awake — Sleep is an opt-in toggle for the session.
+        data["sleep_mode"] = False
         _write(data)
+    try:
+        from wake import on_sleep_mode_changed
+
+        on_sleep_mode_changed(False)
+    except Exception:
+        pass
 
 
 def unregister_orchestrator() -> None:
@@ -946,6 +1015,8 @@ def format_tooltip(data: dict[str, Any] | None = None, *, max_log_lines: int = 1
     detail = (data.get("detail") or "").strip()
     task = (data.get("task") or "").strip()
     lines = [f"Jarvis · {state}"]
+    if data.get("sleep_mode"):
+        lines.append("Sleep · wake word ignored (⌘⌥S)")
     if detail:
         lines.append(detail[:120])
     agents = active_agents(data)
@@ -974,6 +1045,8 @@ def status_label(data: dict[str, Any] | None = None) -> str:
     data = data or read_status()
     agents = active_agents(data)
     state = data.get("state") or "idle"
+    if data.get("sleep_mode"):
+        return f"sleep · {state}"[:80]
     if agents:
         return f"{state} · {len(agents)} agent(s)"[:80]
     detail = (data.get("detail") or "").strip()

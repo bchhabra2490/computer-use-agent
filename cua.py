@@ -44,7 +44,17 @@ Blobatar face overlay::
 
     cua face
     cua face pebble
-    cua face jarvis
+
+Desktop chat window (⌘⌥C)::
+
+    cua chat on
+    cua chat off
+
+Sleep mode (ignore wake word; ⌘⌥S)::
+
+    cua sleep on
+    cua sleep off
+    cua sleep toggle
 """
 
 from __future__ import annotations
@@ -393,6 +403,17 @@ FACE (blobatar overlay — any name, or pebble / droplet / cloud / sun)
   cua face pebble       Curated shortcut
   cua face jarvis       Any other name hashes to a unique blobatar
 
+CHAT (desktop window — screenshot toggle on by default; ⌘⌥C)
+  cua chat on
+  cua chat off
+  cua chat toggle
+
+SLEEP (ignore wake word; face sleeps. ⌘⌥S or menu Sleep)
+  cua sleep on
+  cua sleep off
+  cua sleep toggle
+  cua sleep status
+
 SKILLS (playbooks under skills/*/SKILL.md)
   cua skills condense [--name SKILL] [--force] [--dry-run]
   cua skills merge [--name SKILL …] [--dry-run]
@@ -563,6 +584,28 @@ def main(argv: list[str] | None = None) -> int:
         "name",
         nargs="*",
         help="preset name, or any seed (omit to list)",
+    )
+
+    chat_p = sub.add_parser(
+        "chat",
+        help="Show or hide the desktop chat window (hotkey ⌘⌥C)",
+    )
+    chat_p.add_argument(
+        "mode",
+        nargs="?",
+        default="status",
+        help="on | off | toggle | status",
+    )
+
+    sleep_p = sub.add_parser(
+        "sleep",
+        help="Ignore wake word (Sleep). Hotkey ⌘⌥S. Face uses sleep vs wink.",
+    )
+    sleep_p.add_argument(
+        "mode",
+        nargs="?",
+        default="status",
+        help="on | off | toggle | status",
     )
 
     accept_p = obs_sub.add_parser(
@@ -766,6 +809,14 @@ def main(argv: list[str] | None = None) -> int:
         from face_overlay import cmd_face
 
         return cmd_face(args.name)
+    if args.command == "chat":
+        from chat_overlay import cmd_chat
+
+        return cmd_chat(args.mode)
+    if args.command == "sleep":
+        from app_status import cmd_sleep
+
+        return cmd_sleep(args.mode)
     if args.command == "speaker":
         from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
 

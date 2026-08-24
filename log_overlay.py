@@ -93,6 +93,13 @@ def should_hide_overlay_for_capture(monitors: list[dict[str, Any]] | None = None
             return True
     except Exception:
         pass
+    try:
+        from chat_overlay import chat_overlay_enabled
+
+        if chat_overlay_enabled():
+            return True
+    except Exception:
+        pass
     return False
 
 

@@ -840,7 +840,55 @@ def render_blobatar_avatar(
     return img
 
 
-class FaceOverlay:
+def blobatar_png_bytes(
+    size: int = 128,
+    *,
+    mood: str = "wink",
+    seed: str | None = None,
+    spec: BlobatarSpec | None = None,
+    data: dict[str, Any] | None = None,
+) -> bytes:
+    """Render a blobatar to PNG bytes (for Electron chat avatars, etc.)."""
+    from AppKit import NSBitmapImageRep  # type: ignore
+
+    try:
+        from AppKit import NSBitmapImageFileTypePNG as png_type  # type: ignore
+    except ImportError:
+        from AppKit import NSPNGFileType as png_type  # type: ignore
+
+    if spec is None:
+        if seed is not None and str(seed).strip():
+            spec = resolve_blobatar(str(seed).strip())
+            if spec is None:
+                raise ValueError(f"invalid blobatar seed {seed!r}")
+        else:
+            spec = current_blobatar(data)
+    img = render_blobatar_avatar(size, mood=mood, spec=spec, data=data)
+    tiff = img.TIFFRepresentation()
+    if tiff is None:
+        raise RuntimeError("blobatar TIFF export failed")
+    rep = NSBitmapImageRep.imageRepWithData_(tiff)
+    if rep is None:
+        raise RuntimeError("blobatar bitmap export failed")
+    png = rep.representationUsingType_properties_(png_type, None)
+    if png is None:
+        raise RuntimeError("blobatar PNG export failed")
+    return bytes(png)
+
+
+def chat_avatar_pngs(*, size: int = 128) -> dict[str, Any]:
+    """Assistant = current face preset; user = hashed seed (default ``you``)."""
+    user_seed = (os.environ.get("CHAT_USER_BLOBATAR") or "you").strip() or "you"
+    assistant = current_blobatar()
+    user = resolve_blobatar(user_seed)
+    if user is None:
+        user = resolve_blobatar("you") or BLOBATARS["pebble"]
+    return {
+        "assistant_id": assistant.id,
+        "user_id": user.id,
+        "assistant_png": blobatar_png_bytes(size, mood="wink", spec=assistant),
+        "user_png": blobatar_png_bytes(size, mood="listen", seed=user_seed),
+    }
     """Animated face NSPanel. Construct only on the AppKit main thread."""
 
     def __init__(self) -> None:

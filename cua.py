@@ -45,10 +45,11 @@ Blobatar face overlay::
     cua face
     cua face pebble
 
-Desktop chat window (⌘⌥C)::
+Desktop chat (Electron; ⌘⌥C)::
 
     cua chat on
     cua chat off
+    # first time: cd chat_app && npm install
 
 Sleep mode (ignore wake word; ⌘⌥S)::
 
@@ -403,10 +404,11 @@ FACE (blobatar overlay — any name, or pebble / droplet / cloud / sun)
   cua face pebble       Curated shortcut
   cua face jarvis       Any other name hashes to a unique blobatar
 
-CHAT (desktop window — screenshot toggle off by default; ⌘⌥C)
+CHAT (Electron desktop app — screenshot attach off by default; ⌘⌥C)
   cua chat on
   cua chat off
   cua chat toggle
+  # first time: cd chat_app && npm install
 
 SLEEP (ignore wake word; face sleeps. ⌘⌥S or menu Sleep)
   cua sleep on

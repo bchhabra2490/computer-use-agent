@@ -350,13 +350,12 @@ def main() -> None:
                     face.destroy()
                 except Exception:
                     pass
-            chat = getattr(self, "chat", None)
-            self.chat = None
-            if chat is not None:
-                try:
-                    chat.destroy()
-                except Exception:
-                    pass
+            try:
+                from chat_overlay import stop_chat_app
+
+                stop_chat_app()
+            except Exception:
+                pass
 
         def applicationWillTerminate_(self, _notif) -> None:
             self.teardownOverlay()
@@ -376,12 +375,6 @@ def main() -> None:
             if face is not None:
                 try:
                     face.hide()
-                except Exception:
-                    pass
-            chat = getattr(self, "chat", None)
-            if chat is not None:
-                try:
-                    chat.hide()
                 except Exception:
                     pass
             ack_overlay_hidden(True)
@@ -408,20 +401,6 @@ def main() -> None:
                         face.show()
                     else:
                         face.hide()
-                except Exception:
-                    pass
-            chat = getattr(self, "chat", None)
-            if chat is not None:
-                try:
-                    from chat_overlay import chat_should_show
-
-                    if chat_should_show(data):
-                        # Don't deminiaturize / yank to front after CU capture.
-                        if not getattr(chat, "_is_miniaturized", lambda: False)():
-                            if not getattr(chat, "_is_visible_on_screen", lambda: False)():
-                                chat.show()
-                    else:
-                        chat.hide()
                 except Exception:
                     pass
             ack_overlay_hidden(False)
@@ -525,32 +504,12 @@ def main() -> None:
 
         @objc.python_method
         def syncChat(self, data: dict) -> None:
-            from chat_overlay import ChatOverlay, chat_overlay_enabled
+            try:
+                from chat_overlay import sync_chat_app
 
-            want = chat_overlay_enabled(data)
-            chat = getattr(self, "chat", None)
-            # Dead panel (unexpected real close) — drop so we can rebuild.
-            if chat is not None and not chat.is_alive():
-                try:
-                    chat.destroy()
-                except Exception:
-                    pass
-                self.chat = None
-                chat = None
-            if want and chat is None:
-                try:
-                    self.chat = ChatOverlay()
-                    print("[tray] chat window on", flush=True)
-                except Exception as e:
-                    print(f"[tray] chat window unavailable: {e}", flush=True)
-            # Keep the panel alive when toggled off / red-closed — only hide.
-            # Destroying + recreating breaks PyObjC nested NSObject classes.
-            chat = getattr(self, "chat", None)
-            if chat is not None:
-                try:
-                    chat.apply_status(data)
-                except Exception:
-                    pass
+                sync_chat_app(data)
+            except Exception as e:
+                print(f"[tray] chat sync failed: {e}", flush=True)
 
         @objc.python_method
         def rebuildMenu(self, data: dict) -> None:
@@ -819,22 +778,18 @@ def main() -> None:
             self.applyStatus(read_status())
 
         def toggleChat_(self, _sender) -> None:
-            from chat_overlay import chat_overlay_enabled
+            from chat_overlay import chat_overlay_enabled, ensure_chat_bridge_and_app, stop_chat_app
 
             data = read_status()
             on = not chat_overlay_enabled(data)
             set_chat_overlay_enabled(on)
             status_log("Chat window on" if on else "Chat window off")
-            print("[tray] chat on" if on else "[tray] chat off", flush=True)
-            self.applyStatus(read_status())
-            # Explicit menu/hotkey on: bring the panel forward (even if Dock-minimized).
+            print("[tray] chat on (Electron)" if on else "[tray] chat off", flush=True)
             if on:
-                chat = getattr(self, "chat", None)
-                if chat is not None:
-                    try:
-                        chat.show(force=True)
-                    except Exception:
-                        pass
+                ensure_chat_bridge_and_app(focus=True)
+            else:
+                stop_chat_app()
+            self.applyStatus(read_status())
 
         def toggleSleep_(self, _sender) -> None:
             on = toggle_sleep_mode()

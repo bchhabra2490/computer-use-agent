@@ -405,13 +405,11 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   or set `FACE_OVERLAY=0`.
 - **Sleep** — ignore the wake word (menu **Sleep** or **⌘⌥S** / `cua sleep on`).
   Face uses the sleep expression; turn Sleep off to wink and listen again.
-- **Chat** — typed front-end for the **orchestrator** (same queue as the wake word
-  and phone `/v1/command`). Sidebar of saved chats (+ New chat; ⋯ **Delete**).
-  Camera icon: Jarvis looks at the screen. Mic, wide field, paper-plane send.
-  Spoken replies show in bubbles (and still play on the Mac). History is SQLite
-  under `.runtime/chat/`. Needs `python orchestrator.py --auto`. Toggle **Chat**
-  in the menu bar, **⌘⌥C**, `cua chat on`, or `CHAT_OVERLAY=1`. Window defaults
-  to ~55%×72% of the screen (resizable, min 720×480).
+- **Chat** — Electron desktop front-end for the **orchestrator** (same queue as
+  the wake word and phone `/v1/command`). Sidebar of saved chats, camera attach,
+  and spoken replies in bubbles. History is SQLite under `.runtime/chat/`. Needs
+  `python orchestrator.py --auto` and once: `cd chat_app && npm install`. Toggle
+  **Chat** in the menu bar, **⌘⌥C**, or `cua chat on`.
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
   **Add Memory** (screenshot + description), **Log Overlay**, **Face Overlay**,
@@ -704,8 +702,9 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `face_overlay.py` — top-center blobatar (`cua face NAME`, or curated pebble/droplet/cloud/sun).
-- `chat_overlay.py` / `chat_store.py` — floating chat UI for the orchestrator
-  (`cua chat on`; SQLite history + screenshots).
+- `chat_app/` / `chat_bridge.py` / `chat_store.py` — Electron chat UI + localhost
+  bridge for the orchestrator (`cua chat on`; SQLite history + screenshots).
+- `chat_overlay.py` — tray/CLI launcher for the Electron chat app.
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).

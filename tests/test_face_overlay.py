@@ -210,18 +210,21 @@ class BlobatarPresetTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8").strip(), "rekha")
             persist.assert_called_once_with("rekha")
 
-    def test_render_blobatar_avatar_size(self) -> None:
+    def test_blobatar_png_bytes(self) -> None:
         try:
             from AppKit import NSApplication  # type: ignore
         except ImportError:
             self.skipTest("AppKit required")
-        from face_overlay import render_blobatar_avatar
+        from face_overlay import blobatar_png_bytes, chat_avatar_pngs
 
         NSApplication.sharedApplication()
-        spec = current_blobatar({"face_preset": "pebble"})
-        img = render_blobatar_avatar(48, spec=spec, mood="wink")
-        self.assertAlmostEqual(float(img.size().width), 48.0)
-        self.assertAlmostEqual(float(img.size().height), 48.0)
+        png = blobatar_png_bytes(32, mood="wink", seed="pebble")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        avatars = chat_avatar_pngs(size=32)
+        self.assertTrue(avatars["assistant_png"].startswith(b"\x89PNG"))
+        self.assertTrue(avatars["user_png"].startswith(b"\x89PNG"))
+        self.assertTrue(avatars["assistant_id"])
+        self.assertTrue(avatars["user_id"])
 
 
 class FaceVisibilityTests(unittest.TestCase):

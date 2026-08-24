@@ -62,6 +62,8 @@ def _default_state() -> dict[str, Any]:
         "tts_playing": False,
         "tts_play_depth": 0,
         "phone_gateway_pid": None,
+        "chat_bridge_pid": None,
+        "chat_app_pid": None,
         "pending_utterances": [],
         "pending_speaks": [],
         "chat_inbox": [],
@@ -330,6 +332,20 @@ def set_phone_gateway_pid(pid: int | None) -> None:
     with _lock:
         data = _read()
         data["phone_gateway_pid"] = pid
+        _write(data)
+
+
+def set_chat_bridge_pid(pid: int | None) -> None:
+    with _lock:
+        data = _read()
+        data["chat_bridge_pid"] = pid
+        _write(data)
+
+
+def set_chat_app_pid(pid: int | None) -> None:
+    with _lock:
+        data = _read()
+        data["chat_app_pid"] = pid
         _write(data)
 
 

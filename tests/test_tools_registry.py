@@ -38,6 +38,17 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("set_timer", names)
         self.assertNotIn("start_task", names)
         self.assertNotIn("give_response_to_user", names)
+        self.assertNotIn("desktop_actions", names)
+
+    def test_agent_deepseek_uses_desktop_actions(self) -> None:
+        with patch("mcp_client.mcp_openai_tools", return_value=[]):
+            names = [
+                t.get("name") or t.get("type")
+                for t in tr.agent_tools(provider="deepseek")
+            ]
+        self.assertIn("desktop_actions", names)
+        self.assertNotIn("computer", names)
+        self.assertIn("mark_done", names)
 
     def test_shared_list_open_apps(self) -> None:
         with patch(

@@ -1,4 +1,4 @@
-"""Desktop chat request shaping + SQLite store (no AppKit / no network)."""
+"""Chat store + overlay helpers (no AppKit / no network)."""
 
 from __future__ import annotations
 
@@ -6,161 +6,63 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from chat_llm import (  # noqa: E402
-    CHAT_DEEPSEEK_VISION_MODEL,
-    CHAT_MODEL,
-    ChatSession,
-    api_model_name,
-    chat_backend,
-    chat_model,
-    complete_chat,
-    extract_output_text,
-    generate_chat_title,
-    get_model,
-    list_chat_models,
-    make_chat_client,
-    session_input,
-    title_from_text,
-    user_content,
-    _clean_title,
+from chat_overlay import (  # noqa: E402
+    AVATAR_SIZE,
+    BUBBLE_PAD_X,
+    STACK_PAD,
+    _bubble_text_max_width,
+    chat_overlay_enabled,
+    chat_should_show,
+    command_for_orchestrator,
 )
-from chat_overlay import chat_overlay_enabled, chat_should_show  # noqa: E402
-from chat_store import ChatStore, PREF_SELECTED_MODEL  # noqa: E402
+from chat_store import ChatStore, PREF_SELECTED_MODEL, title_from_text  # noqa: E402
 
 
-class UserContentTests(unittest.TestCase):
-    def test_text_only_is_plain_string(self) -> None:
-        self.assertEqual(user_content("hello", None), "hello")
+class OrchestratorCommandTests(unittest.TestCase):
+    def test_plain_text(self) -> None:
+        self.assertEqual(command_for_orchestrator("open notes", look_at_screen=False), "open notes")
 
-    def test_screenshot_is_multipart(self) -> None:
-        parts = user_content("what is this", b"\x89PNG")
-        self.assertIsInstance(parts, list)
-        kinds = [p["type"] for p in parts]
-        self.assertEqual(kinds, ["input_text", "input_image"])
-        self.assertTrue(parts[1]["image_url"].startswith("data:image/png;base64,"))
-
-
-class SessionInputTests(unittest.TestCase):
-    def test_includes_history_then_new_turn(self) -> None:
-        session = ChatSession()
-        session.add("user", "hi")
-        session.add("assistant", "hello")
-        payload = session_input(session, "next", None)
-        roles = [item["role"] for item in payload]
-        self.assertEqual(roles, ["system", "user", "assistant", "user"])
-        self.assertEqual(payload[-1]["content"], "next")
-
-
-class ExtractTextTests(unittest.TestCase):
-    def test_output_text_parts(self) -> None:
-        part = SimpleNamespace(type="output_text", text="  hi  ")
-        msg = SimpleNamespace(type="message", content=[part])
-        resp = SimpleNamespace(output=[msg], output_text=None)
-        self.assertEqual(extract_output_text(resp), "hi")
-
-
-class CompleteChatTests(unittest.TestCase):
-    def test_appends_turns(self) -> None:
-        part = SimpleNamespace(type="output_text", text="On Notes.")
-        msg = SimpleNamespace(type="message", content=[part])
-        client = MagicMock()
-        client.responses.create.return_value = SimpleNamespace(output=[msg])
-        session = ChatSession()
-        reply = complete_chat(client, session, "What's open?", None)
-        self.assertEqual(reply, "On Notes.")
-        self.assertEqual([t.role for t in session.turns], ["user", "assistant"])
-        client.responses.create.assert_called_once()
-        kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual(kwargs["model"], CHAT_MODEL)
-
-    def test_deepseek_uses_vision_model_when_screenshot(self) -> None:
-        part = SimpleNamespace(type="output_text", text="Notes.")
-        msg = SimpleNamespace(type="message", content=[part])
-        client = MagicMock()
-        client.responses.create.return_value = SimpleNamespace(output=[msg])
-        complete_chat(client, ChatSession(), "what", b"png", backend="deepseek")
+    def test_look_at_screen(self) -> None:
         self.assertEqual(
-            client.responses.create.call_args.kwargs["model"],
-            CHAT_DEEPSEEK_VISION_MODEL,
+            command_for_orchestrator("what is this", look_at_screen=True),
+            "Look at the current screen. what is this",
+        )
+        self.assertEqual(
+            command_for_orchestrator("  ", look_at_screen=True),
+            "Look at the current screen and tell me what you see.",
         )
 
 
-class ChatBackendTests(unittest.TestCase):
-    def test_aliases(self) -> None:
-        self.assertEqual(chat_backend("ds"), "deepseek")
-        self.assertEqual(chat_backend("openai"), "openai")
+class BubbleLayoutTests(unittest.TestCase):
+    def test_long_text_uses_almost_full_row(self) -> None:
+        row = 800.0
+        text_w = _bubble_text_max_width(row)
+        bubble_w = text_w + 2 * BUBBLE_PAD_X
+        used = STACK_PAD * 2 + AVATAR_SIZE + 8.0 + bubble_w
+        self.assertAlmostEqual(used, row, places=4)
+        self.assertGreater(text_w, 600.0)
+        self.assertGreater(text_w, row * 0.7)
 
-    def test_models(self) -> None:
-        self.assertEqual(chat_model("openai", has_image=True), CHAT_MODEL)
-        self.assertNotEqual(
-            chat_model("deepseek", has_image=True),
-            chat_model("deepseek", has_image=False),
-        )
-        self.assertEqual(chat_model("deepseek", has_image=True), CHAT_DEEPSEEK_VISION_MODEL)
+    def test_narrow_row_still_has_readable_width(self) -> None:
+        self.assertGreaterEqual(_bubble_text_max_width(200.0), 80.0)
 
-    def test_catalog(self) -> None:
-        models = list_chat_models()
-        self.assertGreaterEqual(len(models), 4)
-        ids = {m.id for m in models}
-        self.assertTrue(any(i.startswith("openai:") for i in ids))
-        self.assertTrue(any(i.startswith("deepseek:") for i in ids))
 
-    def test_api_model_upgrade(self) -> None:
-        info = get_model("deepseek:deepseek-v4-flash")
-        self.assertFalse(info.vision)
-        self.assertEqual(api_model_name(info, has_image=True), CHAT_DEEPSEEK_VISION_MODEL)
-
-    def test_make_client_deepseek(self) -> None:
-        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}, clear=False):
-            with patch("openai.OpenAI") as ctor:
-                make_chat_client("deepseek")
-                ctor.assert_called_once()
-                kwargs = ctor.call_args.kwargs
-                self.assertEqual(kwargs["api_key"], "sk-test")
-                self.assertEqual(kwargs["base_url"], "https://api.deepseek.com")
-
+class TitleTests(unittest.TestCase):
     def test_title_from_text(self) -> None:
         self.assertEqual(title_from_text("hello"), "hello")
         self.assertTrue(title_from_text("x" * 60).endswith("…"))
-
-    def test_clean_title_strips_quotes(self) -> None:
-        self.assertEqual(_clean_title('"Notes app status"'), "Notes app status")
-        self.assertEqual(_clean_title("## Hello world"), "Hello world")
-
-    def test_generate_chat_title_uses_model(self) -> None:
-        part = SimpleNamespace(type="output_text", text='"Desktop notes"')
-        msg = SimpleNamespace(type="message", content=[part])
-        client = MagicMock()
-        client.responses.create.return_value = SimpleNamespace(output=[msg])
-        title = generate_chat_title(
-            client,
-            model_id="openai:gpt-4o-mini",
-            user_text="what's on screen",
-            assistant_text="Notes is open.",
-        )
-        self.assertEqual(title, "Desktop notes")
-        client.responses.create.assert_called_once()
-
-    def test_generate_chat_title_falls_back(self) -> None:
-        client = MagicMock()
-        client.responses.create.side_effect = RuntimeError("nope")
-        title = generate_chat_title(
-            client, model_id="openai:gpt-4o-mini", user_text="open calendar"
-        )
-        self.assertEqual(title, "open calendar")
 
 
 class ChatStoreTests(unittest.TestCase):
     def test_chat_roundtrip_and_screenshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = ChatStore(Path(tmp) / "t.sqlite3")
-            chat = store.create_chat(title="New chat", model_id="openai:gpt-4o-mini")
+            chat = store.create_chat(title="New chat", model_id="orchestrator")
             rel = store.save_screenshot(chat.id, b"\x89PNG\r\n")
             store.add_message(chat.id, "user", "hi", screenshot_relpath=rel)
             store.add_message(chat.id, "assistant", "hello")

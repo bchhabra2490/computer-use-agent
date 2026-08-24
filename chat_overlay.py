@@ -1,6 +1,8 @@
 """Floating desktop chat window (macOS AppKit).
 
-Sidebar of saved chats, model popup, Claude-style composer (screenshot / mic / send icons).
+Sidebar of saved chats. Composer sends to the **orchestrator** (same queue as
+wake-word STT and ``POST /v1/command``). Spoken replies land in the bubbles.
+
 History lives in SQLite (``chat_store``); screenshots under ``.runtime/chat/screenshots``.
 
 Shown from the menu-bar **Chat** item or ``cua chat on|off``.
@@ -40,8 +42,8 @@ CHAT_MARGIN = int(os.environ.get("CHAT_OVERLAY_MARGIN", "24"))
 THUMB_MAX_W = int(os.environ.get("CHAT_THUMB_WIDTH", "280"))
 THUMB_MAX_H = int(os.environ.get("CHAT_THUMB_HEIGHT", "160"))
 AVATAR_SIZE = 36.0
-BUBBLE_PAD_X = 12.0
-BUBBLE_PAD_Y = 8.0
+BUBBLE_PAD_X = 14.0
+BUBBLE_PAD_Y = 10.0
 ROW_GAP = 12.0
 STACK_PAD = 10.0
 
@@ -50,16 +52,67 @@ STACK_PAD = 10.0
 _ChatActions = None
 _SidebarData = None
 _FlippedView = None
+_ChatPanel = None
+_EDIT_MENU_INSTALLED = False
+
+
+def _install_edit_menu() -> None:
+    """Accessory apps have no Edit menu, so Cmd+A/C/V never reach text fields."""
+    global _EDIT_MENU_INSTALLED
+    if _EDIT_MENU_INSTALLED:
+        return
+    try:
+        from AppKit import NSApp, NSMenu, NSMenuItem  # type: ignore
+    except Exception:
+        return
+    app = NSApp()
+    if app is None:
+        return
+    main = app.mainMenu()
+    if main is None:
+        main = NSMenu.alloc().init()
+        app.setMainMenu_(main)
+    try:
+        existing = [str(item.title() or "") for item in (main.itemArray() or [])]
+        if "Edit" in existing:
+            _EDIT_MENU_INSTALLED = True
+            return
+    except Exception:
+        existing = []
+    edit = NSMenu.alloc().initWithTitle_("Edit")
+    for title, action, key in (
+        ("Undo", "undo:", "z"),
+        ("Redo", "redo:", "Z"),
+        (None, None, None),
+        ("Cut", "cut:", "x"),
+        ("Copy", "copy:", "c"),
+        ("Paste", "paste:", "v"),
+        ("Select All", "selectAll:", "a"),
+    ):
+        if title is None:
+            edit.addItem_(NSMenuItem.separatorItem())
+            continue
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+        edit.addItem_(item)
+    wrap = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Edit", None, "")
+    wrap.setSubmenu_(edit)
+    main.addItem_(wrap)
+    _EDIT_MENU_INSTALLED = True
 
 
 def _objc_helpers():
     """Lazily register AppKit helper classes once per process."""
-    global _ChatActions, _SidebarData, _FlippedView
-    if _ChatActions is not None and _SidebarData is not None and _FlippedView is not None:
-        return _ChatActions, _SidebarData, _FlippedView
+    global _ChatActions, _SidebarData, _FlippedView, _ChatPanel
+    if (
+        _ChatActions is not None
+        and _SidebarData is not None
+        and _FlippedView is not None
+        and _ChatPanel is not None
+    ):
+        return _ChatActions, _SidebarData, _FlippedView, _ChatPanel
 
     import objc
-    from AppKit import NSView  # type: ignore
+    from AppKit import NSEventModifierFlagCommand, NSPanel, NSView  # type: ignore
     from Foundation import NSObject
 
     class ChatActions(NSObject):
@@ -74,11 +127,6 @@ def _objc_helpers():
             ov = self.overlay
             if ov is not None:
                 ov.toggle_dictation()
-
-        def modelChanged_(self, _sender) -> None:
-            ov = self.overlay
-            if ov is not None:
-                ov._on_model_changed()
 
         def newChat_(self, _sender) -> None:
             ov = self.overlay
@@ -188,10 +236,41 @@ def _objc_helpers():
         def isFlipped(self) -> bool:
             return True
 
+    class ChatPanel(NSPanel):
+        def canBecomeKeyWindow(self) -> bool:
+            return True
+
+        def canBecomeMainWindow(self) -> bool:
+            return True
+
+        def performKeyEquivalent_(self, event) -> bool:
+            try:
+                flags = int(event.modifierFlags())
+                if not (flags & int(NSEventModifierFlagCommand)):
+                    return objc.super(ChatPanel, self).performKeyEquivalent_(event)
+                chars = str(event.charactersIgnoringModifiers() or "")
+                key = chars.lower()
+                action = {
+                    "a": "selectAll:",
+                    "c": "copy:",
+                    "v": "paste:",
+                    "x": "cut:",
+                    "z": "redo:" if (flags & (1 << 17)) else "undo:",  # NSEventModifierFlagShift
+                }.get(key)
+                if action:
+                    from AppKit import NSApp  # type: ignore
+
+                    if NSApp.sendAction_to_from_(action, None, self):
+                        return True
+            except Exception:
+                pass
+            return objc.super(ChatPanel, self).performKeyEquivalent_(event)
+
     _ChatActions = ChatActions
     _SidebarData = SidebarData
     _FlippedView = FlippedView
-    return _ChatActions, _SidebarData, _FlippedView
+    _ChatPanel = ChatPanel
+    return _ChatActions, _SidebarData, _FlippedView, _ChatPanel
 
 
 def _user_avatar_image(size: int = 64):
@@ -208,31 +287,48 @@ def _user_avatar_image(size: int = 64):
         clip.fill()
         NSColor.whiteColor().setFill()
         head = s * 0.22
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect((s - head) / 2.0, s * 0.50, head, head)
-        ).fill()
-        shoulders = NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(s * 0.22, s * 0.08, s * 0.56, s * 0.42)
-        )
+        NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect((s - head) / 2.0, s * 0.50, head, head)).fill()
+        shoulders = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(s * 0.22, s * 0.08, s * 0.56, s * 0.42))
         shoulders.fill()
     finally:
         img.unlockFocus()
     return img
 
 
-def _measure_text(text: str, font, max_width: float) -> tuple[float, float]:
-    from AppKit import NSFontAttributeName  # type: ignore
-    from Foundation import NSAttributedString, NSMakeSize
+def _bubble_text_max_width(row_width: float) -> float:
+    """Usable text width: the row minus avatar, side pads, and bubble padding."""
+    available = float(row_width) - STACK_PAD * 2 - AVATAR_SIZE - 8.0
+    return max(80.0, available - 2 * BUBBLE_PAD_X)
 
-    attrs = {NSFontAttributeName: font}
-    astr = NSAttributedString.alloc().initWithString_attributes_(text or " ", attrs)
-    # NSStringDrawingUsesLineFragmentOrigin = 1 << 1
-    rect = astr.boundingRectWithSize_options_context_(
-        NSMakeSize(max_width, 100000.0),
-        1 << 1,
-        None,
+
+def _size_text_view(tv, max_width: float) -> tuple[float, float]:
+    """Return wrapped (width, height) from the text view's layout manager."""
+    import math
+
+    from Foundation import NSMakeSize  # type: ignore
+
+    body = str(tv.string() or " ")
+    container = tv.textContainer()
+    lm = tv.layoutManager()
+    if container is None or lm is None:
+        lines = max(1, body.count("\n") + 1)
+        return max_width, float(18 * lines + 8)
+    pad = float(container.lineFragmentPadding())
+    container.setWidthTracksTextView_(False)
+    container.setHeightTracksTextView_(False)
+    container.setContainerSize_(NSMakeSize(100000.0, 10_000_000.0))
+    lm.ensureLayoutForTextContainer_(container)
+    wide = lm.usedRectForTextContainer_(container)
+    wraps = float(wide.size.width) > max_width + 1.0 or "\n" in body
+    tw = max_width if wraps else min(
+        max_width,
+        max(12.0, math.ceil(float(wide.size.width) + pad * 2 + 4.0)),
     )
-    return max(1.0, float(rect.size.width)), max(float(font.pointSize()) + 2.0, float(rect.size.height))
+    container.setContainerSize_(NSMakeSize(max(1.0, tw), 10_000_000.0))
+    lm.ensureLayoutForTextContainer_(container)
+    used = lm.usedRectForTextContainer_(container)
+    th = max(20.0, math.ceil(float(used.size.height) + 10.0))
+    return tw, th
 
 
 def _nsimage_from_png(png: bytes):
@@ -335,17 +431,13 @@ def _symbol_image(name: str, fallback: str | None = None, point_size: float = 15
     try:
         img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, name)
         if img is None and fallback:
-            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                fallback, fallback
-            )
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(fallback, fallback)
     except Exception:
         img = None
     if img is None:
         return None
     try:
-        cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(
-            point_size, 0.0
-        )
+        cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(point_size, 0.0)
         configured = img.imageWithSymbolConfiguration_(cfg)
         if configured is not None:
             img = configured
@@ -395,9 +487,28 @@ def chat_should_show(data: dict[str, Any] | None = None) -> bool:
         return False
     if snap.get("overlay_hidden"):
         return False
-    return pid_alive(snap.get("orchestrator_pid")) or pid_alive(snap.get("agent_pid")) or pid_alive(
-        snap.get("tray_pid")
+    return (
+        pid_alive(snap.get("orchestrator_pid")) or pid_alive(snap.get("agent_pid")) or pid_alive(snap.get("tray_pid"))
     )
+
+
+def command_for_orchestrator(text: str, *, look_at_screen: bool) -> str:
+    """User bubble text → utterance the orchestrator should hear."""
+    body = (text or "").strip()
+    if look_at_screen:
+        if body:
+            return f"Look at the current screen. {body}"
+        return "Look at the current screen and tell me what you see."
+    return body
+
+
+def _capture_desktop_png() -> bytes:
+    """Screenshot with overlays hidden (log, face, chat)."""
+    from actions import DesktopController
+    from log_overlay import pause_overlay_for_capture
+
+    with pause_overlay_for_capture():
+        return DesktopController().capture_screenshot()
 
 
 def cmd_chat(mode: str | None) -> int:
@@ -440,7 +551,6 @@ class ChatOverlay:
     """Interactive NSPanel. Construct only on the AppKit main thread."""
 
     def __init__(self) -> None:
-        from chat_llm import ChatSession
         from chat_store import PREF_SCREENSHOT_ON, get_store
 
         self.window = None
@@ -466,14 +576,14 @@ class ChatOverlay:
         self._zoom_image_view = None
         self._zoom_scroll = None
         self._zoom_path: str | None = None
-        self.session = ChatSession()
         self.store = get_store()
         self.chat_id: str | None = None
         self._busy = False
+        self._awaiting_reply = False
         self._dictating = False
         self._closed = False
         self._controller = None
-        self._screenshot_pref = self.store.get_pref(PREF_SCREENSHOT_ON, "1") != "0"
+        self._screenshot_pref = self.store.get_pref(PREF_SCREENSHOT_ON, "0") == "1"
         self._build()
         self._bootstrap_chat()
 
@@ -489,7 +599,6 @@ class ChatOverlay:
             NSImageOnly,
             NSMakeRect,
             NSPanel,
-            NSPopUpButton,
             NSScrollView,
             NSTableColumn,
             NSTableView,
@@ -510,7 +619,8 @@ class ChatOverlay:
             NSWindowStyleMaskTitled,
         )
 
-        ChatActions, SidebarData, FlippedView = _objc_helpers()
+        ChatActions, SidebarData, FlippedView, ChatPanel = _objc_helpers()
+        _install_edit_menu()
 
         actions = ChatActions.alloc().init()
         actions.overlay = self
@@ -528,7 +638,7 @@ class ChatOverlay:
             | NSWindowStyleMaskResizable
             | NSWindowStyleMaskMiniaturizable
         )
-        window = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        window = ChatPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             frame,
             style,
             NSBackingStoreBuffered,
@@ -538,10 +648,13 @@ class ChatOverlay:
         window.setLevel_(NSFloatingWindowLevel)
         window.setHidesOnDeactivate_(False)
         window.setReleasedWhenClosed_(False)
+        try:
+            window.setBecomesKeyOnlyIfNeeded_(False)
+        except Exception:
+            pass
         window.setMinSize_((_MIN_WIDTH, _MIN_HEIGHT))
         window.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehaviorFullScreenAuxiliary
+            NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
         )
         try:
             window.setSharingType_(NSWindowSharingNone)
@@ -564,9 +677,7 @@ class ChatOverlay:
         content.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         content.setWantsLayer_(True)
         try:
-            content.layer().setBackgroundColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(0.10, 1.0).CGColor()
-            )
+            content.layer().setBackgroundColor_(NSColor.colorWithCalibratedWhite_alpha_(0.10, 1.0).CGColor())
         except Exception:
             pass
         window.setContentView_(content)
@@ -580,9 +691,7 @@ class ChatOverlay:
         sidebar.setWantsLayer_(True)
         try:
             sidebar.layer().setBackgroundColor_(
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    0.12, 0.125, 0.145, 1.0
-                ).CGColor()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.125, 0.145, 1.0).CGColor()
             )
         except Exception:
             pass
@@ -600,9 +709,7 @@ class ChatOverlay:
 
         new_btn = NSButton.alloc().initWithFrame_(NSMakeRect(12, h - 76, sw - 24, 32))
         try:
-            plus = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                "plus", "New chat"
-            )
+            plus = NSImage.imageWithSystemSymbolName_accessibilityDescription_("plus", "New chat")
             if plus is not None:
                 new_btn.setImage_(plus)
                 new_btn.setImagePosition_(2)  # NSImageLeft
@@ -614,9 +721,7 @@ class ChatOverlay:
             new_btn.setWantsLayer_(True)
             new_btn.layer().setCornerRadius_(8.0)
             new_btn.layer().setBackgroundColor_(
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    0.20, 0.42, 0.78, 1.0
-                ).CGColor()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.20, 0.42, 0.78, 1.0).CGColor()
             )
         except Exception:
             pass
@@ -687,9 +792,7 @@ class ChatOverlay:
         divider.setAutoresizingMask_(NSViewHeightSizable | NSViewMinXMargin)
         divider.setWantsLayer_(True)
         try:
-            divider.layer().setBackgroundColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(0.22, 1.0).CGColor()
-            )
+            divider.layer().setBackgroundColor_(NSColor.colorWithCalibratedWhite_alpha_(0.22, 1.0).CGColor())
         except Exception:
             pass
         sidebar.addSubview_(divider)
@@ -700,31 +803,17 @@ class ChatOverlay:
         content.addSubview_(main)
         mw, mh = float(main.bounds().size.width), float(main.bounds().size.height)
 
-        from chat_llm import list_chat_models, selected_model_id
+        header = NSTextField.alloc().initWithFrame_(NSMakeRect(12, mh - 40, 120, 28))
+        header.setStringValue_("Jarvis")
+        header.setBordered_(False)
+        header.setEditable_(False)
+        header.setDrawsBackground_(False)
+        header.setFont_(NSFont.boldSystemFontOfSize_(15.0))
+        header.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.92, 1.0))
+        header.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
+        main.addSubview_(header)
 
-        models = list_chat_models()
-        current = selected_model_id()
-        popup_w = min(280.0, max(160.0, mw * 0.42))
-        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(12, mh - 40, popup_w, 28), False
-        )
-        popup.removeAllItems()
-        select_idx = 0
-        for i, m in enumerate(models):
-            popup.addItemWithTitle_(m.label)
-            popup.lastItem().setRepresentedObject_(m.id)
-            if m.id == current:
-                select_idx = i
-        popup.selectItemAtIndex_(select_idx)
-        popup.setTarget_(actions)
-        popup.setAction_("modelChanged:")
-        popup.setAutoresizingMask_(NSViewMinYMargin | NSViewMaxXMargin)
-        main.addSubview_(popup)
-        self.model_popup = popup
-
-        status = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(popup_w + 20, mh - 38, max(80.0, mw - popup_w - 32), 24)
-        )
+        status = NSTextField.alloc().initWithFrame_(NSMakeRect(130, mh - 38, max(80.0, mw - 142), 24))
         status.setBordered_(False)
         status.setEditable_(False)
         status.setDrawsBackground_(False)
@@ -736,9 +825,7 @@ class ChatOverlay:
         main.addSubview_(status)
         self.status_label = status
 
-        transcript_scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(12, 66, mw - 24, mh - 118)
-        )
+        transcript_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(12, 66, mw - 24, mh - 118))
         transcript_scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         transcript_scroll.setHasVerticalScroller_(True)
         transcript_scroll.setAutohidesScrollers_(True)
@@ -776,14 +863,10 @@ class ChatOverlay:
         try:
             composer.layer().setCornerRadius_(22.0)
             composer.layer().setBackgroundColor_(
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    0.16, 0.17, 0.20, 1.0
-                ).CGColor()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.16, 0.17, 0.20, 1.0).CGColor()
             )
             composer.layer().setBorderWidth_(1.0)
-            composer.layer().setBorderColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(0.28, 1.0).CGColor()
-            )
+            composer.layer().setBorderColor_(NSColor.colorWithCalibratedWhite_alpha_(0.28, 1.0).CGColor())
         except Exception:
             pass
         main.addSubview_(composer)
@@ -859,7 +942,17 @@ class ChatOverlay:
 
         self.window = window
         self._closed = False
+        try:
+            from AppKit import NSApp  # type: ignore
+
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
         window.makeKeyAndOrderFront_(None)
+        try:
+            window.makeFirstResponder_(field)
+        except Exception:
+            pass
 
     def _bootstrap_chat(self) -> None:
         self.refresh_sidebar()
@@ -868,6 +961,12 @@ class ChatOverlay:
             self.load_chat(self._chat_rows[0]["id"])
         else:
             self.start_new_chat()
+        try:
+            from app_status import consume_chat_inbox
+
+            self._ingest_orchestrator_replies(consume_chat_inbox())
+        except Exception:
+            pass
 
     def is_alive(self) -> bool:
         if self._closed or self.window is None:
@@ -888,9 +987,7 @@ class ChatOverlay:
         width = env_w if env_w else int(vis.size.width * _DEFAULT_WIDTH_FRAC)
         height = env_h if env_h else int(vis.size.height * _DEFAULT_HEIGHT_FRAC)
         width = min(max(width, _MIN_WIDTH), max(_MIN_WIDTH, int(vis.size.width - 2 * CHAT_MARGIN)))
-        height = min(
-            max(height, _MIN_HEIGHT), max(_MIN_HEIGHT, int(vis.size.height - 2 * CHAT_MARGIN))
-        )
+        height = min(max(height, _MIN_HEIGHT), max(_MIN_HEIGHT, int(vis.size.height - 2 * CHAT_MARGIN)))
         x = vis.origin.x + vis.size.width - width - CHAT_MARGIN
         y = vis.origin.y + CHAT_MARGIN
         return NSMakeRect(x, y, width, height)
@@ -1020,40 +1117,81 @@ class ChatOverlay:
         return view
 
     def _make_bubble_view(self, text: str, role: str, max_text_w: float):
-        from AppKit import NSColor, NSFont, NSMakeRect, NSTextField, NSView  # type: ignore
+        from AppKit import NSColor, NSFont, NSMakeRect, NSTextView  # type: ignore
 
+        _, _, FlippedView, _ = _objc_helpers()
         bg, fg = self._bubble_colors(role)
-        font = NSFont.systemFontOfSize_(13.0)
-        tw, th = _measure_text(text, font, max_text_w)
+        font = NSFont.systemFontOfSize_(14.0)
+        body = text or " "
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, max_text_w, 40))
+        tv.setDrawsBackground_(False)
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setFont_(font)
+        tv.setTextColor_(fg)
+        try:
+            tv.setIdentifier_("bubble-text")
+            tv.setRichText_(False)
+            tv.setHorizontallyResizable_(False)
+            tv.setVerticallyResizable_(True)
+            tv.setTextContainerInset_((0.0, 1.0))
+            tv.setMinSize_((0.0, 0.0))
+            tv.setMaxSize_((1.0e7, 1.0e7))
+            tv.setFocusRingType_(1)  # none
+            container = tv.textContainer()
+            if container is not None:
+                container.setLineFragmentPadding_(4.0)
+                container.setWidthTracksTextView_(False)
+                container.setHeightTracksTextView_(False)
+        except Exception:
+            pass
+        tv.setString_(body)
+        tw, th = _size_text_view(tv, max_text_w)
         tw = max(12.0, tw)
-        th = max(float(font.pointSize()) + 4.0, th + 2.0)
+        th = max(22.0, th)
+        tv.setFrame_(NSMakeRect(BUBBLE_PAD_X, BUBBLE_PAD_Y, tw, th))
         bw = tw + 2 * BUBBLE_PAD_X
         bh = th + 2 * BUBBLE_PAD_Y
-        bubble = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, bw, bh))
+        bubble = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, bw, bh))
         bubble.setWantsLayer_(True)
         try:
             bubble.layer().setCornerRadius_(14.0)
             bubble.layer().setBackgroundColor_(bg.CGColor())
+            bubble.layer().setMasksToBounds_(True)
         except Exception:
             pass
-        label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(BUBBLE_PAD_X, BUBBLE_PAD_Y, tw, th)
-        )
-        label.setStringValue_(text)
-        label.setBordered_(False)
-        label.setEditable_(False)
-        label.setSelectable_(True)
-        label.setDrawsBackground_(False)
-        label.setFont_(font)
-        label.setTextColor_(fg)
-        try:
-            label.cell().setWraps_(True)
-            label.setPreferredMaxLayoutWidth_(max_text_w)
-            label.setUsesSingleLineMode_(False)
-        except Exception:
-            pass
-        bubble.addSubview_(label)
+        bubble.addSubview_(tv)
         return bubble, bw, bh
+
+    def _fit_bubble(self, bubble, max_text_w: float) -> tuple[float, float]:
+        """Resize bubble + text view so wrapped text is fully visible."""
+        from AppKit import NSMakeRect  # type: ignore
+
+        tv = None
+        for sub in list(bubble.subviews() or []):
+            try:
+                if str(sub.identifier() or "") == "bubble-text":
+                    tv = sub
+                    break
+            except Exception:
+                tv = sub
+        if tv is None:
+            return float(bubble.frame().size.width), float(bubble.frame().size.height)
+        try:
+            container = tv.textContainer()
+            if container is not None:
+                container.setLineFragmentPadding_(4.0)
+                container.setWidthTracksTextView_(False)
+        except Exception:
+            pass
+        tw, th = _size_text_view(tv, max_text_w)
+        tw = max(12.0, tw)
+        th = max(22.0, th)
+        tv.setFrame_(NSMakeRect(BUBBLE_PAD_X, BUBBLE_PAD_Y, tw, th))
+        bw = tw + 2 * BUBBLE_PAD_X
+        bh = th + 2 * BUBBLE_PAD_Y
+        bubble.setFrameSize_((bw, bh))
+        return bw, bh
 
     def _make_shot_button(self, abs_path: str):
         from pathlib import Path
@@ -1123,6 +1261,9 @@ class ChatOverlay:
         pad = STACK_PAD
         gap = 8.0
         av = AVATAR_SIZE
+        max_text_w = _bubble_text_max_width(width)
+        if bubble is not None:
+            self._fit_bubble(bubble, max_text_w)
         bubble_h = float(bubble.frame().size.height) if bubble is not None else 0.0
         bubble_w = float(bubble.frame().size.width) if bubble is not None else 0.0
         shot_h = float(shot.frame().size.height) if shot is not None else 0.0
@@ -1138,9 +1279,7 @@ class ChatOverlay:
             if bubble is not None:
                 bubble.setFrame_(NSMakeRect(bx, 0.0, bubble_w, bubble_h))
             if shot is not None:
-                shot.setFrame_(
-                    NSMakeRect(ax - gap - shot_w, bubble_h + 6.0, shot_w, shot_h)
-                )
+                shot.setFrame_(NSMakeRect(ax - gap - shot_w, bubble_h + 6.0, shot_w, shot_h))
         else:
             avatar.setFrame_(NSMakeRect(pad, 0.0, av, av))
             bx = pad + av + gap
@@ -1188,16 +1327,17 @@ class ChatOverlay:
         screenshot_path: str | None = None,
         relayout: bool = True,
     ):
-        from AppKit import NSMakeRect, NSView  # type: ignore
+        from AppKit import NSMakeRect  # type: ignore
 
+        _, _, FlippedView, _ = _objc_helpers()
         stack = self.transcript_stack
         if stack is None:
             return None
         self._strip_placeholder()
         width = self._stack_width()
-        max_text_w = max(120.0, min(420.0, width * 0.62) - 2 * BUBBLE_PAD_X)
+        max_text_w = _bubble_text_max_width(width)
 
-        row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, AVATAR_SIZE))
+        row = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, width, AVATAR_SIZE))
         try:
             row.setTag_(1)
             row.setIdentifier_(role)
@@ -1298,9 +1438,7 @@ class ChatOverlay:
             row.setTag_(3)
         except Exception:
             pass
-        field = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(STACK_PAD, 8, width - 2 * STACK_PAD, 40)
-        )
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(STACK_PAD, 8, width - 2 * STACK_PAD, 40))
         field.setStringValue_(text)
         field.setBordered_(False)
         field.setEditable_(False)
@@ -1331,9 +1469,7 @@ class ChatOverlay:
         self._refresh_avatars()
         self._clear_stack()
         if not messages:
-            self._add_placeholder_row(
-                "New chat — ask about what’s on screen.\nClick a screenshot to zoom."
-            )
+            self._add_placeholder_row("New chat — same as asking Jarvis out loud.\nCamera on: look at the screen.")
             self._relayout_stack()
             return
 
@@ -1436,9 +1572,7 @@ class ChatOverlay:
         if win is None:
             win = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(zx, zy, zw, zh),
-                NSWindowStyleMaskTitled
-                | NSWindowStyleMaskClosable
-                | NSWindowStyleMaskResizable,
+                NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable,
                 NSBackingStoreBuffered,
                 False,
             )
@@ -1450,9 +1584,7 @@ class ChatOverlay:
             content.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
             content.setWantsLayer_(True)
             try:
-                content.layer().setBackgroundColor_(
-                    NSColor.colorWithCalibratedWhite_alpha_(0.08, 1.0).CGColor()
-                )
+                content.layer().setBackgroundColor_(NSColor.colorWithCalibratedWhite_alpha_(0.08, 1.0).CGColor())
             except Exception:
                 pass
             win.setContentView_(content)
@@ -1540,28 +1672,6 @@ class ChatOverlay:
         url = NSURL.fileURLWithPath_(self._zoom_path)
         NSWorkspace.sharedWorkspace().openURL_(url)
 
-    def selected_model_id_ui(self) -> str:
-        from chat_llm import selected_model_id
-
-        popup = self.model_popup
-        if popup is None:
-            return selected_model_id()
-        item = popup.selectedItem()
-        if item is None:
-            return selected_model_id()
-        obj = item.representedObject()
-        if obj:
-            return str(obj)
-        return selected_model_id()
-
-    def _on_model_changed(self) -> None:
-        from chat_llm import set_selected_model_id
-
-        info = set_selected_model_id(self.selected_model_id_ui())
-        if self.chat_id:
-            self.store.touch_chat(self.chat_id, model_id=info.id)
-        self._set_status(self._idle_status())
-
     def _on_screenshot_toggled(self) -> None:
         from chat_store import PREF_SCREENSHOT_ON
 
@@ -1577,7 +1687,7 @@ class ChatOverlay:
         on = self.screenshot_on()
         _style_icon_button(
             btn,
-            tooltip="Screenshot on — attach the desktop" if on else "Screenshot off",
+            tooltip="Screenshot on — Jarvis will look at the screen" if on else "Screenshot off",
             symbol="camera.fill",
             fallback="camera",
             tint=_accent_color() if on else _muted_icon_color(),
@@ -1587,12 +1697,11 @@ class ChatOverlay:
         return bool(self._screenshot_pref)
 
     def _idle_status(self) -> str:
-        from chat_llm import get_model
-
-        info = get_model(self.selected_model_id_ui())
         shot = "on" if self.screenshot_on() else "off"
-        vision = "vision" if info.vision else "text"
-        return f"{info.label} ({vision}) · Screenshot {shot} · Enter sends"
+        orch = pid_alive(read_status().get("orchestrator_pid"))
+        if orch:
+            return f"Orchestrator · Screenshot {shot}"
+        return f"Orchestrator off · Screenshot {shot} · run orchestrator.py --auto"
 
     def refresh_sidebar(self) -> None:
         rows = self.store.list_chats()
@@ -1661,13 +1770,9 @@ class ChatOverlay:
             menu_btn.setToolTip_("Chat options")
             menu_btn.setAutoresizingMask_(NSViewMinXMargin)
             try:
-                dots = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                    "ellipsis.circle", "Chat options"
-                )
+                dots = NSImage.imageWithSystemSymbolName_accessibilityDescription_("ellipsis.circle", "Chat options")
                 if dots is None:
-                    dots = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                        "ellipsis", "Chat options"
-                    )
+                    dots = NSImage.imageWithSystemSymbolName_accessibilityDescription_("ellipsis", "Chat options")
                 if dots is not None:
                     menu_btn.setImage_(dots)
                     menu_btn.setTitle_("")
@@ -1694,9 +1799,7 @@ class ChatOverlay:
         if title is not None:
             title.setStringValue_(item.get("title") or "New chat")
             title.setTextColor_(
-                NSColor.whiteColor()
-                if selected
-                else NSColor.colorWithCalibratedWhite_alpha_(0.93, 1.0)
+                NSColor.whiteColor() if selected else NSColor.colorWithCalibratedWhite_alpha_(0.93, 1.0)
             )
             title.setFrame_(NSMakeRect(12, 24, text_w, 18))
         if sub is not None:
@@ -1704,9 +1807,7 @@ class ChatOverlay:
             model = _model_short(item.get("model_id") or "")
             bits = [b for b in (when, model) if b]
             sub.setStringValue_(" · ".join(bits) if bits else "")
-            sub.setTextColor_(
-                NSColor.colorWithCalibratedWhite_alpha_(0.78 if selected else 0.48, 1.0)
-            )
+            sub.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.78 if selected else 0.48, 1.0))
             sub.setFrame_(NSMakeRect(12, 8, text_w, 14))
         if menu_btn is not None:
             cid = item["id"]
@@ -1740,9 +1841,7 @@ class ChatOverlay:
             return
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Delete", "deleteChat:", ""
-        )
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Delete", "deleteChat:", "")
         item.setTarget_(self._controller)
         item.setRepresentedObject_(chat_id)
         menu.addItem_(item)
@@ -1758,18 +1857,15 @@ class ChatOverlay:
 
     def delete_chat(self, chat_id: str) -> None:
         """Remove one chat from the sidebar, DB, and screenshot files."""
-        from chat_llm import ChatSession
-
         if not chat_id:
             return
-        if self._busy:
-            self._set_status("Wait until the current reply finishes.")
+        if self._dictating:
+            self._set_status("Finish dictation first.")
             return
         was_current = chat_id == self.chat_id
         self.store.delete_chat(chat_id)
         if was_current:
             self.chat_id = None
-            self.session = ChatSession()
         self.refresh_sidebar()
         if was_current:
             if self._chat_rows:
@@ -1794,7 +1890,7 @@ class ChatOverlay:
 
     def _on_sidebar_select(self) -> None:
         table = self.sidebar_table
-        if table is None or self._busy:
+        if table is None or self._dictating:
             return
         row = int(table.selectedRow())
         if row < 0 or row >= len(self._chat_rows):
@@ -1805,57 +1901,33 @@ class ChatOverlay:
         self.load_chat(chat_id)
 
     def start_new_chat(self) -> None:
-        from chat_llm import ChatSession
-
-        if self._busy:
+        if self._dictating:
             return
-        model_id = self.selected_model_id_ui()
-        chat = self.store.create_chat(title="New chat", model_id=model_id)
+        chat = self.store.create_chat(title="New chat", model_id="orchestrator")
         self.chat_id = chat.id
-        self.session = ChatSession()
         self._reload_transcript()
         self.refresh_sidebar()
-        # Select the new chat (top of list)
         if self._chat_rows and self._chat_rows[0]["id"] == chat.id:
             self._select_sidebar_row(0)
         self._set_status(self._idle_status())
 
     def load_chat(self, chat_id: str) -> None:
-        from chat_llm import ChatSession, get_model, set_selected_model_id
-
         chat = self.store.get_chat(chat_id)
         if chat is None:
             return
         self.chat_id = chat.id
-        messages = self.store.list_messages(chat.id)
-        self.session = ChatSession.from_messages(messages)
-        self._render_messages(messages)
-        if chat.model_id:
-            info = set_selected_model_id(chat.model_id)
-            self._select_model_in_popup(info.id)
-        else:
-            get_model(self.selected_model_id_ui())
+        self._render_messages(self.store.list_messages(chat.id))
         self._set_status(self._idle_status())
 
-    def _select_model_in_popup(self, model_id: str) -> None:
-        popup = self.model_popup
-        if popup is None:
-            return
-        for i in range(int(popup.numberOfItems())):
-            item = popup.itemAtIndex_(i)
-            if item is not None and str(item.representedObject() or "") == model_id:
-                popup.selectItemAtIndex_(i)
-                return
-
     def submit(self) -> None:
-        if self._busy or self._dictating:
+        if self._dictating:
             return
         text = ""
         if self.input is not None:
             text = str(self.input.stringValue() or "").strip()
         want_shot = self.screenshot_on()
         if not text and not want_shot:
-            self._set_status("Type a message, or turn Screenshot on.")
+            self._set_status("Type a message, or turn the camera on.")
             return
         if not self.chat_id:
             self.start_new_chat()
@@ -1865,100 +1937,78 @@ class ChatOverlay:
             return
         if self.input is not None:
             self.input.setStringValue_("")
-        model_id = self.selected_model_id_ui()
-        self._busy = True
-        # Optimistic user turn + thinking under it (not the bottom status bar).
-        self._append("You", text or "(screenshot)")
-        self._set_thinking("Capturing screen…" if want_shot else "Thinking…")
+        display = text or "(screenshot)"
+        self._append("You", display)
+        self._set_thinking("Looking at the screen…" if want_shot else "Working…")
+        self._awaiting_reply = True
         self._set_status(self._idle_status())
 
         def work() -> None:
             err = None
-            reply = ""
+            relpath = None
             try:
-                from chat_llm import (
-                    capture_desktop_png,
-                    complete_chat,
-                    generate_chat_title,
-                    get_model,
-                    make_chat_client,
-                )
+                from app_status import enqueue_utterance
+                from chat_store import title_from_text
 
-                info = get_model(model_id)
-                client = make_chat_client(info.provider)
-                png = capture_desktop_png() if want_shot else None
-                relpath = None
-                if png:
+                if want_shot:
+                    png = _capture_desktop_png()
                     relpath = self.store.save_screenshot(chat_id, png)
-                user_text = text.strip() or "(no text)"
-                self.store.add_message(
-                    chat_id, "user", user_text, screenshot_relpath=relpath
-                )
+                user_text = text.strip() or "(screenshot)"
+                self.store.add_message(chat_id, "user", user_text, screenshot_relpath=relpath)
                 chat = self.store.get_chat(chat_id)
-                needs_title = bool(chat and chat.title == "New chat")
-                self.store.touch_chat(chat_id, model_id=info.id)
-
-                from Foundation import NSOperationQueue as _Q
-
-                def show_thinking() -> None:
-                    if self._busy:
-                        self._reload_transcript(thinking="Thinking…")
-
-                _Q.mainQueue().addOperationWithBlock_(show_thinking)
-
-                # Rebuild in-memory session without duplicating the user turn
-                # complete_chat will append user+assistant; seed from DB except last user.
-                from chat_llm import ChatSession
-
-                prior = [
-                    m
-                    for m in self.store.list_messages(chat_id)
-                    if m.role in {"user", "assistant"}
-                ]
-                # Drop the user message we just saved — complete_chat adds it again
-                if prior and prior[-1].role == "user":
-                    prior = prior[:-1]
-                self.session = ChatSession.from_messages(prior)
-
-                reply = complete_chat(
-                    client,
-                    self.session,
-                    text,
-                    png,
-                    model_id=info.id,
-                )
-                self.store.add_message(chat_id, "assistant", reply)
-                if needs_title:
-                    title = generate_chat_title(
-                        client,
-                        model_id=info.id,
-                        user_text=user_text,
-                        assistant_text=reply,
+                if chat and chat.title == "New chat":
+                    self.store.touch_chat(
+                        chat_id,
+                        title=title_from_text(user_text),
+                        model_id="orchestrator",
                     )
-                    self.store.touch_chat(chat_id, title=title, model_id=info.id)
+                else:
+                    self.store.touch_chat(chat_id, model_id="orchestrator")
+                enqueue_utterance(
+                    command_for_orchestrator(text, look_at_screen=want_shot),
+                    source="chat",
+                )
+                if not pid_alive(read_status().get("orchestrator_pid")):
+                    err = "Orchestrator is not running. Start: python orchestrator.py --auto"
             except Exception as e:
                 err = str(e)
             from Foundation import NSOperationQueue
 
             def done() -> None:
-                self._busy = False
                 self.refresh_sidebar()
-                # Keep selection on current chat
                 for i, row in enumerate(self._chat_rows):
                     if row["id"] == chat_id:
                         self._select_sidebar_row(i)
                         break
+                thinking = None
+                if self._awaiting_reply and not err:
+                    thinking = "Looking at the screen…" if want_shot else "Working…"
+                self._reload_transcript(thinking=thinking)
                 if err:
-                    self._reload_transcript()
                     self._append("Error", err)
-                    self._set_status(err[:120])
+                    self._set_status(err[:160])
                 else:
-                    self._reload_transcript()
                     self._set_status(self._idle_status())
 
             NSOperationQueue.mainQueue().addOperationWithBlock_(done)
 
         threading.Thread(target=work, name="cua-chat-send", daemon=True).start()
+
+    def _ingest_orchestrator_replies(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        if not self.chat_id:
+            self.start_new_chat()
+        chat_id = self.chat_id
+        if not chat_id:
+            return
+        self._remove_thinking_row()
+        self._awaiting_reply = False
+        for line in lines:
+            self.store.add_message(chat_id, "assistant", line)
+            self._append("Assistant", line)
+        self.refresh_sidebar()
+        self._set_status(self._idle_status())
 
     def _set_mic_icon(self, listening: bool) -> None:
         btn = self.mic_btn
@@ -1982,7 +2032,7 @@ class ChatOverlay:
             )
 
     def toggle_dictation(self) -> None:
-        if self._busy:
+        if self._dictating:
             return
         if self._dictating:
             try:
@@ -2031,24 +2081,56 @@ class ChatOverlay:
                     return
                 if self.input is not None and text:
                     existing = str(self.input.stringValue() or "").strip()
-                    self.input.setStringValue_(
-                        f"{existing} {text}".strip() if existing else text
-                    )
+                    self.input.setStringValue_(f"{existing} {text}".strip() if existing else text)
                 self._set_status("Dictation added — press Send or Enter")
 
             NSOperationQueue.mainQueue().addOperationWithBlock_(done)
 
         threading.Thread(target=work, name="cua-chat-stt", daemon=True).start()
 
-    def show(self) -> None:
+    def _is_miniaturized(self) -> bool:
+        win = self.window
+        if win is None:
+            return False
+        try:
+            return bool(win.isMiniaturized())
+        except Exception:
+            return False
+
+    def _is_visible_on_screen(self) -> bool:
+        win = self.window
+        if win is None or self._is_miniaturized():
+            return False
+        try:
+            return bool(win.isVisible())
+        except Exception:
+            return False
+
+    def show(self, *, force: bool = False) -> None:
+        """Bring the chat panel forward. Respects the yellow minimize button unless ``force``."""
         if not self.is_alive():
             return
+        if not force and self._is_miniaturized():
+            return
+        try:
+            if force and self._is_miniaturized():
+                self.window.deminiaturize_(None)
+        except Exception:
+            pass
         try:
             self.window.orderFrontRegardless()
         except Exception:
             pass
         try:
+            from AppKit import NSApp  # type: ignore
+
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        try:
             self.window.makeKeyAndOrderFront_(None)
+            if self.input is not None:
+                self.window.makeFirstResponder_(self.input)
         except Exception:
             try:
                 self.window.orderFront_(None)
@@ -2058,6 +2140,9 @@ class ChatOverlay:
 
     def hide(self) -> None:
         if not self.is_alive():
+            return
+        # Already in the Dock — leave it; orderOut would fight minimize.
+        if self._is_miniaturized():
             return
         try:
             self.window.orderOut_(None)
@@ -2069,9 +2154,22 @@ class ChatOverlay:
         if not self.is_alive():
             return
         if chat_should_show(data):
-            self.show()
+            # Only raise if we are fully hidden (e.g. after a capture hide),
+            # never if the user miniaturized the window.
+            if not self._is_miniaturized() and not self._is_visible_on_screen():
+                self.show()
         else:
             self.hide()
+        try:
+            from app_status import consume_chat_inbox
+
+            lines = consume_chat_inbox()
+        except Exception:
+            lines = []
+        if lines:
+            self._ingest_orchestrator_replies(lines)
+        if self.status_label is not None and not self._dictating:
+            self._set_status(self._idle_status())
 
     def destroy(self) -> None:
         self.close_zoom()

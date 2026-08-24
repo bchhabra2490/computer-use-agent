@@ -403,7 +403,7 @@ FACE (blobatar overlay — any name, or pebble / droplet / cloud / sun)
   cua face pebble       Curated shortcut
   cua face jarvis       Any other name hashes to a unique blobatar
 
-CHAT (desktop window — screenshot toggle on by default; ⌘⌥C)
+CHAT (desktop window — screenshot toggle off by default; ⌘⌥C)
   cua chat on
   cua chat off
   cua chat toggle

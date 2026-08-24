@@ -64,6 +64,7 @@ def _default_state() -> dict[str, Any]:
         "phone_gateway_pid": None,
         "pending_utterances": [],
         "pending_speaks": [],
+        "chat_inbox": [],
         "last_spoken": None,
         "last_llm": None,
         "reply_sink": "mac",
@@ -100,6 +101,8 @@ def _read() -> dict[str, Any]:
             base["pending_utterances"] = []
         if not isinstance(base.get("pending_speaks"), list):
             base["pending_speaks"] = []
+        if not isinstance(base.get("chat_inbox"), list):
+            base["chat_inbox"] = []
         return base
     except Exception:
         return _default_state()
@@ -337,7 +340,7 @@ def enqueue_utterance(
     photo: bool = False,
     sink: str | None = None,
 ) -> None:
-    """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
+    """Queue a text command (chat, phone, or API). Orchestrator consumes it like STT."""
     text = (text or "").strip()
     if not text:
         return
@@ -357,7 +360,7 @@ def enqueue_utterance(
         data["pending_utterances"] = pending[-20:]
         _write(data)
     kind = "photo" if photo else "queued"
-    log(f"[phone] {kind}: {text[:160]}")
+    log(f"[{source}] {kind}: {text[:160]}")
 
 
 def utterance_pending() -> bool:
@@ -371,7 +374,11 @@ def _normalize_sink(sink: str | None) -> str:
 
 
 def parse_reply_sink_param(value: Any) -> str | None:
-    """Parse optional API ``sink`` / ``speaker``; ``None`` leaves reply_sink unchanged."""
+    """Parse optional API ``sink`` / ``speaker``.
+
+    ``None`` / empty means this request does not select a speaker; consuming the
+    utterance switches ``reply_sink`` back to Mac.
+    """
     if value is None:
         return None
     s = str(value).strip().lower()
@@ -403,8 +410,12 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
-        if isinstance(item, dict) and item.get("sink") is not None:
-            data["reply_sink"] = _normalize_sink(str(item.get("sink")))
+        if isinstance(item, dict):
+            # Per-turn speaker: phone only when this item requested it.
+            if item.get("sink") is not None:
+                data["reply_sink"] = _normalize_sink(str(item.get("sink")))
+            else:
+                data["reply_sink"] = "mac"
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -469,10 +480,35 @@ def set_last_spoken(text: str) -> None:
     text = (text or "").strip()
     if not text:
         return
+    clipped = text[:2000]
     with _lock:
         data = _read()
-        data["last_spoken"] = text[:2000]
+        data["last_spoken"] = clipped
+        if data.get("chat_overlay_enabled"):
+            inbox = list(data.get("chat_inbox") or [])
+            prev = inbox[-1].get("text") if inbox and isinstance(inbox[-1], dict) else None
+            if prev != clipped:
+                inbox.append({"text": clipped, "ts": time.time()})
+                data["chat_inbox"] = inbox[-50:]
         _write(data)
+
+
+def consume_chat_inbox() -> list[str]:
+    """Pop spoken lines queued for the chat window (orchestrator / TTS)."""
+    with _lock:
+        data = _read()
+        items = list(data.get("chat_inbox") or [])
+        data["chat_inbox"] = []
+        _write(data)
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            line = item.strip()
+        else:
+            line = str((item or {}).get("text") or "").strip()
+        if line:
+            out.append(line)
+    return out
 
 
 def write_phone_speech(wav_bytes: bytes) -> None:

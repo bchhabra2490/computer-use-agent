@@ -393,6 +393,49 @@ MARK_DONE_TOOL = {
 
 COMPUTER_TOOL = {"type": "computer"}
 
+# OpenAI's built-in ``computer`` tool is not on DeepSeek. Same DesktopController
+# actions as function calls; the agent loop attaches a screenshot after each batch.
+DESKTOP_ACTIONS_TOOL = {
+    "type": "function",
+    "name": "desktop_actions",
+    "description": (
+        "Click, type, scroll, and press keys on the real Mac desktop. "
+        "x/y are pixels in the latest screenshot (origin top-left). "
+        "After the batch you get a new screenshot. Prefer this for all GUI work."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "actions": {
+                "type": "array",
+                "description": (
+                    "Actions in order. type is click, double_click, move, scroll, "
+                    "keypress, type, wait, or screenshot. click/move/scroll need x,y. "
+                    "scroll uses scroll_x/scroll_y in screenshot pixels (positive "
+                    "scroll_y = page down). type needs text. keypress needs keys."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "button": {"type": "string"},
+                        "text": {"type": "string"},
+                        "keys": {"type": "array", "items": {"type": "string"}},
+                        "scroll_x": {"type": "number"},
+                        "scroll_y": {"type": "number"},
+                    },
+                    "required": ["type"],
+                    "additionalProperties": True,
+                },
+            },
+        },
+        "required": ["actions"],
+        "additionalProperties": False,
+    },
+}
+
 SHARED_TOOL_NAMES = frozenset(
     {
         "who_am_i",
@@ -467,13 +510,16 @@ REGISTRY: tuple[RegisteredTool, ...] = (
 )
 
 
-def openai_tools(brain: Brain) -> list[dict[str, Any]]:
-    """OpenAI Responses tool list for one brain, plus MCP when connected."""
+def openai_tools(brain: Brain, *, provider: str = "openai") -> list[dict[str, Any]]:
+    """Responses tool list for one brain, plus MCP when connected."""
     from mcp_client import mcp_openai_tools
 
     tools: list[dict[str, Any]] = []
     if brain == AGENT:
-        tools.append(COMPUTER_TOOL)
+        if (provider or "openai").strip().lower() == "deepseek":
+            tools.append(DESKTOP_ACTIONS_TOOL)
+        else:
+            tools.append(COMPUTER_TOOL)
     for item in REGISTRY:
         if brain in item.brains:
             tools.append(item.schema)
@@ -485,14 +531,17 @@ def orchestrator_tools() -> list[dict[str, Any]]:
     return openai_tools(ORCHESTRATOR)
 
 
-def agent_tools() -> list[dict[str, Any]]:
-    return openai_tools(AGENT)
+def agent_tools(*, provider: str = "openai") -> list[dict[str, Any]]:
+    return openai_tools(AGENT, provider=provider)
 
 
-def tool_names(brain: Brain) -> set[str]:
+def tool_names(brain: Brain, *, provider: str = "openai") -> set[str]:
     names = {item.name for item in REGISTRY if brain in item.brains}
     if brain == AGENT:
-        names.add("computer")
+        if (provider or "openai").strip().lower() == "deepseek":
+            names.add("desktop_actions")
+        else:
+            names.add("computer")
     names.add("mcp_call")
     names.add("read_screen")
     return names

@@ -416,7 +416,10 @@ def main() -> None:
                     from chat_overlay import chat_should_show
 
                     if chat_should_show(data):
-                        chat.show()
+                        # Don't deminiaturize / yank to front after CU capture.
+                        if not getattr(chat, "_is_miniaturized", lambda: False)():
+                            if not getattr(chat, "_is_visible_on_screen", lambda: False)():
+                                chat.show()
                     else:
                         chat.hide()
                 except Exception:
@@ -824,6 +827,14 @@ def main() -> None:
             status_log("Chat window on" if on else "Chat window off")
             print("[tray] chat on" if on else "[tray] chat off", flush=True)
             self.applyStatus(read_status())
+            # Explicit menu/hotkey on: bring the panel forward (even if Dock-minimized).
+            if on:
+                chat = getattr(self, "chat", None)
+                if chat is not None:
+                    try:
+                        chat.show(force=True)
+                    except Exception:
+                        pass
 
         def toggleSleep_(self, _sender) -> None:
             on = toggle_sleep_mode()

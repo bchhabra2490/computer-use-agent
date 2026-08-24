@@ -308,6 +308,15 @@ class ChatStore:
         return path.read_bytes()
 
 
+def title_from_text(text: str, fallback: str = "New chat") -> str:
+    line = (text or "").strip().replace("\n", " ")
+    if not line:
+        return fallback
+    if len(line) > 48:
+        return line[:45].rstrip() + "…"
+    return line
+
+
 _store: ChatStore | None = None
 
 

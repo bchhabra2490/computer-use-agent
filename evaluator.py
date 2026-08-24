@@ -17,7 +17,15 @@ from typing import Any
 
 from openai import OpenAI
 
+from llm_client import make_llm_client, model_for_request
 from task_log import TaskLog
+
+
+def _client_for_model(client: OpenAI, model: str) -> OpenAI:
+    """Use a provider matching ``model``; keep mocks/fakes for tests."""
+    if type(client).__name__ != "OpenAI":
+        return client
+    return make_llm_client(model=model)
 
 ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "gpt-5-mini")
 EVAL_MODEL = os.environ.get("EVAL_MODEL", "gpt-5-mini")
@@ -177,7 +185,7 @@ Reply JSON only:
 {{"difficulty":"easy"|"medium"|"hard","reason":"one short sentence"}}
 """
     try:
-        response = client.responses.create(
+        response = _client_for_model(client, ROUTER_MODEL).responses.create(
             model=ROUTER_MODEL,
             input=prompt,
         )
@@ -278,8 +286,8 @@ def coach_agent(
         )
 
     try:
-        response = client.responses.create(
-            model=EVAL_MODEL,
+        response = _client_for_model(client, EVAL_MODEL).responses.create(
+            model=model_for_request(EVAL_MODEL, has_image=bool(screenshot_b64)),
             instructions=instructions,
             input=[{"role": "user", "content": content}],
         )

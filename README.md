@@ -405,17 +405,13 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   or set `FACE_OVERLAY=0`.
 - **Sleep** — ignore the wake word (menu **Sleep** or **⌘⌥S** / `cua sleep on`).
   Face uses the sleep expression; turn Sleep off to wink and listen again.
-- **Chat** — a floating window with a **sidebar** of saved chats (+ New chat;
-  ⋯ **Delete** removes the chat, messages, and screenshots),
-  a **model** popup (OpenAI gpt-4o-mini / gpt-4o, DeepSeek Flash / Pro / Vision;
-  selection is remembered), and a Claude-style composer: camera icon (screenshot
-  on/off by color), mic, a wide message field, and a paper-plane send. History is stored
-  in SQLite under `.runtime/chat/`; screenshots go in `screenshots/` and show as
-  inline thumbnails (click to zoom; **Open in Preview** in the viewer). Assistant
-  replies sit on the left with the current face blobatar; your messages sit on
-  the right. DeepSeek text models auto-use the vision model when a
-  screenshot is attached. Toggle **Chat** in the menu bar, **⌘⌥C**, `cua chat on`,
-  or `CHAT_OVERLAY=1`. Window defaults to ~55%×72% of the screen (resizable, min 720×480).
+- **Chat** — typed front-end for the **orchestrator** (same queue as the wake word
+  and phone `/v1/command`). Sidebar of saved chats (+ New chat; ⋯ **Delete**).
+  Camera icon: Jarvis looks at the screen. Mic, wide field, paper-plane send.
+  Spoken replies show in bubbles (and still play on the Mac). History is SQLite
+  under `.runtime/chat/`. Needs `python orchestrator.py --auto`. Toggle **Chat**
+  in the menu bar, **⌘⌥C**, `cua chat on`, or `CHAT_OVERLAY=1`. Window defaults
+  to ~55%×72% of the screen (resizable, min 720×480).
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
   **Add Memory** (screenshot + description), **Log Overlay**, **Face Overlay**,
@@ -499,10 +495,11 @@ frame. Refetch `/v1/screen` when that timestamp changes — there is no extra
 screenshot; it is the same PNG the model just saw, saved as a phone-sized JPEG.
 
 TTS is always synthesized on the Mac. Pass `"sink": "phone"` on `/v1/command`,
-`/v1/audio`, or `/v1/photo` (or `POST /v1/control` with `"action": "sink"`) to
-route replies to the phone: playback skips Mac speakers, `speech_at` updates, and
-you refetch `/v1/speech` (WAV) to play locally. Without `sink`, the current
-`reply_sink` is unchanged (Mac wake-word turns use `afplay`).
+`/v1/audio`, or `/v1/photo` to route **that turn’s** replies to the phone:
+playback skips Mac speakers, `speech_at` updates, and you refetch `/v1/speech`
+(WAV) to play locally. The next command without `sink: "phone"` (wake word, chat,
+or API) switches back to Mac `afplay`. `POST /v1/control` with `"action": "sink"`
+sets the speaker until the next command.
 
 LLM replies are in `logs` as `[llm]`, `[agent]`, `[tts]`, or `[mark_done]`
 lines (up to ~2000 characters). `last_llm` is the newest of those; `last_spoken`
@@ -548,9 +545,13 @@ python phone_gateway.py          # run the server alone (optional)
 ```
 
 **Models (cost-aware defaults)**
-- Orchestrator: `gpt-5-mini` (`ORCHESTRATOR_MODEL`)
+- Orchestrator: `gpt-5-mini` (`ORCHESTRATOR_MODEL`). Set `ORCHESTRATOR_MODEL=deepseek-v4-pro`
+  (and `DEEPSEEK_API_KEY`) to reason with DeepSeek; STT/TTS stay on OpenAI/Sarvam/etc.
+  Screenshots/photos use `ORCHESTRATOR_VISION_MODEL` / `DEEPSEEK_VISION_MODEL` when needed.
 - Computer agent: difficulty router picks `gpt-5.6-luna` / `gpt-5.6-terra` /
-  `gpt-5.6` and max-steps **25 / 100 / 200** (`AGENT_ROUTE=1`; set `AGENT_MODEL` to force one model)
+  `gpt-5.6` and max-steps **25 / 100 / 200** (`AGENT_ROUTE=1`; set `AGENT_MODEL` to force one model).
+  DeepSeek agents (`AGENT_MODEL=deepseek-v4-pro`) use the `desktop_actions` function tool
+  instead of OpenAI’s built-in `computer` tool.
 - N-step coach: every `EVAL_EVERY` turns (default 5) via `EVAL_MODEL=gpt-5-mini`
 - STT: `STT_PROVIDER=openai` (default) uses Realtime `gpt-live-transcribe`
   (`STT_MODEL`); ends after `STT_IDLE_SECONDS` with no new words.
@@ -703,8 +704,8 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `orchestrator.py` — voice router (wake word → `start_task` / `ask_user` / `give_response_to_user`).
 - `status_tray.py` / `app_status.py` — macOS menu-bar status + shared live log ring.
 - `face_overlay.py` — top-center blobatar (`cua face NAME`, or curated pebble/droplet/cloud/sun).
-- `chat_overlay.py` / `chat_llm.py` / `chat_store.py` — floating chat (sidebar,
-  model picker, SQLite history + screenshots; `cua chat on`).
+- `chat_overlay.py` / `chat_store.py` — floating chat UI for the orchestrator
+  (`cua chat on`; SQLite history + screenshots).
 - `wake.py` — wake-word detection (openWakeWord models or any STT phrase).
 - `agent.py` — computer-use loop (tools, logging, optional skill creation).
 - `terminal.py` — `run_terminal` shell executor (timeout + truncated output).

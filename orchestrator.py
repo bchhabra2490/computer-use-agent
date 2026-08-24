@@ -48,6 +48,16 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from llm_client import (
+    fold_orphan_tool_outputs,
+    input_has_image,
+    make_llm_client,
+    merge_tool_followup_input,
+    model_for_request,
+    orchestrator_provider,
+    supports_previous_response_id,
+)
+
 import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
@@ -64,8 +74,10 @@ from app_status import (
     remove_agent,
     request_mark_done,
     request_quit,
+    reply_sink,
     set_last_spoken,
     set_reply_sink,
+    speak_pending,
     speak_pending,
     consume_speak,
     unregister_orchestrator,
@@ -181,7 +193,10 @@ def is_fatal_llm_error(exc: BaseException) -> bool:
 
 
 def llm_error_speech(exc: BaseException) -> str:
-    """Short spoken form of an OpenAI error (no URLs)."""
+    """Short spoken form of a reasoning-API error (no URLs)."""
+    if isinstance(exc, LlmUnavailableError):
+        text = str(exc).strip()
+        return text or "The language model could not complete that."
     blob = _exception_blob(exc)
     match = re.search(r"['\"]message['\"]\s*:\s*['\"]([^'\"]+)['\"]", blob)
     if match:
@@ -192,13 +207,15 @@ def llm_error_speech(exc: BaseException) -> str:
     lower = blob.lower()
     if any(m in lower for m in _CREDIT_MARKERS):
         return "You have no credits remaining. Add credits to continue using the API."
+    provider = orchestrator_provider()
+    vendor = "DeepSeek" if provider == "deepseek" else "OpenAI"
     if any(m in lower for m in _AUTH_MARKERS):
-        return "The OpenAI API key is invalid. Check your environment file."
+        return f"The {vendor} API key is invalid. Check your environment file."
     brief = re.sub(r"https?://\S+", "", str(exc))
     brief = re.sub(r"\s+", " ", brief).strip()
     if len(brief) > 180:
         brief = brief[:177].rstrip() + "…"
-    return f"I hit an OpenAI error. {brief}" if brief else "I hit an OpenAI error and could not complete that."
+    return f"I hit a {vendor} error. {brief}" if brief else f"I hit a {vendor} error and could not complete that."
 
 
 _phone_photo_in_session = False
@@ -225,6 +242,7 @@ class AgentJob:
         self.thread: threading.Thread | None = None
         self.redirected_from_barge = False
         self.log_dir: str | None = None
+        self.reply_sink: str = "mac"
         self.feedback_payload: dict[str, Any] | None = None
 
     @property
@@ -491,6 +509,7 @@ def _create_response(
     client: OpenAI,
     *,
     llm_tts: Any | None = None,
+    prior_response: Any | None = None,
     **kwargs: Any,
 ):
     """
@@ -500,7 +519,25 @@ def _create_response(
     arguments are fed into LowLatencyTTS as they arrive. Falls back to a
     non-streaming create on error, except quota/auth failures which are spoken
     instead of retried.
+
+    DeepSeek is stateless: ``previous_response_id`` is ignored by their API, so
+    tool follow-ups must include the ``function_call`` items next to the outputs
+    (pass ``prior_response``).
     """
+    kwargs["model"] = model_for_request(
+        kwargs.get("model") or MODEL,
+        has_image=input_has_image(kwargs.get("input")),
+    )
+    if not supports_previous_response_id(
+        kwargs["model"],
+        provider=os.environ.get("ORCHESTRATOR_BACKEND"),
+    ):
+        kwargs.pop("previous_response_id", None)
+        if prior_response is not None:
+            kwargs["input"] = merge_tool_followup_input(
+                prior_response, kwargs.get("input")
+            )
+        kwargs["input"] = fold_orphan_tool_outputs(kwargs.get("input"))
     use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
     if not use_stream:
         return _sync_create_response(client, kwargs)
@@ -604,6 +641,19 @@ def _create_response(
                         _feed_message_growth(meta)
             elif etype == "response.completed":
                 final_response = event.response
+                # DeepSeek/stream often omits call_id on the completed payload;
+                # copy ids gathered from earlier stream events.
+                if final_response is not None and items:
+                    for item in getattr(final_response, "output", None) or []:
+                        if getattr(item, "type", None) != "function_call":
+                            continue
+                        meta = items.get(getattr(item, "id", None)) or {}
+                        cid = meta.get("call_id") or ""
+                        if cid and not getattr(item, "call_id", None):
+                            try:
+                                item.call_id = cid
+                            except Exception:
+                                pass
             elif etype == "response.failed":
                 print(f"[orchestrator] stream failed: {event}", flush=True)
     except Exception as e:
@@ -746,6 +796,9 @@ def _launch_agent_job(
         match_text=spec.match_text,
         speaker_context=speaker_context,
     )
+    job.reply_sink = reply_sink()
+    if job.reply_sink == "phone":
+        print("[orchestrator] task output → phone", flush=True)
     job.redirected_from_barge = redirected_from_barge
     _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
     _speak_later(client, "Starting that now.")
@@ -936,8 +989,9 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
     return utterance
 
 
-def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | None:
+def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: OpenAI | None = None) -> str | None:
     """Look at a phone photo while a computer task is running (no start_task)."""
+    api = llm if llm is not None else client
     b64 = base64.b64encode(jpeg).decode("ascii")
     prompt = (
         "Look at this photo from the user's phone. "
@@ -946,8 +1000,8 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | 
     )
     get_session().enter("thinking", "Looking at phone photo")
     try:
-        response = client.responses.create(
-            model=MODEL,
+        response = api.responses.create(
+            model=model_for_request(MODEL, has_image=True),
             input=[
                 {
                     "role": "user",
@@ -1096,6 +1150,7 @@ def _supervise_agent(
     ask_bridge: AskUserBridge,
     *,
     record_speaker: Callable[[], None] | None = None,
+    llm: OpenAI | None = None,
 ) -> str:
     """
     Main-thread loop while the agent thread runs.
@@ -1159,6 +1214,10 @@ def _supervise_agent(
             wake_prompt=f"Waiting for {format_wake_phrases()}… (agent busy)",
             listen_prompt="Listening for mid-task update…",
         )
+        if command:
+            job.reply_sink = reply_sink()
+        else:
+            set_reply_sink(job.reply_sink)
         if quit_requested():
             break
         if mark_done_pending(job.call_id):
@@ -1174,7 +1233,7 @@ def _supervise_agent(
                 print("[orchestrator] phone photo — answering without stopping the computer task")
                 print(f'\n[user] "{command}"')
                 status_log(f'[user] "{command}"')
-                barged = _reply_to_phone_photo(client, command, jpeg)
+                barged = _reply_to_phone_photo(client, command, jpeg, llm=llm)
                 if barged:
                     command = barged
                 else:
@@ -1202,7 +1261,7 @@ def _supervise_agent(
                 else:
                     _forward_to_agent(publisher, pending_cmd)
                     continue
-            result = _save_screen_now(client, command)
+            result = _save_screen_now(llm if llm is not None else client, command)
             ok = result.lower().startswith("saved")
             barged = _speak(client, "Saved." if ok else "Could not save the screen.")
             if barged:
@@ -1479,6 +1538,7 @@ def _process_response(
     user_said: str = "",
     record_speaker: Callable[[], None] | None = None,
     compact_state: SessionCompactState | None = None,
+    llm: OpenAI | None = None,
 ) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -1488,6 +1548,7 @@ def _process_response(
     The third value is function_call_output items that must be sent on the
     next user turn when we already spoke and skipped a recap model call.
     """
+    api = llm if llm is not None else client
     end_session = False
     while True:
         # Only speech from *this* model response should suppress leftover TTS.
@@ -1510,8 +1571,9 @@ def _process_response(
                 if turn is not None:
                     turn.add("ask_user", f"Q: {leftover}\nA: {answer}")
                 response = _create_response(
-                    client,
+                    api,
                     llm_tts=llm_tts,
+                    prior_response=response,
                     model=MODEL,
                     tools=orchestrator_tools(),
                     previous_response_id=response.id,
@@ -1578,11 +1640,12 @@ def _process_response(
                 publisher,
                 ask_bridge,
                 record_speaker=record_speaker,
+                llm=api,
             )
             task_history.append({"task": deferred_job.task, "result": result})
             if compact_state is not None:
                 cp = run_orchestrator_checkpoint(
-                    client,
+                    api,
                     compact_state,
                     task_history,
                     capture_desktop=False,
@@ -1636,14 +1699,21 @@ def _process_response(
                 "[orchestrator] already spoke — not asking the model to recap",
                 flush=True,
             )
+            # DeepSeek cannot carry orphan tool outputs into the next user turn
+            # (previous_response_id is ignored). OpenAI keeps them for the chain.
+            if not supports_previous_response_id(
+                MODEL, provider=os.environ.get("ORCHESTRATOR_BACKEND")
+            ):
+                return response, end_session, []
             return response, end_session, outputs
 
         if not outputs:
             return response, end_session, []
 
         response = _create_response(
-            client,
+            api,
             llm_tts=llm_tts,
+            prior_response=response,
             model=MODEL,
             tools=orchestrator_tools(),
             previous_response_id=response.id,
@@ -1676,6 +1746,14 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pass
 
     client = OpenAI()
+    llm = make_llm_client(
+        model=MODEL,
+        provider=os.environ.get("ORCHESTRATOR_BACKEND"),
+    )
+    print(
+        f"[orchestrator] reasoning={orchestrator_provider()} model={MODEL}",
+        flush=True,
+    )
     audio = AudioSession(client, session=sess)
     bind_audio(audio)
     llm_tts = None
@@ -1804,7 +1882,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if barged:
                     pending = barged
                     continue
-                result = _save_screen_now(client, utterance)
+                result = _save_screen_now(llm, utterance)
                 ok = result.lower().startswith("saved")
                 barged = _speak(client, "Saved." if ok else "Could not save the screen.")
                 if barged:
@@ -1830,7 +1908,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             compact_state.begin_turn()
             emit("turn_start", lane="main", utterance=utterance[:160])
             cp = run_orchestrator_checkpoint(
-                client,
+                llm,
                 compact_state,
                 task_history,
                 pending_fn_outputs=pending_fn_outputs or None,
@@ -1864,7 +1942,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 try:
                     if previous_id is None:
                         response = _create_response(
-                            client,
+                            llm,
                             llm_tts=llm_tts,
                             model=MODEL,
                             tools=orchestrator_tools(),
@@ -1873,7 +1951,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                         )
                     else:
                         response = _create_response(
-                            client,
+                            llm,
                             llm_tts=llm_tts,
                             model=MODEL,
                             tools=orchestrator_tools(),
@@ -1890,7 +1968,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     if overflow_attempt == 0 and is_context_overflow_error(e):
                         print(f"[orchestrator] context overflow ({e}); recovering once", flush=True)
                         cp = run_orchestrator_checkpoint(
-                            client,
+                            llm,
                             compact_state,
                             task_history,
                             capture_desktop=True,
@@ -1934,6 +2012,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     user_said=utterance,
                     record_speaker=_record_speaker,
                     compact_state=compact_state,
+                    llm=llm,
                 )
             except LlmUnavailableError as e:
                 _announce_llm_failure(client, e)

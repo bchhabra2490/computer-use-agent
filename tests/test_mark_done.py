@@ -115,6 +115,12 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(st.consume_utterance(), "play a song")
         self.assertEqual(st.reply_sink(), "phone")
 
+    def test_enqueue_without_sink_switches_back_to_mac(self) -> None:
+        st.set_reply_sink("phone")
+        st.enqueue_utterance("from chat")
+        self.assertEqual(st.consume_utterance(), "from chat")
+        self.assertEqual(st.reply_sink(), "mac")
+
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")
         st.enqueue_utterance("two")
@@ -148,6 +154,18 @@ class FlagTests(unittest.TestCase):
         self.assertTrue(blob.startswith(b"RIFF"))
         self.assertFalse(st.utterance_pending())
         self.assertTrue(st.read_status().get("speech_at"))
+
+    def test_chat_inbox_from_spoken_when_overlay_on(self) -> None:
+        st.set_chat_overlay_enabled(True)
+        st.set_last_spoken("hello there")
+        st.set_last_spoken("hello there")
+        self.assertEqual(st.consume_chat_inbox(), ["hello there"])
+        self.assertEqual(st.consume_chat_inbox(), [])
+
+    def test_chat_inbox_skipped_when_overlay_off(self) -> None:
+        st.set_chat_overlay_enabled(False)
+        st.set_last_spoken("secret")
+        self.assertEqual(st.consume_chat_inbox(), [])
 
 
 if __name__ == "__main__":

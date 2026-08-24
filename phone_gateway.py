@@ -9,8 +9,9 @@ accepts a camera still (``POST /v1/photo``) for the orchestrator to look at
 toggles tray flags (send / mark done / quit), and streams ``status.json``.
 
 TTS is synthesized on the Mac. Pass ``sink: "phone"`` on API requests to route
-replies to ``GET /v1/speech`` (skip Mac ``afplay``). Without ``sink``, the current
-``reply_sink`` is unchanged (Mac wake-word turns default to Mac speakers).
+replies to ``GET /v1/speech`` (skip Mac ``afplay``) for **that** command and any
+computer-use task it starts. A later command without ``sink: "phone"`` (Mac wake
+word, chat, or API) switches ``reply_sink`` back to Mac speakers.
 
 Auth: Bearer token in ``Authorization`` or ``?token=`` (SSE). Token lives in
 ``.runtime/phone.token`` (or ``PHONE_GATEWAY_TOKEN``). Max 5 characters so it

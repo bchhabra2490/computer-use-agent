@@ -282,9 +282,9 @@ def _capture_desktop_png() -> bytes:
         return DesktopController().capture_screenshot()
 
 
-def _json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def _json_body(handler: BaseHTTPRequestHandler, *, max_bytes: int = 8_000_000) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length") or 0)
-    if length <= 0 or length > 8_000_000:
+    if length <= 0 or length > max_bytes:
         return {}
     raw = handler.rfile.read(length)
     try:
@@ -292,6 +292,275 @@ def _json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def list_speaker_payload() -> dict[str, Any]:
+    from speaker_id import (
+        ENROLLMENT_PASSAGES,
+        LONG_PASSAGE_COUNT,
+        SPEAKER_ID_ENABLED,
+        SPEAKER_ID_MODEL,
+        list_profiles,
+    )
+
+    speakers = []
+    for p in list_profiles():
+        speakers.append(
+            {
+                "slug": p.get("slug") or p.get("name"),
+                "display_name": p.get("display_name") or p.get("slug") or p.get("name"),
+                "enrolled_at": p.get("enrolled_at"),
+                "threshold": p.get("threshold"),
+                "threshold_short": p.get("threshold_short"),
+                "model": p.get("model") or SPEAKER_ID_MODEL,
+                "sample_count": len(p.get("embeddings") or []),
+            }
+        )
+    passages = [
+        {
+            "index": i,
+            "title": title,
+            "text": text,
+            "short": i >= LONG_PASSAGE_COUNT,
+        }
+        for i, (title, text) in enumerate(ENROLLMENT_PASSAGES)
+    ]
+    return {
+        "ok": True,
+        "enabled": SPEAKER_ID_ENABLED,
+        "model": SPEAKER_ID_MODEL,
+        "speakers": speakers,
+        "passages": passages,
+        "required_samples": len(ENROLLMENT_PASSAGES),
+    }
+
+
+def enroll_speaker_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    from speaker_enroll import _release_audio_for_capture
+    from speaker_id import (
+        ENROLLMENT_PASSAGES,
+        enroll_speaker,
+        slug_name,
+        wav_has_min_speech,
+    )
+
+    name = str(body.get("name") or body.get("display_name") or "").strip()
+    if not name:
+        raise ValueError("name is required")
+    samples_b64 = body.get("samples") or body.get("wav_b64") or []
+    if not isinstance(samples_b64, list):
+        raise ValueError("samples must be a list of base64 WAV strings")
+    if len(samples_b64) != len(ENROLLMENT_PASSAGES):
+        raise ValueError(
+            f"Need {len(ENROLLMENT_PASSAGES)} WAV samples (got {len(samples_b64)})"
+        )
+    _release_audio_for_capture()
+    samples: list[bytes] = []
+    for i, raw in enumerate(samples_b64):
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"sample {i + 1} is empty")
+        try:
+            wav = base64.b64decode(raw.strip(), validate=False)
+        except Exception as e:
+            raise ValueError(f"sample {i + 1} is not valid base64: {e}") from e
+        if not wav.startswith(b"RIFF"):
+            raise ValueError(f"sample {i + 1} must be WAV (RIFF) audio")
+        short = i >= 3
+        if not wav_has_min_speech(wav):
+            kind = "short phrase" if short else "passage"
+            raise ValueError(f"sample {i + 1} ({kind}) has too little speech — record again")
+        samples.append(wav)
+    root = enroll_speaker(name, samples)
+    return {
+        "ok": True,
+        "slug": slug_name(name),
+        "display_name": name,
+        "path": str(root),
+        "note": "Restart the orchestrator (or wait for the next utterance) to use speaker ID.",
+    }
+
+
+def observe_status_payload() -> dict[str, Any]:
+    import observe as observe_mod
+
+    pid = observe_mod.running_pid()
+    drafts = []
+    for path in observe_mod.list_proposed():
+        try:
+            data = observe_mod.load_draft(path)
+        except Exception:
+            continue
+        focus = data.get("focus") or {}
+        memories = []
+        for i, item in enumerate(data.get("memories") or [], start=1):
+            memories.append(
+                {
+                    "ref": f"m{i}",
+                    "kind": item.get("kind") or "app",
+                    "name": item.get("name") or "",
+                    "text": item.get("text") or "",
+                }
+            )
+        skills = []
+        for i, item in enumerate(data.get("skills") or [], start=1):
+            skills.append(
+                {
+                    "ref": f"s{i}",
+                    "name": item.get("name") or "",
+                    "description": item.get("description") or "",
+                    "body": item.get("body") or "",
+                }
+            )
+        drafts.append(
+            {
+                "id": path.name,
+                "app": focus.get("app") or "",
+                "url": focus.get("url") or "",
+                "created_at": data.get("created_at") or data.get("started_at"),
+                "memories": memories,
+                "skills": skills,
+            }
+        )
+    return {
+        "ok": True,
+        "running": pid is not None,
+        "pid": pid,
+        "draft_seconds": observe_mod.DRAFT_SECONDS,
+        "proposed_dir": str(observe_mod.PROPOSED_DIR),
+        "drafts": drafts,
+    }
+
+
+def set_observe_running(enabled: bool) -> dict[str, Any]:
+    import observe as observe_mod
+
+    if enabled:
+        code = observe_mod.cmd_start()
+        if code != 0 and observe_mod.running_pid() is None:
+            raise RuntimeError("Failed to start observe daemon")
+    else:
+        observe_mod.cmd_stop()
+    return observe_status_payload()
+
+
+def accept_observe_draft(
+    draft_id: str,
+    *,
+    items: list[str] | None = None,
+    all_drafts: bool = False,
+) -> dict[str, Any]:
+    import observe as observe_mod
+
+    drafts = observe_mod.list_proposed()
+    if all_drafts:
+        chosen = drafts
+    else:
+        chosen = observe_mod._find_drafts(draft_id, drafts)
+        if not chosen:
+            raise KeyError(f"unknown draft {draft_id!r}")
+    written: list[str] = []
+    for path in chosen:
+        written.extend(
+            observe_mod.accept_draft(
+                path,
+                items=items if not all_drafts else None,
+            )
+        )
+    return {"ok": True, "written": written, **observe_status_payload()}
+
+
+def reject_observe_draft(
+    draft_id: str,
+    *,
+    items: list[str] | None = None,
+    all_drafts: bool = False,
+) -> dict[str, Any]:
+    import observe as observe_mod
+
+    drafts = observe_mod.list_proposed()
+    if all_drafts:
+        chosen = drafts
+    else:
+        chosen = observe_mod._find_drafts(draft_id, drafts)
+        if not chosen:
+            raise KeyError(f"unknown draft {draft_id!r}")
+    for path in chosen:
+        observe_mod.reject_draft(
+            path,
+            items=items if not all_drafts else None,
+        )
+    return {"ok": True, **observe_status_payload()}
+
+
+def list_memories_payload() -> dict[str, Any]:
+    from memory import (
+        PERSONAL_FILE_SLUG,
+        _is_live_layout_memory,
+        list_memories,
+    )
+
+    notes = []
+    for note in list_memories("all"):
+        if _is_live_layout_memory(note.kind, note.name):
+            continue
+        preview = " ".join((note.text or "").split())
+        if len(preview) > 140:
+            preview = preview[:139] + "…"
+        notes.append(
+            {
+                "kind": note.kind,
+                "name": note.name,
+                "rel": note.rel,
+                "preview": preview or "(empty)",
+                "text": note.text,
+                "editable": True,
+                "locked_name": note.kind == "personal" and note.name == PERSONAL_FILE_SLUG,
+            }
+        )
+    return {"ok": True, "memories": notes, "count": len(notes)}
+
+
+def write_memory_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """Replace a memory file's markdown contents (full-file edit)."""
+    from memory import (
+        PERSONAL_FILE_SLUG,
+        _canonical_kind,
+        _is_live_layout_memory,
+        _subdir,
+        ensure_memory_dirs,
+        personal_memory_path,
+        sanitize_memory_name,
+    )
+
+    kind = _canonical_kind(str(body.get("kind") or ""))
+    name = str(body.get("name") or "").strip()
+    text = body.get("text")
+    if text is None:
+        raise ValueError("text is required")
+    text = str(text)
+    if not text.strip():
+        raise ValueError("Memory text is empty")
+    ensure_memory_dirs()
+    if kind == "personal":
+        path = personal_memory_path()
+        name = PERSONAL_FILE_SLUG
+    else:
+        if not name:
+            raise ValueError("name is required")
+        slug = sanitize_memory_name(name)
+        if _is_live_layout_memory(kind, slug):
+            raise ValueError("That memory is system-managed and cannot be edited here")
+        path = _subdir(kind) / f"{slug}.md"
+        name = slug
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "kind": kind,
+        "name": name,
+        "rel": f"{kind}/{name}.md",
+        **list_memories_payload(),
+    }
 
 
 def _chat_row(c) -> dict[str, Any]:
@@ -392,6 +661,24 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/v1/speakers":
+            try:
+                self._send(200, list_speaker_payload())
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
+        if path == "/v1/systems" or path == "/v1/observe":
+            try:
+                self._send(200, observe_status_payload())
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
+        if path == "/v1/memories":
+            try:
+                self._send(200, list_memories_payload())
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
         if path == "/v1/avatars":
             try:
                 from AppKit import NSApplication  # type: ignore
@@ -435,7 +722,8 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
-        body = _json_body(self)
+        max_bytes = 40_000_000 if path == "/v1/speakers" else 8_000_000
+        body = _json_body(self, max_bytes=max_bytes)
         store = get_store()
         if path == "/v1/chats":
             chat = store.create_chat(
@@ -472,6 +760,85 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                     "note": "Restart the orchestrator to load new MCP servers.",
                 },
             )
+            return
+        if path == "/v1/speakers":
+            try:
+                result = enroll_speaker_from_body(body)
+            except ValueError as e:
+                self._send(400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+                return
+            self._send(200, result)
+            return
+        if path == "/v1/speakers/prepare":
+            try:
+                from speaker_enroll import _release_audio_for_capture
+
+                _release_audio_for_capture()
+            except Exception:
+                pass
+            self._send(200, {"ok": True})
+            return
+        if path == "/v1/observe":
+            try:
+                enabled = body.get("enabled")
+                if enabled is None and "running" in body:
+                    enabled = body.get("running")
+                if enabled is None:
+                    self._send(400, {"ok": False, "error": "enabled required"})
+                    return
+                self._send(200, set_observe_running(bool(enabled)))
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
+        if path == "/v1/observe/accept":
+            try:
+                result = accept_observe_draft(
+                    str(body.get("id") or ""),
+                    items=[str(x) for x in (body.get("items") or [])],
+                    all_drafts=bool(body.get("all")),
+                )
+            except KeyError as e:
+                self._send(404, {"ok": False, "error": str(e)})
+                return
+            except ValueError as e:
+                self._send(400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+                return
+            self._send(200, result)
+            return
+        if path == "/v1/observe/reject":
+            try:
+                result = reject_observe_draft(
+                    str(body.get("id") or ""),
+                    items=[str(x) for x in (body.get("items") or [])],
+                    all_drafts=bool(body.get("all")),
+                )
+            except KeyError as e:
+                self._send(404, {"ok": False, "error": str(e)})
+                return
+            except ValueError as e:
+                self._send(400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+                return
+            self._send(200, result)
+            return
+        if path == "/v1/memories":
+            try:
+                result = write_memory_payload(body)
+            except ValueError as e:
+                self._send(400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+                return
+            self._send(200, result)
             return
         if path == "/v1/send":
             chat_id = str(body.get("chat_id") or "").strip()
@@ -543,6 +910,22 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 return
             except ValueError as e:
                 self._send(400, {"ok": False, "error": str(e)})
+                return
+            self._send(200, {"ok": True})
+            return
+        if path.startswith("/v1/speakers/"):
+            name = path[len("/v1/speakers/") :]
+            try:
+                from speaker_id import delete_profile
+
+                if not delete_profile(name):
+                    self._send(404, {"ok": False, "error": f"unknown speaker {name!r}"})
+                    return
+            except ValueError as e:
+                self._send(400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
                 return
             self._send(200, {"ok": True})
             return

@@ -7,8 +7,17 @@ const state = {
   screenshotOn: false,
   busy: false,
   thinking: false,
-  page: "chat", // chat | mcp
+  page: "chat", // chat | mcp | speakers | systems
   mcp: [],
+  speakers: [],
+  passages: [],
+  samples: [], // base64 wav per passage index
+  recordingIndex: null,
+  recorder: null,
+  drafts: [],
+  memories: [],
+  editingMemory: null,
+  observeRunning: false,
   avatars: {
     assistant: null,
     user: null,
@@ -291,17 +300,22 @@ function showPage(page) {
   state.page = page;
   const chat = $("view-chat");
   const mcp = $("view-mcp");
+  const speakers = $("view-speakers");
+  const systems = $("view-systems");
   const mcpBtn = $("btn-mcp");
-  if (page === "mcp") {
-    chat.hidden = true;
-    mcp.hidden = false;
-    mcpBtn.classList.add("active");
-    loadMcp();
-  } else {
-    chat.hidden = false;
-    mcp.hidden = true;
-    mcpBtn.classList.remove("active");
-  }
+  const speakersBtn = $("btn-speakers");
+  const systemsBtn = $("btn-systems");
+  chat.hidden = page !== "chat";
+  mcp.hidden = page !== "mcp";
+  speakers.hidden = page !== "speakers";
+  systems.hidden = page !== "systems";
+  mcpBtn.classList.toggle("active", page === "mcp");
+  speakersBtn.classList.toggle("active", page === "speakers");
+  systemsBtn.classList.toggle("active", page === "systems");
+  if (page === "mcp") loadMcp();
+  if (page === "speakers") loadSpeakers();
+  if (page === "systems") loadSystems();
+  if (page !== "speakers") stopRecording(false);
 }
 
 function renderMcpList() {
@@ -428,10 +442,24 @@ function wire() {
     newChat();
   });
   $("btn-mcp").addEventListener("click", () => showPage("mcp"));
+  $("btn-speakers").addEventListener("click", () => showPage("speakers"));
+  $("btn-systems").addEventListener("click", () => showPage("systems"));
   $("btn-back-chat").addEventListener("click", () => showPage("chat"));
+  $("btn-back-chat-speakers").addEventListener("click", () => showPage("chat"));
+  $("btn-back-chat-systems").addEventListener("click", () => showPage("chat"));
   $("mcp-kind").addEventListener("change", syncMcpFormKind);
   $("mcp-auth").addEventListener("change", syncMcpAuthFields);
   $("mcp-form").addEventListener("submit", saveMcp);
+  $("speaker-save").addEventListener("click", saveSpeaker);
+  $("speaker-name").addEventListener("input", syncSpeakerSaveEnabled);
+  $("observe-toggle").addEventListener("change", toggleObserve);
+  $("drafts-refresh").addEventListener("click", () => loadSystems());
+  $("drafts-accept-all").addEventListener("click", () => acceptDrafts({ all: true }));
+  $("drafts-collapse").addEventListener("click", toggleDraftsCollapsed);
+  $("memories-collapse").addEventListener("click", toggleMemoriesCollapsed);
+  $("memories-refresh").addEventListener("click", () => loadMemories());
+  $("memory-save").addEventListener("click", saveMemoryEdit);
+  $("memory-cancel").addEventListener("click", closeMemoryEditor);
   $("btn-shot").addEventListener("click", () => toggleShot());
   $("btn-send").addEventListener("click", () => send());
   $("input").addEventListener("input", autosize);
@@ -442,6 +470,594 @@ function wire() {
     }
   });
   syncMcpFormKind();
+}
+
+function applyObserveStatus(data) {
+  state.observeRunning = !!data.running;
+  state.drafts = data.drafts || [];
+  const mins = Math.round((data.draft_seconds || 600) / 60);
+  $("observe-toggle").checked = state.observeRunning;
+  $("observe-label").textContent = state.observeRunning ? "On" : "Off";
+  $("observe-note").textContent = state.observeRunning
+    ? `Watching clicks. Drafts appear after ~${mins} minutes of activity.`
+    : `Watches your clicks and drafts memories/skills after ~${mins} minutes.`;
+  $("drafts-note").textContent = state.drafts.length
+    ? "Select items to accept, or accept the whole draft."
+    : "No proposed drafts yet.";
+  const count = $("drafts-count");
+  if (count) count.textContent = state.drafts.length ? `(${state.drafts.length})` : "";
+  renderDrafts();
+}
+
+function toggleDraftsCollapsed() {
+  const card = $("drafts-card");
+  const btn = $("drafts-collapse");
+  const collapsed = !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+async function loadSystems() {
+  try {
+    const data = await window.cuaChat.get("/v1/systems");
+    applyObserveStatus(data);
+  } catch (err) {
+    const note = $("drafts-note");
+    if (note) note.textContent = String(err.message || err);
+    state.drafts = [];
+    renderDrafts();
+  }
+  await loadMemories();
+}
+
+function toggleMemoriesCollapsed() {
+  const card = $("memories-card");
+  const btn = $("memories-collapse");
+  const collapsed = !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+async function loadMemories() {
+  try {
+    const data = await window.cuaChat.get("/v1/memories");
+    state.memories = data.memories || [];
+    const count = $("memories-count");
+    if (count) count.textContent = state.memories.length ? `(${state.memories.length})` : "";
+    $("memories-note").textContent = state.memories.length
+      ? "Click a memory to edit its markdown."
+      : "No saved memories yet.";
+    renderMemories();
+    if (state.editingMemory) {
+      const still = state.memories.find(
+        (m) => m.kind === state.editingMemory.kind && m.name === state.editingMemory.name
+      );
+      if (still) openMemoryEditor(still, { keepText: true });
+      else closeMemoryEditor();
+    }
+  } catch (err) {
+    $("memories-note").textContent = String(err.message || err);
+    state.memories = [];
+    renderMemories();
+  }
+}
+
+function renderMemories() {
+  const list = $("memories-list");
+  list.innerHTML = "";
+  if (!state.memories.length) {
+    const empty = document.createElement("div");
+    empty.className = "mcp-empty";
+    empty.textContent = "No memories under memory/ yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const mem of state.memories) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const active =
+      state.editingMemory &&
+      state.editingMemory.kind === mem.kind &&
+      state.editingMemory.name === mem.name;
+    btn.className = "memory-row" + (active ? " active" : "");
+    btn.innerHTML = `
+      <div class="memory-row-title">${esc(mem.kind)} / ${esc(mem.name)}</div>
+      <div class="memory-row-meta">${esc(mem.rel || "")}</div>
+      <div class="memory-row-preview">${esc(mem.preview || "")}</div>
+    `;
+    btn.addEventListener("click", () => openMemoryEditor(mem));
+    list.appendChild(btn);
+  }
+}
+
+function openMemoryEditor(mem, { keepText = false } = {}) {
+  state.editingMemory = { kind: mem.kind, name: mem.name, rel: mem.rel };
+  const editor = $("memory-editor");
+  editor.hidden = false;
+  $("memory-edit-title").textContent = `${mem.kind} / ${mem.name}`;
+  $("memory-edit-rel").textContent = mem.rel || "";
+  if (!keepText) {
+    $("memory-edit-text").value = mem.text || "";
+  }
+  $("memory-edit-note").className = "mcp-note";
+  $("memory-edit-note").textContent = "";
+  renderMemories();
+}
+
+function closeMemoryEditor() {
+  state.editingMemory = null;
+  $("memory-editor").hidden = true;
+  $("memory-edit-text").value = "";
+  $("memory-edit-note").textContent = "";
+  renderMemories();
+}
+
+async function saveMemoryEdit() {
+  if (!state.editingMemory) return;
+  const note = $("memory-edit-note");
+  const btn = $("memory-save");
+  btn.disabled = true;
+  note.className = "mcp-note";
+  note.textContent = "Saving…";
+  try {
+    const data = await window.cuaChat.post("/v1/memories", {
+      kind: state.editingMemory.kind,
+      name: state.editingMemory.name,
+      text: $("memory-edit-text").value,
+    });
+    state.memories = data.memories || [];
+    const count = $("memories-count");
+    if (count) count.textContent = state.memories.length ? `(${state.memories.length})` : "";
+    note.className = "mcp-note ok";
+    note.textContent = `Saved ${data.rel || state.editingMemory.rel}.`;
+    const updated = state.memories.find(
+      (m) => m.kind === state.editingMemory.kind && m.name === state.editingMemory.name
+    );
+    if (updated) {
+      $("memory-edit-text").value = updated.text || "";
+      openMemoryEditor(updated, { keepText: true });
+    }
+    renderMemories();
+  } catch (err) {
+    note.className = "mcp-note error";
+    note.textContent = String(err.message || err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function toggleObserve() {
+  const on = $("observe-toggle").checked;
+  $("observe-label").textContent = on ? "Starting…" : "Stopping…";
+  try {
+    const data = await window.cuaChat.post("/v1/observe", { enabled: on });
+    applyObserveStatus(data);
+  } catch (err) {
+    $("observe-toggle").checked = !on;
+    $("observe-label").textContent = !on ? "On" : "Off";
+    alert(String(err.message || err));
+  }
+}
+
+function selectedDraftItems(draftId) {
+  return Array.from(
+    document.querySelectorAll(`input[data-draft="${CSS.escape(draftId)}"]:checked`)
+  ).map((el) => el.value);
+}
+
+function renderDrafts() {
+  const list = $("drafts-list");
+  list.innerHTML = "";
+  if (!state.drafts.length) {
+    const empty = document.createElement("div");
+    empty.className = "mcp-empty";
+    empty.textContent = "No drafts waiting. Turn on observe and use the Mac normally.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const draft of state.drafts) {
+    const card = document.createElement("article");
+    card.className = "draft-card";
+    const top = document.createElement("div");
+    top.className = "mcp-card-top";
+    const name = document.createElement("div");
+    name.className = "mcp-card-name";
+    name.textContent = draft.app || draft.id;
+    const pill = document.createElement("span");
+    pill.className = "mcp-pill";
+    pill.textContent = draft.id;
+    top.append(name, pill);
+    card.appendChild(top);
+    if (draft.url) {
+      const meta = document.createElement("div");
+      meta.className = "mcp-card-meta";
+      meta.textContent = draft.url;
+      card.appendChild(meta);
+    }
+    for (const item of draft.memories || []) {
+      card.appendChild(draftItemEl(draft.id, item.ref, `Memory · ${item.kind}/${item.name}`, item.text));
+    }
+    for (const item of draft.skills || []) {
+      card.appendChild(
+        draftItemEl(
+          draft.id,
+          item.ref,
+          `Skill · ${item.name}`,
+          item.description || item.body
+        )
+      );
+    }
+    const actions = document.createElement("div");
+    actions.className = "draft-actions";
+    const acceptSel = document.createElement("button");
+    acceptSel.type = "button";
+    acceptSel.className = "accept";
+    acceptSel.textContent = "Accept selected";
+    acceptSel.addEventListener("click", () => {
+      const items = selectedDraftItems(draft.id);
+      if (!items.length) {
+        alert("Select at least one item, or use Accept draft.");
+        return;
+      }
+      acceptDrafts({ id: draft.id, items });
+    });
+    const acceptAll = document.createElement("button");
+    acceptAll.type = "button";
+    acceptAll.className = "accept";
+    acceptAll.textContent = "Accept draft";
+    acceptAll.addEventListener("click", () => acceptDrafts({ id: draft.id }));
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.textContent = "Reject draft";
+    reject.addEventListener("click", () => rejectDrafts({ id: draft.id }));
+    actions.append(acceptSel, acceptAll, reject);
+    card.appendChild(actions);
+    list.appendChild(card);
+  }
+}
+
+function draftItemEl(draftId, ref, title, body) {
+  const row = document.createElement("div");
+  row.className = "draft-item";
+  const label = document.createElement("label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.value = ref;
+  box.dataset.draft = draftId;
+  box.checked = true;
+  const meta = document.createElement("div");
+  meta.className = "draft-item-meta";
+  const t = document.createElement("div");
+  t.className = "draft-item-title";
+  t.textContent = `${ref} · ${title}`;
+  const b = document.createElement("div");
+  b.className = "draft-item-body";
+  b.textContent = body || "";
+  meta.append(t, b);
+  label.append(box, meta);
+  row.appendChild(label);
+  return row;
+}
+
+async function acceptDrafts({ id, items, all } = {}) {
+  const note = $("drafts-note");
+  note.className = "mcp-note";
+  note.textContent = "Accepting…";
+  try {
+    const data = await window.cuaChat.post("/v1/observe/accept", {
+      id: id || "",
+      items: items || [],
+      all: !!all,
+    });
+    applyObserveStatus(data);
+    note.className = "mcp-note ok";
+    const n = (data.written || []).length;
+    note.textContent = n ? `Wrote ${n} item(s) to memory/skills.` : "Draft accepted.";
+  } catch (err) {
+    note.className = "mcp-note error";
+    note.textContent = String(err.message || err);
+  }
+}
+
+async function rejectDrafts({ id, all } = {}) {
+  if (!confirm(all ? "Reject every proposed draft?" : `Reject draft “${id}”?`)) return;
+  const note = $("drafts-note");
+  note.className = "mcp-note";
+  note.textContent = "Rejecting…";
+  try {
+    const data = await window.cuaChat.post("/v1/observe/reject", {
+      id: id || "",
+      all: !!all,
+    });
+    applyObserveStatus(data);
+    note.className = "mcp-note ok";
+    note.textContent = "Draft rejected.";
+  } catch (err) {
+    note.className = "mcp-note error";
+    note.textContent = String(err.message || err);
+  }
+}
+
+function floatTo16BitPCM(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function encodeWavMono(float32, sampleRate) {
+  const pcm = floatTo16BitPCM(float32);
+  const buffer = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, pcm.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < pcm.length; i++, offset += 2) {
+    view.setInt16(offset, pcm[i], true);
+  }
+  return buffer;
+}
+
+function bufferToBase64(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function downsampleTo16k(float32, inputRate) {
+  if (inputRate === 16000) return float32;
+  const ratio = inputRate / 16000;
+  const outLen = Math.floor(float32.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    out[i] = float32[Math.floor(i * ratio)] || 0;
+  }
+  return out;
+}
+
+async function stopRecording(save) {
+  const rec = state.recorder;
+  if (!rec) return;
+  state.recorder = null;
+  const idx = state.recordingIndex;
+  state.recordingIndex = null;
+  try {
+    rec.processor.disconnect();
+    rec.source.disconnect();
+    rec.stream.getTracks().forEach((t) => t.stop());
+    await rec.context.close();
+  } catch {
+    /* ignore */
+  }
+  if (save && idx != null) {
+    const samples = downsampleTo16k(Float32Array.from(rec.chunks), rec.sampleRate);
+    if (samples.length < 16000 * 0.2) {
+      const note = $("speaker-form-note");
+      note.className = "mcp-note error";
+      note.textContent = "Recording too short — try again.";
+    } else {
+      const wav = encodeWavMono(samples, 16000);
+      state.samples[idx] = bufferToBase64(wav);
+    }
+  }
+  renderPassages();
+  syncSpeakerSaveEnabled();
+}
+
+async function startRecording(index) {
+  if (state.recordingIndex != null) {
+    await stopRecording(false);
+  }
+  try {
+    await window.cuaChat.post("/v1/speakers/prepare", {});
+  } catch {
+    /* optional */
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+  } catch (err) {
+    const note = $("speaker-form-note");
+    note.className = "mcp-note error";
+    note.textContent = `Mic permission failed: ${err.message || err}`;
+    return;
+  }
+  const context = new AudioContext();
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  processor.onaudioprocess = (e) => {
+    chunks.push(...e.inputBuffer.getChannelData(0));
+  };
+  const silent = context.createGain();
+  silent.gain.value = 0;
+  source.connect(processor);
+  processor.connect(silent);
+  silent.connect(context.destination);
+  state.recordingIndex = index;
+  state.recorder = {
+    stream,
+    context,
+    source,
+    processor,
+    chunks,
+    sampleRate: context.sampleRate,
+  };
+  renderPassages();
+}
+
+function syncSpeakerSaveEnabled() {
+  const name = ($("speaker-name").value || "").trim();
+  const need = state.passages.length || 5;
+  const ready =
+    name &&
+    state.samples.length >= need &&
+    state.samples.slice(0, need).every(Boolean);
+  $("speaker-save").disabled = !ready || state.recordingIndex != null;
+}
+
+function renderSpeakersList() {
+  const list = $("speakers-list");
+  list.innerHTML = "";
+  if (!state.speakers.length) {
+    const empty = document.createElement("div");
+    empty.className = "mcp-empty";
+    empty.textContent = "No enrolled speakers yet. Record the passages on the right.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const sp of state.speakers) {
+    const card = document.createElement("article");
+    card.className = "mcp-card";
+    const top = document.createElement("div");
+    top.className = "mcp-card-top";
+    const name = document.createElement("div");
+    name.className = "mcp-card-name";
+    name.textContent = sp.display_name || sp.slug;
+    const pill = document.createElement("span");
+    pill.className = "mcp-pill";
+    pill.textContent = sp.slug || "speaker";
+    top.append(name, pill);
+    const meta = document.createElement("div");
+    meta.className = "mcp-card-meta";
+    const bits = [];
+    if (sp.enrolled_at) bits.push(String(sp.enrolled_at).slice(0, 19));
+    if (sp.threshold != null) bits.push(`threshold ${sp.threshold}`);
+    if (sp.sample_count) bits.push(`${sp.sample_count} samples`);
+    meta.textContent = bits.join(" · ") || "Enrolled";
+    const actions = document.createElement("div");
+    actions.className = "mcp-card-actions";
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "mcp-del";
+    del.textContent = "Remove";
+    del.addEventListener("click", () => removeSpeaker(sp.slug || sp.display_name));
+    actions.appendChild(del);
+    card.append(top, meta, actions);
+    list.appendChild(card);
+  }
+}
+
+function renderPassages() {
+  const list = $("passage-list");
+  list.innerHTML = "";
+  state.passages.forEach((p, index) => {
+    const card = document.createElement("article");
+    card.className = "passage-card" + (state.samples[index] ? " done" : "");
+    const title = document.createElement("div");
+    title.className = "passage-title";
+    title.textContent = p.title + (p.short ? " · short" : "");
+    const text = document.createElement("div");
+    text.className = "passage-text";
+    text.textContent = p.text;
+    const actions = document.createElement("div");
+    actions.className = "passage-actions";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const recording = state.recordingIndex === index;
+    btn.textContent = recording ? "Stop" : state.samples[index] ? "Re-record" : "Record";
+    if (recording) btn.classList.add("recording");
+    btn.addEventListener("click", async () => {
+      if (state.recordingIndex === index) await stopRecording(true);
+      else await startRecording(index);
+    });
+    const status = document.createElement("span");
+    status.className = "passage-status" + (state.samples[index] ? " ok" : "");
+    status.textContent = recording
+      ? "Listening…"
+      : state.samples[index]
+        ? "Recorded"
+        : "Not recorded";
+    actions.append(btn, status);
+    card.append(title, text, actions);
+    list.appendChild(card);
+  });
+}
+
+async function loadSpeakers() {
+  const note = $("speaker-form-note");
+  note.className = "mcp-note";
+  note.textContent = "";
+  try {
+    const data = await window.cuaChat.get("/v1/speakers");
+    state.speakers = data.speakers || [];
+    state.passages = data.passages || [];
+    if (!state.samples.length || state.samples.length !== state.passages.length) {
+      state.samples = new Array(state.passages.length).fill(null);
+    }
+    $("speakers-sub").textContent = data.enabled
+      ? `Model ${data.model || "speaker"} · ${state.speakers.length} enrolled`
+      : "Speaker ID disabled (set SPEAKER_ID=1 in .env)";
+    renderSpeakersList();
+    renderPassages();
+    syncSpeakerSaveEnabled();
+  } catch (err) {
+    $("speakers-sub").textContent = String(err.message || err);
+    state.speakers = [];
+    renderSpeakersList();
+  }
+}
+
+async function removeSpeaker(name) {
+  if (!confirm(`Remove speaker “${name}”?`)) return;
+  try {
+    await window.cuaChat.del(`/v1/speakers/${encodeURIComponent(name)}`);
+    await loadSpeakers();
+  } catch (err) {
+    alert(String(err.message || err));
+  }
+}
+
+async function saveSpeaker() {
+  const name = ($("speaker-name").value || "").trim();
+  const note = $("speaker-form-note");
+  const btn = $("speaker-save");
+  if (!name) return;
+  btn.disabled = true;
+  note.className = "mcp-note";
+  note.textContent = "Saving profile…";
+  try {
+    const res = await window.cuaChat.post("/v1/speakers", {
+      name,
+      samples: state.samples,
+    });
+    note.className = "mcp-note ok";
+    note.textContent = res.note || `Saved ${res.display_name || name}.`;
+    $("speaker-name").value = "";
+    state.samples = new Array(state.passages.length).fill(null);
+    await loadSpeakers();
+  } catch (err) {
+    note.className = "mcp-note error";
+    note.textContent = String(err.message || err);
+  } finally {
+    syncSpeakerSaveEnabled();
+  }
 }
 
 async function boot() {

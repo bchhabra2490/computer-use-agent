@@ -123,20 +123,35 @@ def ensure_chat_bridge_and_app(*, focus: bool = False) -> None:
         return
     env = os.environ.copy()
     env.setdefault("CHAT_BRIDGE_PORT", os.environ.get("CHAT_BRIDGE_PORT", "8743"))
+    # Cursor / some hosts set this so Electron runs as plain Node; then
+    # require("electron") is a path string and main.js crashes on app.whenReady.
+    env.pop("ELECTRON_RUN_AS_NODE", None)
+    try:
+        from app_status import RUNTIME_DIR
+
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = RUNTIME_DIR / "chat-app.log"
+        log_f = open(log_path, "a", encoding="utf-8", buffering=1)
+        log_f.write(f"\n--- electron spawn {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        log_f.flush()
+    except Exception:
+        log_f = subprocess.DEVNULL
+        log_path = None
     try:
         proc = subprocess.Popen(
             [electron, str(CHAT_APP_DIR)],
             cwd=str(CHAT_APP_DIR),
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
     except Exception as e:
         print(f"[chat] failed to start Electron: {e}", flush=True)
         return
     set_chat_app_pid(proc.pid)
-    print(f"[chat] Electron started (pid={proc.pid})", flush=True)
+    extra = f" log={log_path}" if log_path else ""
+    print(f"[chat] Electron started (pid={proc.pid}){extra}", flush=True)
 
 
 def _focus_electron() -> None:

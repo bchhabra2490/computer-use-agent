@@ -1834,6 +1834,12 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 sess.enter_and_log("done", "Quit from menu bar")
                 return
 
+            # Tray owns the menu bar + face; respawn if it died mid-session.
+            try:
+                ensure_tray_running()
+            except Exception:
+                pass
+
             if pending is not None:
                 utterance = pending
                 pending = None

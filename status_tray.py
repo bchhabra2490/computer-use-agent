@@ -88,15 +88,24 @@ def ensure_tray_running() -> subprocess.Popen | None:
     script = Path(__file__).resolve()
     env = os.environ.copy()
     env["STATUS_TRAY_CHILD"] = "1"
+    # Don't poison Electron (started by the tray) into Node mode.
+    env.pop("ELECTRON_RUN_AS_NODE", None)
     try:
+        from app_status import RUNTIME_DIR
+
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = RUNTIME_DIR / "tray.log"
+        log_f = open(log_path, "a", encoding="utf-8", buffering=1)
+        log_f.write(f"\n--- tray spawn {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        log_f.flush()
         proc = subprocess.Popen(
             [sys.executable, str(script)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
             env=env,
         )
-        print(f"[tray] started menu-bar status (pid={proc.pid})", flush=True)
+        print(f"[tray] started menu-bar status (pid={proc.pid}) log={log_path}", flush=True)
         return proc
     except Exception as e:
         print(f"[tray] failed to start: {e}", file=sys.stderr)
@@ -448,13 +457,26 @@ def main() -> None:
                     button.setTitle_(glyph)
                 button.setToolTip_(format_tooltip(data))
             self.rebuildMenu(data)
-            self.syncOverlay(data)
-            self.syncFace(data)
-            self.syncChat(data)
+            try:
+                self.syncOverlay(data)
+            except Exception as e:
+                print(f"[tray] log overlay sync failed: {e}", flush=True)
+            try:
+                self.syncFace(data)
+            except Exception as e:
+                print(f"[tray] face sync failed: {e}", flush=True)
+            try:
+                self.syncChat(data)
+            except Exception as e:
+                print(f"[tray] chat sync failed: {e}", flush=True)
 
         @objc.python_method
         def syncOverlay(self, data: dict) -> None:
-            from log_overlay import LogOverlay, overlay_enabled
+            try:
+                from log_overlay import LogOverlay, overlay_enabled
+            except Exception as e:
+                print(f"[tray] log overlay import failed: {e}", flush=True)
+                return
 
             want = overlay_enabled(data)
             if want and getattr(self, "overlay", None) is None:
@@ -479,7 +501,11 @@ def main() -> None:
 
         @objc.python_method
         def syncFace(self, data: dict) -> None:
-            from face_overlay import FaceOverlay, face_overlay_enabled
+            try:
+                from face_overlay import FaceOverlay, face_overlay_enabled
+            except Exception as e:
+                print(f"[tray] face overlay import failed: {e}", flush=True)
+                return
 
             want = face_overlay_enabled(data)
             if want and getattr(self, "face", None) is None:
@@ -504,12 +530,9 @@ def main() -> None:
 
         @objc.python_method
         def syncChat(self, data: dict) -> None:
-            try:
-                from chat_overlay import sync_chat_app
+            from chat_overlay import sync_chat_app
 
-                sync_chat_app(data)
-            except Exception as e:
-                print(f"[tray] chat sync failed: {e}", flush=True)
+            sync_chat_app(data)
 
         @objc.python_method
         def rebuildMenu(self, data: dict) -> None:

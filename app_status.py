@@ -957,9 +957,22 @@ def pid_alive(pid: Any) -> bool:
         return False
     try:
         os.kill(p, 0)
-        return True
     except OSError:
         return False
+    # Zombies still accept signal 0; treat them as dead so callers respawn.
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["ps", "-p", str(p), "-o", "state="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if out.upper().startswith("Z"):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def signal_quit_orchestrator() -> bool:

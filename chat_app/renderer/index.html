@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:;"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' blob:;"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CUA Chat</title>
@@ -27,6 +27,12 @@
               <div class="brand-sub">desktop chat</div>
             </div>
           </div>
+          <button type="button" class="btn-link" id="btn-systems" title="Systems">
+            Systems
+          </button>
+          <button type="button" class="btn-link" id="btn-speakers" title="Manage speakers">
+            Manage speakers
+          </button>
           <button type="button" class="btn-link" id="btn-mcp" title="MCP connections">
             MCP connections
           </button>
@@ -83,11 +89,11 @@
 
       <main class="main mcp-main" id="view-mcp" hidden>
         <header class="main-head drag">
+          <button type="button" class="btn-back" id="btn-back-chat">← Chat</button>
           <div>
             <h1>MCP connections</h1>
             <p class="main-sub" id="mcp-path">Servers from mcp.json</p>
           </div>
-          <button type="button" class="btn-back" id="btn-back-chat">← Chat</button>
         </header>
 
         <section class="mcp-body">
@@ -169,6 +175,132 @@
             </p>
             <button type="submit" class="btn-primary" id="mcp-save">Save connection</button>
           </form>
+        </section>
+      </main>
+
+      <main class="main mcp-main" id="view-speakers" hidden>
+        <header class="main-head drag">
+          <button type="button" class="btn-back" id="btn-back-chat-speakers">← Chat</button>
+          <div>
+            <h1>Manage speakers</h1>
+            <p class="main-sub" id="speakers-sub">Voice ID profiles</p>
+          </div>
+        </header>
+
+        <section class="mcp-body speakers-body">
+          <div>
+            <h2 class="section-title">Saved speakers</h2>
+            <div class="mcp-list" id="speakers-list"></div>
+          </div>
+
+          <div class="mcp-form" id="speaker-enroll">
+            <h2>Add new speaker</h2>
+            <label>
+              Name
+              <input id="speaker-name" required placeholder="Bharat" autocomplete="off" />
+            </label>
+            <p class="mcp-note">
+              Read each passage aloud, then stop recording. Use the same mic you use with Jarvis.
+            </p>
+            <div class="passage-list" id="passage-list"></div>
+            <p class="mcp-note" id="speaker-form-note"></p>
+            <button type="button" class="btn-primary" id="speaker-save" disabled>
+              Save speaker
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <main class="main mcp-main" id="view-systems" hidden>
+        <header class="main-head drag">
+          <button type="button" class="btn-back" id="btn-back-chat-systems">← Chat</button>
+          <div>
+            <h1>Systems</h1>
+            <p class="sub" id="systems-sub">Observe drafts and saved memories</p>
+          </div>
+        </header>
+
+        <section class="systems-body">
+          <div class="systems-card">
+            <div class="systems-row">
+              <div>
+                <h2 class="section-title">Observe mode</h2>
+                <p class="mcp-note" id="observe-note">
+                  Watches your clicks and drafts memories/skills after ~10 minutes.
+                </p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="observe-toggle" />
+                <span class="toggle-ui" aria-hidden="true"></span>
+                <span class="toggle-label" id="observe-label">Off</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="systems-card" id="drafts-card">
+            <div class="systems-row">
+              <button
+                type="button"
+                class="section-collapse"
+                id="drafts-collapse"
+                aria-expanded="true"
+                aria-controls="drafts-panel"
+              >
+                <span class="collapse-chevron" aria-hidden="true">▾</span>
+                <h2 class="section-title">Proposed drafts</h2>
+                <span class="collapse-count" id="drafts-count"></span>
+              </button>
+              <div class="systems-actions" id="drafts-toolbar">
+                <button type="button" class="btn-back" id="drafts-refresh">Refresh</button>
+                <button type="button" class="btn-primary" id="drafts-accept-all">
+                  Accept all
+                </button>
+              </div>
+            </div>
+            <div class="drafts-panel" id="drafts-panel">
+              <p class="mcp-note" id="drafts-note"></p>
+              <div class="mcp-list drafts-scroll" id="drafts-list"></div>
+            </div>
+          </div>
+
+          <div class="systems-card" id="memories-card">
+            <div class="systems-row">
+              <button
+                type="button"
+                class="section-collapse"
+                id="memories-collapse"
+                aria-expanded="true"
+                aria-controls="memories-panel"
+              >
+                <span class="collapse-chevron" aria-hidden="true">▾</span>
+                <h2 class="section-title">Saved memories</h2>
+                <span class="collapse-count" id="memories-count"></span>
+              </button>
+              <div class="systems-actions" id="memories-toolbar">
+                <button type="button" class="btn-back" id="memories-refresh">Refresh</button>
+              </div>
+            </div>
+            <div class="drafts-panel" id="memories-panel">
+              <p class="mcp-note" id="memories-note">
+                Personal, app, and screen notes under memory/.
+              </p>
+              <div class="memories-layout">
+                <div class="mcp-list drafts-scroll" id="memories-list"></div>
+                <div class="memory-editor" id="memory-editor" hidden>
+                  <div class="memory-editor-head">
+                    <strong id="memory-edit-title">Edit</strong>
+                    <span class="mcp-note" id="memory-edit-rel"></span>
+                  </div>
+                  <textarea id="memory-edit-text" rows="16" spellcheck="false"></textarea>
+                  <div class="draft-actions">
+                    <button type="button" class="accept" id="memory-save">Save</button>
+                    <button type="button" id="memory-cancel">Cancel</button>
+                  </div>
+                  <p class="mcp-note" id="memory-edit-note"></p>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
       </main>
       </div>

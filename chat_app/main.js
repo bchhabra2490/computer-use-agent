@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, session, systemPreferences } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
@@ -25,6 +25,7 @@ function readToken() {
 function bridgeRequest(method, apiPath, body) {
   const token = readToken();
   const payload = body == null ? null : JSON.stringify(body);
+  const timeout = apiPath === "/v1/speakers" ? 180000 : 60000;
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -37,7 +38,7 @@ function bridgeRequest(method, apiPath, body) {
           "Content-Type": "application/json",
           ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
         },
-        timeout: 60000,
+        timeout,
       },
       (res) => {
         const chunks = [];
@@ -91,7 +92,24 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (process.platform === "darwin") {
+    try {
+      const status = systemPreferences.getMediaAccessStatus("microphone");
+      if (status !== "granted") {
+        await systemPreferences.askForMediaAccess("microphone");
+      }
+    } catch {
+      /* older Electron */
+    }
+  }
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    if (permission === "media" || permission === "microphone") {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

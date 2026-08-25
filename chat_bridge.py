@@ -520,6 +520,107 @@ def list_memories_payload() -> dict[str, Any]:
     return {"ok": True, "memories": notes, "count": len(notes)}
 
 
+def _face_option(spec: Any, *, selected: bool, size: int = 96) -> dict[str, Any]:
+    from face_overlay import BLOBATARS, blobatar_png_bytes
+
+    png = blobatar_png_bytes(size, mood="wink", seed=spec.id)
+    return {
+        "id": spec.id,
+        "title": getattr(spec, "title", None) or spec.id,
+        "blurb": getattr(spec, "blurb", None) or "",
+        "custom": spec.id not in BLOBATARS,
+        "selected": selected,
+        "b64": base64.b64encode(png).decode("ascii"),
+    }
+
+
+def face_status_payload(*, include_previews: bool = True) -> dict[str, Any]:
+    """Face overlay on/off + curated blobatars (with optional PNG previews)."""
+    from AppKit import NSApplication  # type: ignore
+
+    from app_status import read_status
+    from face_overlay import (
+        BLOBATARS,
+        blobatar_png_bytes,
+        current_blobatar,
+        face_overlay_enabled,
+        face_overlay_env_enabled,
+    )
+
+    NSApplication.sharedApplication()
+    snap = read_status()
+    current = current_blobatar(snap)
+    presets: list[dict[str, Any]] = []
+    for spec in BLOBATARS.values():
+        if include_previews:
+            presets.append(_face_option(spec, selected=spec.id == current.id))
+        else:
+            presets.append(
+                {
+                    "id": spec.id,
+                    "title": spec.title,
+                    "blurb": spec.blurb,
+                    "custom": False,
+                    "selected": spec.id == current.id,
+                }
+            )
+    if current.id not in BLOBATARS:
+        if include_previews:
+            presets.append(_face_option(current, selected=True))
+        else:
+            presets.append(
+                {
+                    "id": current.id,
+                    "title": getattr(current, "title", None) or current.id,
+                    "blurb": getattr(current, "blurb", None) or "custom seed",
+                    "custom": True,
+                    "selected": True,
+                }
+            )
+    preview_b64 = None
+    if include_previews:
+        preview_b64 = base64.b64encode(
+            blobatar_png_bytes(128, mood="wink", seed=current.id)
+        ).decode("ascii")
+    return {
+        "ok": True,
+        "enabled": face_overlay_enabled(snap),
+        "env_disabled": not face_overlay_env_enabled(),
+        "current": {
+            "id": current.id,
+            "title": getattr(current, "title", None) or current.id,
+            "blurb": getattr(current, "blurb", None) or "",
+        },
+        "preview_b64": preview_b64,
+        "presets": presets,
+    }
+
+
+def update_face_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """Toggle face overlay and/or switch blobatar preset / custom seed."""
+    from app_status import set_face_overlay_enabled
+    from face_overlay import face_overlay_env_enabled, set_blobatar
+
+    if "enabled" in body or "running" in body:
+        enabled = body.get("enabled")
+        if enabled is None:
+            enabled = body.get("running")
+        if not face_overlay_env_enabled() and bool(enabled):
+            raise ValueError("FACE_OVERLAY=0 in the environment — cannot enable")
+        set_face_overlay_enabled(bool(enabled))
+
+    preset = body.get("preset")
+    if preset is None:
+        preset = body.get("name") or body.get("seed")
+    if preset is not None:
+        name = str(preset).strip()
+        if not name:
+            raise ValueError("preset name is empty")
+        set_blobatar(name)
+
+    return face_status_payload()
+
+
 def write_memory_payload(body: dict[str, Any]) -> dict[str, Any]:
     """Replace a memory file's markdown contents (full-file edit)."""
     from memory import (
@@ -673,6 +774,12 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(500, {"ok": False, "error": str(e)})
             return
+        if path == "/v1/face":
+            try:
+                self._send(200, face_status_payload())
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
         if path == "/v1/memories":
             try:
                 self._send(200, list_memories_payload())
@@ -792,6 +899,16 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 self._send(200, set_observe_running(bool(enabled)))
             except Exception as e:
                 self._send(500, {"ok": False, "error": str(e)})
+            return
+        if path == "/v1/face":
+            try:
+                self._send(200, update_face_payload(body))
+            except ValueError as e:
+                self._send(400, {"ok": False, "error": str(e)})
+                return
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+                return
             return
         if path == "/v1/observe/accept":
             try:

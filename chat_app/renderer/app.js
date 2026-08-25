@@ -18,6 +18,9 @@ const state = {
   memories: [],
   editingMemory: null,
   observeRunning: false,
+  faceEnabled: true,
+  facePresets: [],
+  faceCurrent: null,
   avatars: {
     assistant: null,
     user: null,
@@ -296,8 +299,27 @@ function autosize() {
   input.style.height = `${Math.min(160, input.scrollHeight)}px`;
 }
 
+const PAGE_KEY = "cua-chat-page";
+const PAGES = new Set(["chat", "mcp", "speakers", "systems"]);
+
+function savedPage() {
+  try {
+    const page = sessionStorage.getItem(PAGE_KEY);
+    if (page && PAGES.has(page)) return page;
+  } catch {
+    /* private mode / blocked storage */
+  }
+  return "chat";
+}
+
 function showPage(page) {
+  if (!PAGES.has(page)) page = "chat";
   state.page = page;
+  try {
+    sessionStorage.setItem(PAGE_KEY, page);
+  } catch {
+    /* ignore */
+  }
   const chat = $("view-chat");
   const mcp = $("view-mcp");
   const speakers = $("view-speakers");
@@ -453,6 +475,8 @@ function wire() {
   $("speaker-save").addEventListener("click", saveSpeaker);
   $("speaker-name").addEventListener("input", syncSpeakerSaveEnabled);
   $("observe-toggle").addEventListener("change", toggleObserve);
+  $("face-toggle").addEventListener("change", toggleFace);
+  $("face-custom-form").addEventListener("submit", applyCustomFace);
   $("drafts-refresh").addEventListener("click", () => loadSystems());
   $("drafts-accept-all").addEventListener("click", () => acceptDrafts({ all: true }));
   $("drafts-collapse").addEventListener("click", toggleDraftsCollapsed);
@@ -507,7 +531,153 @@ async function loadSystems() {
     state.drafts = [];
     renderDrafts();
   }
-  await loadMemories();
+  await Promise.all([loadMemories(), loadFace()]);
+}
+
+function applyFaceStatus(data) {
+  state.faceEnabled = !!data.enabled;
+  state.facePresets = data.presets || [];
+  state.faceCurrent = data.current || null;
+  const toggle = $("face-toggle");
+  const label = $("face-label");
+  if (toggle) {
+    toggle.checked = state.faceEnabled;
+    toggle.disabled = !!data.env_disabled;
+  }
+  if (label) label.textContent = state.faceEnabled ? "On" : "Off";
+  const note = $("face-note");
+  if (note) {
+    note.textContent = data.env_disabled
+      ? "FACE_OVERLAY=0 in the environment — overlay stays off."
+      : state.faceEnabled
+        ? "Visible at the top center of the main display (click-through)."
+        : "Hidden. Turn on to show the blobatar overlay.";
+  }
+  const cur = state.faceCurrent || {};
+  const curEl = $("face-current");
+  const blurbEl = $("face-current-blurb");
+  if (curEl) curEl.textContent = cur.title || cur.id || "—";
+  if (blurbEl) blurbEl.textContent = cur.blurb || (cur.id ? `Seed: ${cur.id}` : "");
+  const preview = $("face-preview");
+  if (preview) {
+    if (data.preview_b64) {
+      preview.src = `data:image/png;base64,${data.preview_b64}`;
+      preview.hidden = false;
+      preview.alt = cur.id || "blobatar";
+    } else {
+      preview.hidden = true;
+    }
+  }
+  const seedInput = $("face-custom-seed");
+  if (seedInput && cur.id && !state.facePresets.some((p) => p.id === cur.id && !p.custom)) {
+    seedInput.value = cur.id;
+  }
+  renderBlobatarGrid();
+}
+
+function renderBlobatarGrid() {
+  const grid = $("blobatar-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  if (!state.facePresets.length) {
+    const empty = document.createElement("div");
+    empty.className = "mcp-empty";
+    empty.textContent = "No blobatar presets loaded.";
+    grid.appendChild(empty);
+    return;
+  }
+  for (const preset of state.facePresets) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "blobatar-option" + (preset.selected ? " selected" : "");
+    btn.setAttribute("role", "option");
+    btn.setAttribute("aria-selected", preset.selected ? "true" : "false");
+    btn.title = preset.blurb || preset.id;
+    const img = document.createElement("img");
+    img.alt = "";
+    img.width = 56;
+    img.height = 56;
+    if (preset.b64) img.src = `data:image/png;base64,${preset.b64}`;
+    const name = document.createElement("div");
+    name.className = "blobatar-option-name";
+    name.textContent = preset.title || preset.id;
+    const blurb = document.createElement("div");
+    blurb.className = "blobatar-option-blurb";
+    blurb.textContent = preset.custom ? "custom seed" : preset.blurb || "";
+    btn.append(img, name, blurb);
+    btn.addEventListener("click", () => selectFacePreset(preset.id));
+    grid.appendChild(btn);
+  }
+}
+
+async function loadFace() {
+  const formNote = $("face-form-note");
+  try {
+    const data = await window.cuaChat.get("/v1/face");
+    applyFaceStatus(data);
+    if (formNote) {
+      formNote.className = "mcp-note";
+      formNote.textContent = "";
+    }
+  } catch (err) {
+    if (formNote) {
+      formNote.className = "mcp-note error";
+      formNote.textContent = String(err.message || err);
+    }
+  }
+}
+
+async function toggleFace() {
+  const on = $("face-toggle").checked;
+  $("face-label").textContent = on ? "On" : "Off";
+  const formNote = $("face-form-note");
+  try {
+    const data = await window.cuaChat.post("/v1/face", { enabled: on });
+    applyFaceStatus(data);
+    if (formNote) {
+      formNote.className = "mcp-note ok";
+      formNote.textContent = on ? "Face overlay on." : "Face overlay off.";
+    }
+  } catch (err) {
+    $("face-toggle").checked = !on;
+    $("face-label").textContent = !on ? "On" : "Off";
+    if (formNote) {
+      formNote.className = "mcp-note error";
+      formNote.textContent = String(err.message || err);
+    }
+  }
+}
+
+async function selectFacePreset(id) {
+  const formNote = $("face-form-note");
+  try {
+    const data = await window.cuaChat.post("/v1/face", { preset: id });
+    applyFaceStatus(data);
+    await loadAvatars();
+    if (formNote) {
+      formNote.className = "mcp-note ok";
+      formNote.textContent = `Blobatar set to ${data.current?.id || id}.`;
+    }
+  } catch (err) {
+    if (formNote) {
+      formNote.className = "mcp-note error";
+      formNote.textContent = String(err.message || err);
+    }
+  }
+}
+
+async function applyCustomFace(e) {
+  e.preventDefault();
+  const seed = ($("face-custom-seed").value || "").trim();
+  const formNote = $("face-form-note");
+  if (!seed) {
+    if (formNote) {
+      formNote.className = "mcp-note error";
+      formNote.textContent = "Enter a seed name first.";
+    }
+    return;
+  }
+  await selectFacePreset(seed);
 }
 
 function toggleMemoriesCollapsed() {
@@ -1062,6 +1232,7 @@ async function saveSpeaker() {
 
 async function boot() {
   wire();
+  showPage(savedPage());
   try {
     await refreshChats();
   } catch (err) {

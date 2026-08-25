@@ -237,6 +237,43 @@
             </div>
           </div>
 
+          <div class="systems-card" id="face-card">
+            <div class="systems-row">
+              <div>
+                <h2 class="section-title">Face overlay</h2>
+                <p class="mcp-note" id="face-note">
+                  Top-center blobatar. Tray picks up changes on the next poll.
+                </p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="face-toggle" />
+                <span class="toggle-ui" aria-hidden="true"></span>
+                <span class="toggle-label" id="face-label">Off</span>
+              </label>
+            </div>
+            <div class="face-preview-row">
+              <img class="face-preview" id="face-preview" alt="" width="72" height="72" hidden />
+              <div>
+                <div class="face-current" id="face-current">—</div>
+                <p class="mcp-note" id="face-current-blurb"></p>
+              </div>
+            </div>
+            <div class="blobatar-grid" id="blobatar-grid" role="listbox" aria-label="Blobatar presets"></div>
+            <form class="face-custom" id="face-custom-form">
+              <label class="mcp-field">
+                <span>Custom seed</span>
+                <input
+                  id="face-custom-seed"
+                  placeholder="jarvis, rekha, …"
+                  autocomplete="off"
+                  maxlength="128"
+                />
+              </label>
+              <button type="submit" class="btn-primary" id="face-custom-apply">Apply</button>
+            </form>
+            <p class="mcp-note" id="face-form-note"></p>
+          </div>
+
           <div class="systems-card" id="drafts-card">
             <div class="systems-row">
               <button

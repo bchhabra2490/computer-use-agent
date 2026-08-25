@@ -5,6 +5,10 @@ const state = {
   chatId: null,
   messages: [],
   screenshotOn: false,
+  screenshotDisplays: null, // null = all, else number[]
+  chatTtsOn: true,
+  displays: [],
+  shotMenuOpen: false,
   busy: false,
   thinking: false,
   page: "chat", // chat | mcp | speakers | systems
@@ -68,6 +72,7 @@ function renderSidebar() {
       <div class="chat-row-meta"><span>${esc(relativeTime(chat.updated_at))}</span></div>
     `;
     btn.addEventListener("click", () => {
+      closeSidebar();
       showPage("chat");
       selectChat(chat.id);
     });
@@ -118,12 +123,7 @@ function renderTranscript() {
       img.className = "shot";
       img.alt = "Screenshot";
       img.src = `data:image/png;base64,${msg.screenshot_b64}`;
-      img.addEventListener("click", () => {
-        const w = window.open("");
-        if (w) {
-          w.document.write(`<img src="${img.src}" style="max-width:100%">`);
-        }
-      });
+      img.addEventListener("click", () => openShotLightbox(img.src));
       col.appendChild(img);
     }
     row.append(avatar, col);
@@ -154,6 +154,11 @@ async function refreshChats() {
 
 async function selectChat(id) {
   state.chatId = id;
+  try {
+    await window.cuaChat.post("/v1/prefs/active-chat", { chat_id: id });
+  } catch {
+    /* older bridge */
+  }
   const data = await window.cuaChat.get(`/v1/chats/${id}/messages`);
   state.messages = data.messages || [];
   state.thinking = false;
@@ -181,12 +186,174 @@ async function toggleShot() {
   state.screenshotOn = !state.screenshotOn;
   await window.cuaChat.post("/v1/prefs/screenshot", { on: state.screenshotOn });
   syncShotBtn();
+  syncShotHint();
+}
+
+async function toggleTts() {
+  state.chatTtsOn = !state.chatTtsOn;
+  await window.cuaChat.post("/v1/prefs/tts", { on: state.chatTtsOn });
+  syncTtsBtn();
+  syncShotHint();
 }
 
 function syncShotBtn() {
   const btn = $("btn-shot");
   btn.setAttribute("aria-pressed", state.screenshotOn ? "true" : "false");
   btn.title = state.screenshotOn ? "Screen attach on" : "Attach current screen";
+}
+
+function syncTtsBtn() {
+  const btn = $("btn-tts");
+  if (!btn) return;
+  const on = !!state.chatTtsOn;
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.title = on ? "Speak replies (on)" : "Speak replies (off)";
+  const iconOn = btn.querySelector(".tts-icon-on");
+  const iconOff = btn.querySelector(".tts-icon-off");
+  if (iconOn) iconOn.hidden = !on;
+  if (iconOff) iconOff.hidden = on;
+}
+
+function syncShotHint() {
+  const hint = $("hint");
+  if (!hint) return;
+  const parts = ["Enter to send · Shift+Enter for newline"];
+  if (state.screenshotOn) {
+    parts.push(`Screen attach: ${screenshotDisplaysLabel()}`);
+  }
+  if (!state.chatTtsOn) {
+    parts.push("TTS off");
+  }
+  hint.textContent = parts.join(" · ");
+}
+
+function screenshotDisplaysLabel() {
+  if (!state.displays.length) return "all displays";
+  if (state.screenshotDisplays == null) return "all displays";
+  const selected = state.displays.filter((d) =>
+    state.screenshotDisplays.includes(d.index)
+  );
+  if (!selected.length || selected.length === state.displays.length) return "all displays";
+  if (selected.length === 1) {
+    return selected[0].name || `screen ${selected[0].index}`;
+  }
+  return selected.map((d) => d.name || `screen ${d.index}`).join(", ");
+}
+
+function openShotLightbox(src) {
+  const box = $("shot-lightbox");
+  const img = $("shot-lightbox-img");
+  if (!box || !img || !src) return;
+  img.src = src;
+  box.hidden = false;
+}
+
+function closeShotLightbox() {
+  const box = $("shot-lightbox");
+  const img = $("shot-lightbox-img");
+  if (box) box.hidden = true;
+  if (img) img.removeAttribute("src");
+}
+
+function closeShotMenu() {
+  state.shotMenuOpen = false;
+  const menu = $("shot-display-menu");
+  const btn = $("btn-shot-menu");
+  const backdrop = $("shot-menu-backdrop");
+  if (menu) menu.hidden = true;
+  if (backdrop) backdrop.hidden = true;
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+async function openShotMenu() {
+  state.shotMenuOpen = true;
+  const menu = $("shot-display-menu");
+  const btn = $("btn-shot-menu");
+  const backdrop = $("shot-menu-backdrop");
+  if (menu) menu.hidden = false;
+  if (backdrop) backdrop.hidden = false;
+  if (btn) btn.setAttribute("aria-expanded", "true");
+  await loadDisplays();
+}
+
+async function toggleShotMenu(e) {
+  e?.stopPropagation?.();
+  if (state.shotMenuOpen) closeShotMenu();
+  else await openShotMenu();
+}
+
+function applyDisplaysPayload(data) {
+  state.displays = data.displays || [];
+  state.screenshotDisplays = data.all ? null : data.selected || null;
+  renderDisplayMenu();
+  syncShotHint();
+}
+
+function displayIsSelected(index) {
+  if (state.screenshotDisplays == null) return true;
+  return state.screenshotDisplays.includes(index);
+}
+
+function renderDisplayMenu() {
+  const list = $("shot-display-list");
+  const note = $("shot-display-note");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.displays.length) {
+    if (note) note.textContent = "No displays detected.";
+    return;
+  }
+  if (note) {
+    note.textContent = "Tick the displays to include in the screenshot.";
+  }
+  for (const d of state.displays) {
+    const label = document.createElement("label");
+    label.className = "shot-menu-row";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = displayIsSelected(d.index);
+    input.addEventListener("change", () => {
+      void setDisplaySelectionFromChecks();
+    });
+    input.dataset.index = String(d.index);
+    const text = document.createElement("span");
+    text.innerHTML = `${esc(d.name || `Display ${d.index}`)}${
+      d.main ? ' <span class="shot-menu-meta">main</span>' : ""
+    }<span class="shot-menu-meta">screen ${d.index} · ${d.width}×${d.height}</span>`;
+    label.append(input, text);
+    list.appendChild(label);
+  }
+}
+
+async function loadDisplays() {
+  try {
+    const data = await window.cuaChat.get("/v1/displays");
+    applyDisplaysPayload(data);
+  } catch (err) {
+    const note = $("shot-display-note");
+    if (note) note.textContent = String(err.message || err);
+  }
+}
+
+async function saveDisplaySelection(indexes) {
+  const data = await window.cuaChat.post("/v1/prefs/screenshot-displays", {
+    displays: indexes,
+  });
+  applyDisplaysPayload(data);
+}
+
+async function setDisplaySelectionFromChecks() {
+  const checked = Array.from(
+    document.querySelectorAll("#shot-display-list input[type=checkbox]:checked")
+  ).map((el) => Number(el.dataset.index));
+  if (!checked.length) {
+    // Keep at least one display selected.
+    const fallback = state.displays.find((d) => d.main) || state.displays[0];
+    if (fallback) await saveDisplaySelection([fallback.index]);
+    else await saveDisplaySelection(state.displays.map((d) => d.index));
+    return;
+  }
+  await saveDisplaySelection(checked);
 }
 
 async function send() {
@@ -257,7 +424,15 @@ async function pollStatus() {
   try {
     const st = await window.cuaChat.get("/v1/status");
     state.screenshotOn = !!st.screenshot_on;
+    if ("screenshot_displays" in st) {
+      state.screenshotDisplays = st.screenshot_displays == null ? null : st.screenshot_displays;
+    }
+    if ("chat_tts_on" in st) {
+      state.chatTtsOn = !!st.chat_tts_on;
+    }
     syncShotBtn();
+    syncTtsBtn();
+    syncShotHint();
     if (
       st.face_preset &&
       state.avatars.assistantId &&
@@ -265,13 +440,12 @@ async function pollStatus() {
     ) {
       await loadAvatars();
     }
-    $("orch-status").textContent = st.orchestrator_alive
-      ? "Orchestrator connected"
-      : "Orchestrator not running";
     $("status-foot").textContent = st.orchestrator_alive
-      ? "Ready · replies land here when spoken"
-      : "Start: python orchestrator.py --auto";
+      ? "Orchestrator connected"
+      : "Orchestrator not running — start: python orchestrator.py --auto";
+    const appended = Number(st.assistant_appended || 0);
     const inbox = st.inbox || [];
+    // Legacy: older bridges returned inbox lines for the UI to save.
     if (inbox.length && state.chatId) {
       for (const line of inbox) {
         const text = String(line || "").trim();
@@ -281,15 +455,22 @@ async function pollStatus() {
           text,
         });
       }
+    }
+    if (appended > 0 || inbox.length) {
       state.thinking = false;
-      const data = await window.cuaChat.get(`/v1/chats/${state.chatId}/messages`);
-      state.messages = data.messages || [];
+      const target = state.chatId || st.active_chat_id;
+      if (target) {
+        if (target !== state.chatId) await selectChat(target);
+        else {
+          const data = await window.cuaChat.get(`/v1/chats/${state.chatId}/messages`);
+          state.messages = data.messages || [];
+          renderTranscript();
+        }
+      }
       await refreshChats();
-      renderTranscript();
     }
   } catch (err) {
     $("status-foot").textContent = "Bridge offline — start chat from tray";
-    $("orch-status").textContent = String(err.message || "offline");
   }
 }
 
@@ -320,6 +501,7 @@ function showPage(page) {
   } catch {
     /* ignore */
   }
+  closeSidebar();
   const chat = $("view-chat");
   const mcp = $("view-mcp");
   const speakers = $("view-speakers");
@@ -338,6 +520,52 @@ function showPage(page) {
   if (page === "speakers") loadSpeakers();
   if (page === "systems") loadSystems();
   if (page !== "speakers") stopRecording(false);
+}
+
+const SIDEBAR_MQ = window.matchMedia("(max-width: 820px)");
+
+function sidebarOpen() {
+  return !!$("shell")?.classList.contains("sidebar-open");
+}
+
+function setSidebarOpen(open) {
+  const shell = $("shell");
+  if (!shell) return;
+  const want = !!open && SIDEBAR_MQ.matches;
+  shell.classList.toggle("sidebar-open", want);
+  for (const btn of document.querySelectorAll("[data-menu-toggle]")) {
+    btn.setAttribute("aria-expanded", want ? "true" : "false");
+    btn.setAttribute("aria-label", want ? "Close menu" : "Open menu");
+  }
+}
+
+function closeSidebar() {
+  setSidebarOpen(false);
+}
+
+function toggleSidebar() {
+  setSidebarOpen(!sidebarOpen());
+}
+
+function wireSidebar() {
+  for (const btn of document.querySelectorAll("[data-menu-toggle]")) {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSidebar();
+    });
+  }
+  $("sidebar-backdrop")?.addEventListener("click", () => closeSidebar());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && sidebarOpen()) closeSidebar();
+  });
+  const onMq = () => {
+    if (!SIDEBAR_MQ.matches) closeSidebar();
+  };
+  if (typeof SIDEBAR_MQ.addEventListener === "function") {
+    SIDEBAR_MQ.addEventListener("change", onMq);
+  } else if (typeof SIDEBAR_MQ.addListener === "function") {
+    SIDEBAR_MQ.addListener(onMq);
+  }
 }
 
 function renderMcpList() {
@@ -459,6 +687,7 @@ async function removeMcp(name) {
 }
 
 function wire() {
+  wireSidebar();
   $("btn-new").addEventListener("click", () => {
     showPage("chat");
     newChat();
@@ -486,6 +715,33 @@ function wire() {
   $("memory-save").addEventListener("click", saveMemoryEdit);
   $("memory-cancel").addEventListener("click", closeMemoryEditor);
   $("btn-shot").addEventListener("click", () => toggleShot());
+  $("btn-tts").addEventListener("click", () => toggleTts());
+  $("btn-shot-menu").addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void toggleShotMenu(e);
+  });
+  const closeShotMenuFromBackdrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeShotMenu();
+  };
+  $("shot-menu-backdrop")?.addEventListener("pointerdown", closeShotMenuFromBackdrop);
+  $("shot-menu-backdrop")?.addEventListener("click", closeShotMenuFromBackdrop);
+  $("shot-lightbox")?.addEventListener("click", (e) => {
+    if (e.target === $("shot-lightbox") || e.target === $("shot-lightbox-close")) {
+      closeShotLightbox();
+    }
+  });
+  $("shot-lightbox-close")?.addEventListener("click", () => closeShotLightbox());
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("shot-lightbox")?.hidden) {
+      closeShotLightbox();
+      return;
+    }
+    if (state.shotMenuOpen) closeShotMenu();
+  });
   $("btn-send").addEventListener("click", () => send());
   $("input").addEventListener("input", autosize);
   $("input").addEventListener("keydown", (e) => {
@@ -1233,6 +1489,7 @@ async function saveSpeaker() {
 
 async function boot() {
   wire();
+  closeShotMenu();
   showPage(savedPage());
   try {
     await refreshChats();

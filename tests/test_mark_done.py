@@ -121,6 +121,21 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(st.consume_utterance(), "from chat")
         self.assertEqual(st.reply_sink(), "mac")
 
+    def test_enqueue_tts_false_disables_reply_tts(self) -> None:
+        st.set_reply_tts(True)
+        st.enqueue_utterance("quiet chat", tts=False)
+        self.assertEqual(st.consume_utterance(), "quiet chat")
+        self.assertFalse(st.reply_tts_enabled())
+        st.enqueue_utterance("speak please", tts=True)
+        self.assertEqual(st.consume_utterance(), "speak please")
+        self.assertTrue(st.reply_tts_enabled())
+
+    def test_consume_speak_reenables_reply_tts(self) -> None:
+        st.set_reply_tts(False)
+        st.enqueue_speak("timer ding")
+        self.assertEqual(st.consume_speak(), "timer ding")
+        self.assertTrue(st.reply_tts_enabled())
+
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")
         st.enqueue_utterance("two")

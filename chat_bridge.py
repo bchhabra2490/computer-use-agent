@@ -16,6 +16,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +36,8 @@ from app_status import (  # noqa: E402
     set_chat_bridge_pid,
 )
 from chat_store import (  # noqa: E402
+    PREF_CHAT_TTS,
+    PREF_SCREENSHOT_DISPLAYS,
     PREF_SCREENSHOT_ON,
     get_store,
     title_from_text,
@@ -43,6 +46,8 @@ from chat_store import (  # noqa: E402
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("CHAT_BRIDGE_PORT", "8743"))
 TOKEN_PATH = RUNTIME_DIR / "chat.token"
+_INBOX_WORKER_STARTED = False
+_INBOX_WORKER_LOCK = threading.Lock()
 TOKEN_LEN = 24
 PID_KEY = "chat_bridge_pid"
 _OFF = {"0", "false", "no", "off"}
@@ -274,12 +279,75 @@ def command_for_orchestrator(text: str, *, look_at_screen: bool) -> str:
     return body
 
 
-def _capture_desktop_png() -> bytes:
-    from actions import DesktopController
-    from log_overlay import pause_overlay_for_capture
+def _parse_display_indexes(raw: Any) -> list[int] | None:
+    """None = all displays. Empty list also means all."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if not text or text in {"all", "*", "any"}:
+            return None
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            parts = [p.strip() for p in text.split(",") if p.strip()]
+            raw = parts
+    if not isinstance(raw, (list, tuple)):
+        return None
+    out: list[int] = []
+    for item in raw:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out or None
 
-    with pause_overlay_for_capture():
-        return DesktopController().capture_screenshot()
+
+def screenshot_display_indexes(store=None) -> list[int] | None:
+    st = store or get_store()
+    return _parse_display_indexes(st.get_pref(PREF_SCREENSHOT_DISPLAYS))
+
+
+def set_screenshot_display_indexes(indexes: list[int] | None, store=None) -> list[int] | None:
+    st = store or get_store()
+    if not indexes:
+        st.set_pref(PREF_SCREENSHOT_DISPLAYS, "[]")
+        return None
+    clean = sorted({int(i) for i in indexes})
+    st.set_pref(PREF_SCREENSHOT_DISPLAYS, json.dumps(clean))
+    return clean
+
+
+def displays_payload() -> dict[str, Any]:
+    from actions import list_monitors
+
+    store = get_store()
+    selected = screenshot_display_indexes(store)
+    monitors = []
+    for m in list_monitors():
+        idx = int(m["index"])
+        monitors.append(
+            {
+                "index": idx,
+                "name": m.get("name") or f"Display {idx}",
+                "main": bool(m.get("main")),
+                "width": int(m.get("width") or 0),
+                "height": int(m.get("height") or 0),
+                "selected": selected is None or idx in selected,
+            }
+        )
+    return {
+        "ok": True,
+        "displays": monitors,
+        "all": selected is None,
+        "selected": selected,
+    }
+
+
+def _capture_desktop_png(*, display_indexes: list[int] | None = None) -> bytes:
+    from actions import capture_displays_png
+
+    return capture_displays_png(display_indexes)
 
 
 def _json_body(handler: BaseHTTPRequestHandler, *, max_bytes: int = 8_000_000) -> dict[str, Any]:
@@ -664,6 +732,51 @@ def write_memory_payload(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def resolve_active_chat_id(store=None) -> str | None:
+    """Chat that should receive spoken replies (send target / last selection)."""
+    st = store or get_store()
+    return st.active_chat_id()
+
+
+def persist_chat_inbox() -> dict[str, Any]:
+    """Drain spoken inbox into SQLite so replies survive a closed chat window.
+
+    The Electron UI used to be the only consumer of ``chat_inbox``; if the
+    window was closed mid-reply, lines were lost or never written to history.
+    """
+    lines = consume_chat_inbox()
+    if not lines:
+        return {"ok": True, "appended": 0, "chat_id": resolve_active_chat_id()}
+    store = get_store()
+    chat_id = resolve_active_chat_id(store)
+    if not chat_id:
+        chat = store.create_chat(title="Chat")
+        chat_id = chat.id
+        store.set_active_chat_id(chat_id)
+    for text in lines:
+        store.add_message(chat_id, "assistant", text)
+    return {"ok": True, "appended": len(lines), "chat_id": chat_id}
+
+
+def ensure_inbox_worker() -> None:
+    """Background drain so persistence does not depend on UI polling."""
+    global _INBOX_WORKER_STARTED
+    with _INBOX_WORKER_LOCK:
+        if _INBOX_WORKER_STARTED:
+            return
+        _INBOX_WORKER_STARTED = True
+
+    def _loop() -> None:
+        while True:
+            try:
+                persist_chat_inbox()
+            except Exception as e:
+                print(f"[chat-bridge] inbox persist failed: {e}", flush=True)
+            time.sleep(0.45)
+
+    threading.Thread(target=_loop, name="chat-inbox-persist", daemon=True).start()
+
+
 def _chat_row(c) -> dict[str, Any]:
     return {
         "id": c.id,
@@ -736,6 +849,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         store = get_store()
         if path == "/v1/status":
             snap = read_status()
+            persisted = persist_chat_inbox()
             self._send(
                 200,
                 {
@@ -744,10 +858,20 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                     "chat_enabled": bool(snap.get("chat_overlay_enabled")),
                     "overlay_hidden": bool(snap.get("overlay_hidden")),
                     "screenshot_on": store.get_pref(PREF_SCREENSHOT_ON, "0") == "1",
+                    "screenshot_displays": screenshot_display_indexes(store),
+                    "chat_tts_on": store.get_pref(PREF_CHAT_TTS, "1") != "0",
                     "face_preset": snap.get("face_preset"),
-                    "inbox": consume_chat_inbox(),
+                    "inbox": [],
+                    "assistant_appended": int(persisted.get("appended") or 0),
+                    "active_chat_id": persisted.get("chat_id") or resolve_active_chat_id(store),
                 },
             )
+            return
+        if path == "/v1/displays":
+            try:
+                self._send(200, displays_payload())
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
             return
         if path == "/v1/chats":
             self._send(200, {"ok": True, "chats": [_chat_row(c) for c in store.list_chats()]})
@@ -837,12 +961,42 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 title=str(body.get("title") or "New chat"),
                 model_id=str(body.get("model_id") or "orchestrator"),
             )
+            store.set_active_chat_id(chat.id)
             self._send(200, {"ok": True, "chat": _chat_row(chat)})
             return
         if path == "/v1/prefs/screenshot":
             on = bool(body.get("on"))
             store.set_pref(PREF_SCREENSHOT_ON, "1" if on else "0")
             self._send(200, {"ok": True, "screenshot_on": on})
+            return
+        if path == "/v1/prefs/tts":
+            on = bool(body.get("on"))
+            store.set_pref(PREF_CHAT_TTS, "1" if on else "0")
+            self._send(200, {"ok": True, "chat_tts_on": on})
+            return
+        if path == "/v1/prefs/screenshot-displays":
+            try:
+                if body.get("all") is True or body.get("displays") in (None, "all", "*", []):
+                    selected = set_screenshot_display_indexes(None, store)
+                else:
+                    selected = set_screenshot_display_indexes(
+                        _parse_display_indexes(body.get("displays")),
+                        store,
+                    )
+                self._send(200, {**displays_payload(), "selected": selected})
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
+        if path == "/v1/prefs/active-chat":
+            chat_id = str(body.get("chat_id") or "").strip()
+            if not chat_id:
+                self._send(400, {"ok": False, "error": "chat_id required"})
+                return
+            if store.get_chat(chat_id) is None:
+                self._send(404, {"ok": False, "error": "chat not found"})
+                return
+            store.set_active_chat_id(chat_id)
+            self._send(200, {"ok": True, "active_chat_id": chat_id})
             return
         if path == "/v1/mcp":
             try:
@@ -970,20 +1124,25 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
             relpath = None
             if look:
                 try:
-                    png = _capture_desktop_png()
+                    indexes = _parse_display_indexes(body.get("displays"))
+                    if indexes is None:
+                        indexes = screenshot_display_indexes(store)
+                    png = _capture_desktop_png(display_indexes=indexes)
                     relpath = store.save_screenshot(chat_id, png)
                 except Exception as e:
                     self._send(500, {"ok": False, "error": f"screenshot failed: {e}"})
                     return
             user_text = text.strip() or "(screenshot)"
             store.add_message(chat_id, "user", user_text, screenshot_relpath=relpath)
+            store.set_active_chat_id(chat_id)
             chat = store.get_chat(chat_id)
             if chat and chat.title == "New chat":
                 store.touch_chat(chat_id, title=title_from_text(user_text), model_id="orchestrator")
             else:
                 store.touch_chat(chat_id, model_id="orchestrator")
             cmd = command_for_orchestrator(text, look_at_screen=look)
-            enqueue_utterance(cmd, source="chat")
+            tts_on = store.get_pref(PREF_CHAT_TTS, "1") != "0"
+            enqueue_utterance(cmd, source="chat", tts=tts_on)
             orch_ok = pid_alive(read_status().get("orchestrator_pid"))
             self._send(
                 200,
@@ -1052,6 +1211,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
 def serve_forever(*, host: str = HOST, port: int = PORT) -> None:
     token = load_or_create_token()
     ChatBridgeHandler.token = token
+    ensure_inbox_worker()
     server = ThreadingHTTPServer((host, port), ChatBridgeHandler)
     print(f"[chat-bridge] http://{host}:{port}", flush=True)
     print(f"[chat-bridge] token at {TOKEN_PATH}", flush=True)

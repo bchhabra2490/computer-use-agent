@@ -21,6 +21,9 @@ SCREENSHOTS_DIR = CHAT_DIR / "screenshots"
 _lock = threading.Lock()
 PREF_SELECTED_MODEL = "selected_model"
 PREF_SCREENSHOT_ON = "screenshot_on"
+PREF_ACTIVE_CHAT = "active_chat_id"
+PREF_SCREENSHOT_DISPLAYS = "screenshot_displays"
+PREF_CHAT_TTS = "chat_tts_on"
 
 
 def _utc_now() -> str:
@@ -136,6 +139,19 @@ class ChatStore:
                 (key, value),
             )
             conn.commit()
+
+    def active_chat_id(self) -> str | None:
+        raw = (self.get_pref(PREF_ACTIVE_CHAT) or "").strip()
+        if raw and self.get_chat(raw) is not None:
+            return raw
+        chats = self.list_chats(limit=1)
+        return chats[0].id if chats else None
+
+    def set_active_chat_id(self, chat_id: str | None) -> None:
+        cid = (chat_id or "").strip()
+        if not cid:
+            return
+        self.set_pref(PREF_ACTIVE_CHAT, cid)
 
     def list_chats(self, limit: int = 100) -> list[ChatRow]:
         with _lock:

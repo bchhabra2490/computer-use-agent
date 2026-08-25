@@ -3,7 +3,7 @@ macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
 Click for a menu with Send (while listening), Add Memory, Log Overlay, Face Overlay,
-Chat (⌘⌥C), Sleep (⌘⌥S), Mark Task Done, logs, and quit.
+Chat (⌘⌃C), Sleep (⌘⌥S), Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -284,41 +284,43 @@ def main() -> None:
                 opt = int(NSEventModifierFlagOption)
                 shift = int(NSEventModifierFlagShift)
                 ctrl = int(NSEventModifierFlagControl)
-                need = cmd | opt
-                extras = shift | ctrl
                 owner = self
 
-                def _cmd_opt_hotkey(event):
-                    # ⌘⌥C = chat toggle, ⌘⌥S = sleep toggle
+                def _global_hotkey(event):
+                    # ⌘⌃C = chat toggle (avoids Chrome Inspect ⌘⌥C)
+                    # ⌘⌥S = sleep toggle
                     try:
                         flags = int(event.modifierFlags())
-                        if (flags & need) != need:
-                            return event
-                        if flags & extras:
-                            return event
+                        # Ignore Caps Lock / Fn bits; only care about cmd/opt/ctrl/shift.
+                        mods = flags & (cmd | opt | shift | ctrl)
                         chars = (event.charactersIgnoringModifiers() or "").lower()
-                        if chars not in {"c", "s"}:
-                            return event
                         now = time.monotonic()
                         if now - float(getattr(owner, "_hotkeyAt", 0.0) or 0.0) < 0.45:
-                            return None
-                        owner._hotkeyAt = now
-                        if chars == "c":
+                            if chars in {"c", "s"} and (
+                                mods == (cmd | ctrl) or mods == (cmd | opt)
+                            ):
+                                return None
+                            return event
+                        if chars == "c" and mods == (cmd | ctrl):
+                            owner._hotkeyAt = now
                             owner.toggleChat_(None)
-                        else:
+                            return None
+                        if chars == "s" and mods == (cmd | opt):
+                            owner._hotkeyAt = now
                             owner.toggleSleep_(None)
-                        return None
+                            return None
+                        return event
                     except Exception:
                         return event
 
                 g = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                    NSEventMaskKeyDown, _cmd_opt_hotkey
+                    NSEventMaskKeyDown, _global_hotkey
                 )
                 loc = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
-                    NSEventMaskKeyDown, _cmd_opt_hotkey
+                    NSEventMaskKeyDown, _global_hotkey
                 )
                 self._hotkeyMonitors = [m for m in (g, loc) if m is not None]
-                print("[tray] hotkeys ⌘⌥C (chat) · ⌘⌥S (sleep) armed", flush=True)
+                print("[tray] hotkeys ⌘⌃C (chat) · ⌘⌥S (sleep) armed", flush=True)
             except Exception as e:
                 print(f"[tray] hotkeys unavailable: {e}", flush=True)
             try:
@@ -692,7 +694,7 @@ def main() -> None:
             self.menu.addItem_(face_item)
 
             chat_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Chat ⌘⌥C",
+                "Chat ⌘⌃C",
                 "toggleChat:",
                 "",
             )

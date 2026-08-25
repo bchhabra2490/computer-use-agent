@@ -70,6 +70,7 @@ def _default_state() -> dict[str, Any]:
         "last_spoken": None,
         "last_llm": None,
         "reply_sink": "mac",
+        "reply_tts": True,
         "speech_at": None,
         "speech_bytes": None,
         "screen_at": None,
@@ -355,8 +356,13 @@ def enqueue_utterance(
     source: str = "phone",
     photo: bool = False,
     sink: str | None = None,
+    tts: bool | None = None,
 ) -> None:
-    """Queue a text command (chat, phone, or API). Orchestrator consumes it like STT."""
+    """Queue a text command (chat, phone, or API). Orchestrator consumes it like STT.
+
+    ``tts``: when False, the orchestrator still answers in chat but skips speaking.
+    ``None`` means speak (default).
+    """
     text = (text or "").strip()
     if not text:
         return
@@ -366,6 +372,7 @@ def enqueue_utterance(
         "source": source,
         "ts": time.time(),
         "photo": bool(photo),
+        "tts": True if tts is None else bool(tts),
     }
     if sink is not None:
         item["sink"] = _normalize_sink(sink)
@@ -417,6 +424,19 @@ def reply_sink() -> str:
         return _normalize_sink(_read().get("reply_sink"))
 
 
+def set_reply_tts(enabled: bool) -> None:
+    """Whether the current turn should speak replies (vs chat text only)."""
+    with _lock:
+        data = _read()
+        data["reply_tts"] = bool(enabled)
+        _write(data)
+
+
+def reply_tts_enabled() -> bool:
+    with _lock:
+        return bool(_read().get("reply_tts", True))
+
+
 def consume_utterance() -> str | None:
     """Pop the next queued text command, or None."""
     with _lock:
@@ -432,6 +452,9 @@ def consume_utterance() -> str | None:
                 data["reply_sink"] = _normalize_sink(str(item.get("sink")))
             else:
                 data["reply_sink"] = "mac"
+            data["reply_tts"] = bool(item.get("tts", True))
+        else:
+            data["reply_tts"] = True
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -484,6 +507,8 @@ def consume_speak() -> str | None:
         data["pending_speaks"] = pending
         if isinstance(item, dict):
             data["reply_sink"] = _normalize_sink(item.get("sink"))
+        # Timer / queued speaks always play audio.
+        data["reply_tts"] = True
         _write(data)
     if isinstance(item, str):
         text = item.strip()

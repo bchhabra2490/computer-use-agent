@@ -553,6 +553,60 @@ def format_display_context(
     return "\n".join(lines)
 
 
+def capture_displays_png(
+    display_indexes: list[int] | None = None,
+    *,
+    max_width: int = 1568,
+) -> bytes:
+    """Capture selected displays as a labeled stitch PNG.
+
+    ``display_indexes`` None or empty → every attached display when
+    ``CU_ALL_DISPLAYS`` is on, otherwise the main display only.
+    """
+    import io
+
+    from PIL import Image
+
+    from log_overlay import pause_overlay_for_capture
+
+    monitors = list_monitors()
+    if display_indexes:
+        wanted = {int(i) for i in display_indexes}
+        selected = [m for m in monitors if int(m["index"]) in wanted]
+        # Preserve desktop order.
+        selected.sort(key=lambda m: int(m["index"]))
+        if not selected:
+            selected = list(monitors)
+    elif not capture_all_displays_enabled() and monitors:
+        selected = [next((m for m in monitors if m.get("main")), monitors[0])]
+    else:
+        selected = list(monitors)
+
+    with pause_overlay_for_capture(monitors=selected):
+        tiles: dict[int, object] = {}
+        for m in selected:
+            shot = capture_monitor_image(m)
+            if shot is not None:
+                tiles[int(m["index"])] = shot
+        if tiles:
+            img, _dw, _dh = stitch_monitor_screenshots(
+                selected,
+                tiles,
+                max_width=max_width,
+            )
+        else:
+            img = pyautogui.screenshot()
+            if not isinstance(img, Image.Image):
+                img = Image.fromarray(img)
+            if max_width > 0 and img.width > max_width:
+                ratio = max_width / img.width
+                img = img.resize((max_width, max(1, round(img.height * ratio))))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class DesktopController:
     """Wraps pyautogui with coordinate remapping between screenshot space and
     actual screen (logical point) space."""

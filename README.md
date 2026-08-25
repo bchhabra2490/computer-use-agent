@@ -409,7 +409,7 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   the wake word and phone `/v1/command`). Sidebar of saved chats, camera attach,
   and spoken replies in bubbles. History is SQLite under `.runtime/chat/`. Needs
   `python orchestrator.py --auto` and once: `cd chat_app && npm install`. Toggle
-  **Chat** in the menu bar, **⌘⌥C**, or `cua chat on`.
+  **Chat** in the menu bar, **⌘⌃C**, or `cua chat on`.
 - **Click** — **Send** (while listening: stop recording and transcribe now;
   saying **over and out** does the same),
   **Add Memory** (screenshot + description), **Log Overlay**, **Face Overlay**,

@@ -45,7 +45,7 @@ Blobatar face overlay::
     cua face
     cua face pebble
 
-Desktop chat (Electron; ⌘⌥C)::
+Desktop chat (Electron; ⌘⌃C)::
 
     cua chat on
     cua chat off
@@ -404,7 +404,7 @@ FACE (blobatar overlay — any name, or pebble / droplet / cloud / sun)
   cua face pebble       Curated shortcut
   cua face jarvis       Any other name hashes to a unique blobatar
 
-CHAT (Electron desktop app — screenshot attach off by default; ⌘⌥C)
+CHAT (Electron desktop app — screenshot attach off by default; ⌘⌃C)
   cua chat on
   cua chat off
   cua chat toggle
@@ -590,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
 
     chat_p = sub.add_parser(
         "chat",
-        help="Show or hide the desktop chat window (hotkey ⌘⌥C)",
+        help="Show or hide the desktop chat window (hotkey ⌘⌃C)",
     )
     chat_p.add_argument(
         "mode",

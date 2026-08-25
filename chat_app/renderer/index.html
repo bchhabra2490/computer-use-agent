@@ -17,8 +17,29 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="shell">
-      <aside class="sidebar">
+    <div class="shell" id="shell">
+      <button
+        type="button"
+        class="shot-menu-backdrop"
+        id="shot-menu-backdrop"
+        hidden
+        aria-label="Close display menu"
+        tabindex="-1"
+      ></button>
+      <div class="shot-lightbox" id="shot-lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot">
+        <button type="button" class="shot-lightbox-close" id="shot-lightbox-close" aria-label="Close">
+          ×
+        </button>
+        <img class="shot-lightbox-img" id="shot-lightbox-img" alt="Screenshot" />
+      </div>
+      <button
+        type="button"
+        class="sidebar-backdrop"
+        id="sidebar-backdrop"
+        aria-label="Close menu"
+        tabindex="-1"
+      ></button>
+      <aside class="sidebar" id="sidebar">
         <div class="sidebar-top drag">
           <div class="brand">
             <img class="brand-mark" id="brand-mark" alt="" width="40" height="40" />
@@ -47,9 +68,18 @@
       <div class="content">
       <main class="main" id="view-chat">
         <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
           <div>
             <h1 id="chat-title">New chat</h1>
-            <p class="main-sub" id="orch-status">Waiting for orchestrator</p>
           </div>
         </header>
 
@@ -57,17 +87,57 @@
 
         <footer class="composer-wrap">
           <div class="composer" id="composer">
+            <div class="shot-controls">
+              <button
+                type="button"
+                class="icon-btn"
+                id="btn-shot"
+                title="Attach current screen"
+                aria-pressed="false"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M7 5h12a2 2 0 0 1 2 2v10h-2V7H7V5zm-3 3h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zm0 2v9h12v-9H4z"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="icon-btn shot-menu-btn"
+                id="btn-shot-menu"
+                title="Choose displays for screenshot"
+                aria-haspopup="true"
+                aria-expanded="false"
+                aria-controls="shot-display-menu"
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                  <path fill="currentColor" d="M7 10l5 5 5-5H7z" />
+                </svg>
+              </button>
+              <div class="shot-menu" id="shot-display-menu" hidden role="menu">
+                <div class="shot-menu-title">Screenshot displays</div>
+                <div class="shot-menu-list" id="shot-display-list"></div>
+                <p class="shot-menu-note" id="shot-display-note"></p>
+              </div>
+            </div>
             <button
               type="button"
               class="icon-btn"
-              id="btn-shot"
-              title="Attach current screen"
-              aria-pressed="false"
+              id="btn-tts"
+              title="Speak replies"
+              aria-pressed="true"
             >
-              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <svg class="tts-icon-on" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                 <path
                   fill="currentColor"
-                  d="M7 5h12a2 2 0 0 1 2 2v10h-2V7H7V5zm-3 3h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zm0 2v9h12v-9H4z"
+                  d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"
+                />
+              </svg>
+              <svg class="tts-icon-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" hidden>
+                <path
+                  fill="currentColor"
+                  d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"
                 />
               </svg>
             </button>
@@ -89,6 +159,16 @@
 
       <main class="main mcp-main" id="view-mcp" hidden>
         <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
           <button type="button" class="btn-back" id="btn-back-chat">← Chat</button>
           <div>
             <h1>MCP connections</h1>
@@ -180,6 +260,16 @@
 
       <main class="main mcp-main" id="view-speakers" hidden>
         <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
           <button type="button" class="btn-back" id="btn-back-chat-speakers">← Chat</button>
           <div>
             <h1>Manage speakers</h1>
@@ -213,6 +303,16 @@
 
       <main class="main mcp-main" id="view-systems" hidden>
         <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
           <button type="button" class="btn-back" id="btn-back-chat-systems">← Chat</button>
           <div>
             <h1>Systems</h1>

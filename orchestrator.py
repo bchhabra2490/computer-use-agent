@@ -75,6 +75,7 @@ from app_status import (
     request_mark_done,
     request_quit,
     reply_sink,
+    reply_tts_enabled,
     set_last_spoken,
     set_reply_sink,
     speak_pending,
@@ -538,6 +539,8 @@ def _create_response(
                 prior_response, kwargs.get("input")
             )
         kwargs["input"] = fold_orphan_tool_outputs(kwargs.get("input"))
+    if llm_tts is not None and not reply_tts_enabled():
+        llm_tts = None
     use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
     if not use_stream:
         return _sync_create_response(client, kwargs)
@@ -918,11 +921,14 @@ def _speak(client: OpenAI, text: str) -> str | None:
     Speak `text`. If the user barges in (wake word or keyboard), stop and listen.
 
     Returns the spoken command on barge-in, or None if playback finished normally.
+    When reply TTS is off (chat mute), still records the line for the chat inbox.
     """
     if not text:
         return None
     log_llm(text, source="tts")
     set_last_spoken(text)
+    if not reply_tts_enabled():
+        return None
     audio = get_audio()
     if audio is not None:
         return audio.speak(text)
@@ -941,6 +947,8 @@ def _speak_later(client: OpenAI, text: str) -> None:
         return
     log_llm(text, source="tts")
     set_last_spoken(text)
+    if not reply_tts_enabled():
+        return
     audio = get_audio()
     if audio is not None:
         audio.speak_later(text)
@@ -977,7 +985,7 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
 
     If the user barges in during that line, return their new command (no second confirm).
     """
-    if not utterance or not _confirm_heard_enabled():
+    if not utterance or not _confirm_heard_enabled() or not reply_tts_enabled():
         return utterance
     line = _heard_confirm_line(utterance)
     if not line:

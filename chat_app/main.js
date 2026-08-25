@@ -69,16 +69,67 @@ function bridgeRequest(method, apiPath, body) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Float over other Spaces / fullscreen apps (macOS overlay behavior). */
+function applyOverlayBehavior(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    if (process.platform === "darwin") {
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      // "floating" keeps it above normal apps and fullscreen Spaces without
+      // covering the menu bar the way "screen-saver" does.
+      win.setAlwaysOnTop(true, "floating");
+    } else {
+      win.setAlwaysOnTop(true);
+    }
+  } catch {
+    /* older Electron */
+  }
+}
+
+async function withChatHiddenForCapture(fn) {
+  const win = mainWindow;
+  let wasVisible = false;
+  if (win && !win.isDestroyed()) {
+    wasVisible = win.isVisible();
+    if (wasVisible) {
+      win.hide();
+      // Give WindowServer time to drop the frame before screencapture.
+      await sleep(200);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (wasVisible && win && !win.isDestroyed()) {
+      applyOverlayBehavior(win);
+      win.show();
+      if (!win.isFocused()) win.focus();
+    }
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 760,
-    minWidth: 760,
-    minHeight: 520,
+    minWidth: 400,
+    minHeight: 420,
+    resizable: true,
+    maximizable: true,
     title: "CUA Chat",
     backgroundColor: "#121418",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
+    show: false,
+    // NSPanel-style: can join fullscreen Spaces when combined with
+    // setVisibleOnAllWorkspaces({ visibleOnFullScreen: true }).
+    ...(process.platform === "darwin" ? { type: "panel" } : {}),
+    alwaysOnTop: true,
+    fullscreenable: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -86,7 +137,14 @@ function createWindow() {
       sandbox: true,
     },
   });
+  applyOverlayBehavior(mainWindow);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+  mainWindow.once("ready-to-show", () => {
+    applyOverlayBehavior(mainWindow);
+    mainWindow.show();
+    mainWindow.focus();
+  });
+  mainWindow.on("show", () => applyOverlayBehavior(mainWindow));
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -115,6 +173,7 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
+      applyOverlayBehavior(mainWindow);
       mainWindow.show();
       mainWindow.focus();
     }
@@ -126,9 +185,12 @@ app.on("window-all-closed", () => {
 });
 
 ipcMain.handle("bridge:get", async (_e, apiPath) => bridgeRequest("GET", apiPath));
-ipcMain.handle("bridge:post", async (_e, apiPath, body) =>
-  bridgeRequest("POST", apiPath, body)
-);
+ipcMain.handle("bridge:post", async (_e, apiPath, body) => {
+  if (apiPath === "/v1/send" && body && body.look_at_screen) {
+    return withChatHiddenForCapture(() => bridgeRequest("POST", apiPath, body));
+  }
+  return bridgeRequest("POST", apiPath, body);
+});
 ipcMain.handle("bridge:delete", async (_e, apiPath) =>
   bridgeRequest("DELETE", apiPath)
 );
@@ -140,6 +202,7 @@ ipcMain.handle("open-external", async (_e, url) => {
 ipcMain.handle("focus-window", async () => {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
+  applyOverlayBehavior(mainWindow);
   mainWindow.show();
   mainWindow.focus();
 });

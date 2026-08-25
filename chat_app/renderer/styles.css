@@ -52,7 +52,14 @@ select,
 .btn-back,
 .btn-primary,
 .mcp-del,
-.blobatar-option {
+.blobatar-option,
+.btn-menu,
+.sidebar-backdrop,
+.shot-menu-backdrop,
+.shot-menu-btn,
+.shot-menu,
+.shot-lightbox,
+.shot-lightbox-close {
   -webkit-app-region: no-drag;
 }
 
@@ -62,6 +69,58 @@ select,
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.btn-menu {
+  display: none;
+  appearance: none;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
+  color: var(--text);
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  padding: 0;
+  cursor: pointer;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-menu-bars,
+.btn-menu-bars::before,
+.btn-menu-bars::after {
+  display: block;
+  width: 16px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  position: relative;
+}
+
+.btn-menu-bars::before,
+.btn-menu-bars::after {
+  content: "";
+  position: absolute;
+  left: 0;
+}
+
+.btn-menu-bars::before {
+  top: -5px;
+}
+
+.btn-menu-bars::after {
+  top: 5px;
+}
+
+.btn-menu:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: var(--accent-dim);
 }
 
 .content {
@@ -372,6 +431,62 @@ select,
   cursor: zoom-in;
 }
 
+.shot-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  margin: 0;
+  padding: 28px;
+  border: 0;
+  background: rgba(6, 8, 12, 0.88);
+  display: grid;
+  place-items: center;
+  cursor: zoom-out;
+  -webkit-app-region: no-drag;
+}
+
+.shot-lightbox[hidden] {
+  display: none !important;
+}
+
+.shot-lightbox-img {
+  max-width: min(100%, 1200px);
+  max-height: calc(100vh - 56px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+
+.shot-lightbox-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+  color: var(--text);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.shot-lightbox-close:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
 .thinking {
   color: var(--muted);
   font-style: italic;
@@ -433,6 +548,132 @@ select,
   background: var(--accent-dim);
 }
 
+.icon-btn .tts-icon-off[hidden],
+.icon-btn .tts-icon-on[hidden] {
+  display: none;
+}
+
+.shot-controls {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.shot-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+
+.shot-menu-backdrop[hidden] {
+  display: none !important;
+}
+
+.shot-menu-btn {
+  position: relative;
+  z-index: 92;
+  width: 22px;
+  height: 36px;
+  border-radius: 10px;
+  margin-left: -4px;
+}
+
+.shot-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  z-index: 93;
+  min-width: 240px;
+  max-width: min(320px, 70vw);
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-elev) 94%, #000);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  display: grid;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.shot-menu[hidden] {
+  display: none !important;
+}
+
+.shot-menu-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.shot-menu-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+
+.shot-menu-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.shot-menu-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1rem;
+  height: 1rem;
+  margin: 0.15rem 0 0;
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: 700 0.95rem/1 system-ui, sans-serif;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.shot-menu-row input[type="checkbox"]::after {
+  content: "";
+}
+
+.shot-menu-row input[type="checkbox"]:checked::after {
+  content: "✓";
+}
+
+.shot-menu-row .shot-menu-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-top: 2px;
+}
+
+.shot-menu-list {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.shot-menu-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
 .send-btn {
   background: var(--accent);
   color: #1a1208;
@@ -465,8 +706,61 @@ select,
   .shell {
     grid-template-columns: 1fr;
   }
+
+  .btn-menu {
+    display: inline-flex;
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: rgba(6, 8, 12, 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease;
+  }
+
   .sidebar {
-    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(288px, 86vw);
+    z-index: 50;
+    display: flex;
+    transform: translateX(-105%);
+    transition: transform 0.2s ease;
+    box-shadow: 12px 0 40px rgba(0, 0, 0, 0.35);
+    border-right: 1px solid var(--line);
+  }
+
+  .shell.sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .shell.sidebar-open .sidebar-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .sidebar-top {
+    padding-top: 56px;
+  }
+
+  /* Title clears traffic lights vertically (padding-top); keep the
+     hamburger flush to the left edge of the window. */
+  .main-head {
+    padding-left: 8px;
+    gap: 12px;
+  }
+
+  .main-head .btn-menu {
+    margin: 0;
   }
 }
 

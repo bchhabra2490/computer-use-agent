@@ -155,17 +155,24 @@ def ensure_chat_bridge_and_app(*, focus: bool = False) -> None:
 
 
 def _focus_electron() -> None:
-    """Best-effort raise on macOS."""
+    """Best-effort raise on macOS, including over fullscreen Spaces."""
     if sys.platform != "darwin":
         return
+    pid = read_status().get("chat_app_pid")
+    script = None
+    if isinstance(pid, int) and pid > 0 and pid_alive(pid):
+        script = (
+            'tell application "System Events" to set frontmost of '
+            f"first process whose unix id is {int(pid)} to true"
+        )
+    else:
+        script = (
+            'tell application "System Events" to set frontmost of '
+            'first process whose name contains "Electron" to true'
+        )
     try:
         subprocess.run(
-            [
-                "osascript",
-                "-e",
-                'tell application "System Events" to set frontmost of '
-                'first process whose name contains "Electron" to true',
-            ],
+            ["osascript", "-e", script],
             check=False,
             timeout=2,
             stdout=subprocess.DEVNULL,
@@ -244,7 +251,7 @@ def cmd_chat(mode: str | None) -> int:
         print("chat window " + ("off" if now else "on (Electron)"))
         return 0
     if key == "status":
-        print("chat window " + ("on" if chat_overlay_enabled() else "off") + " (Electron · ⌘⌥C)")
+        print("chat window " + ("on" if chat_overlay_enabled() else "off") + " (Electron · ⌘⌃C)")
         return 0
-    print("usage: cua chat [on|off|toggle|status]  (hotkey ⌘⌥C)")
+    print("usage: cua chat [on|off|toggle|status]  (hotkey ⌘⌃C)")
     return 2

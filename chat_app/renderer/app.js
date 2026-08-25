@@ -479,6 +479,7 @@ function wire() {
   $("face-custom-form").addEventListener("submit", applyCustomFace);
   $("drafts-refresh").addEventListener("click", () => loadSystems());
   $("drafts-accept-all").addEventListener("click", () => acceptDrafts({ all: true }));
+  $("drafts-reject-all").addEventListener("click", () => rejectDrafts({ all: true }));
   $("drafts-collapse").addEventListener("click", toggleDraftsCollapsed);
   $("memories-collapse").addEventListener("click", toggleMemoriesCollapsed);
   $("memories-refresh").addEventListener("click", () => loadMemories());
@@ -941,7 +942,7 @@ async function rejectDrafts({ id, all } = {}) {
     });
     applyObserveStatus(data);
     note.className = "mcp-note ok";
-    note.textContent = "Draft rejected.";
+    note.textContent = all ? "All drafts rejected." : "Draft rejected.";
   } catch (err) {
     note.className = "mcp-note error";
     note.textContent = String(err.message || err);

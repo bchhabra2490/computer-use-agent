@@ -29,6 +29,7 @@ PHONE_SCREEN_QUALITY = int(os.environ.get("PHONE_SCREEN_QUALITY", "60"))
 PHONE_PHOTO_PATH = RUNTIME_DIR / "phone-photo.jpg"
 PHONE_PHOTO_TTL_SEC = float(os.environ.get("PHONE_PHOTO_TTL_SEC", str(30 * 60)))
 PHONE_SPEECH_PATH = RUNTIME_DIR / "phone-tts.wav"
+CHAT_SCREENSHOTS_DIR = RUNTIME_DIR / "chat-shots"
 MAX_LOG_LINES = int(os.environ.get("STATUS_LOG_LINES", "40"))
 
 _lock = threading.Lock()
@@ -80,6 +81,9 @@ def _default_state() -> dict[str, Any]:
         "phone_photo_pending": False,
         "phone_photo_width": None,
         "phone_photo_height": None,
+        "turn_chat_screenshot": None,
+        "turn_source": None,
+        "chat_stream": None,
     }
 
 
@@ -357,11 +361,15 @@ def enqueue_utterance(
     photo: bool = False,
     sink: str | None = None,
     tts: bool | None = None,
+    screenshot_file: str | None = None,
 ) -> None:
     """Queue a text command (chat, phone, or API). Orchestrator consumes it like STT.
 
     ``tts``: when False, the orchestrator still answers in chat but skips speaking.
     ``None`` means speak (default).
+
+    ``screenshot_file``: basename under ``CHAT_SCREENSHOTS_DIR`` for a chat-attached
+    PNG. When set, the orchestrator should use that image and skip live desktop/AX.
     """
     text = (text or "").strip()
     if not text:
@@ -376,14 +384,58 @@ def enqueue_utterance(
     }
     if sink is not None:
         item["sink"] = _normalize_sink(sink)
+    shot = (screenshot_file or "").strip()
+    if shot:
+        item["screenshot_file"] = Path(shot).name
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
         pending.append(item)
         data["pending_utterances"] = pending[-20:]
         _write(data)
-    kind = "photo" if photo else "queued"
+    kind = "photo" if photo else ("chat-shot" if shot else "queued")
     log(f"[{source}] {kind}: {text[:160]}")
+
+
+def save_chat_screenshot_png(png: bytes) -> str:
+    """Write a chat-attached PNG for the orchestrator; return basename for enqueue."""
+    if not png:
+        raise ValueError("empty screenshot")
+    CHAT_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"shot-{time.time_ns()}.png"
+    path = CHAT_SCREENSHOTS_DIR / name
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(png)
+    tmp.replace(path)
+    # Keep the directory from growing forever.
+    try:
+        shots = sorted(CHAT_SCREENSHOTS_DIR.glob("shot-*.png"), key=lambda p: p.stat().st_mtime)
+        for old in shots[:-30]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return name
+
+
+def take_turn_chat_screenshot() -> bytes | None:
+    """Read and clear the chat PNG attached to the utterance just consumed."""
+    with _lock:
+        data = _read()
+        name = str(data.get("turn_chat_screenshot") or "").strip()
+        data["turn_chat_screenshot"] = None
+        _write(data)
+    if not name:
+        return None
+    path = CHAT_SCREENSHOTS_DIR / Path(name).name
+    try:
+        png = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return png or None
 
 
 def utterance_pending() -> bool:
@@ -446,6 +498,7 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
+        data["turn_chat_screenshot"] = None
         if isinstance(item, dict):
             # Per-turn speaker: phone only when this item requested it.
             if item.get("sink") is not None:
@@ -453,8 +506,15 @@ def consume_utterance() -> str | None:
             else:
                 data["reply_sink"] = "mac"
             data["reply_tts"] = bool(item.get("tts", True))
+            data["turn_source"] = str(item.get("source") or "phone").strip() or "phone"
+            shot = str(item.get("screenshot_file") or "").strip()
+            if shot:
+                data["turn_chat_screenshot"] = Path(shot).name
         else:
             data["reply_tts"] = True
+            data["turn_source"] = "stt"
+        if str(data.get("turn_source") or "").lower() == "chat":
+            data["chat_stream"] = None
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -517,6 +577,74 @@ def consume_speak() -> str | None:
     return text or None
 
 
+def set_turn_source(source: str) -> None:
+    """Tag the current orchestrator turn (chat / voice / phone / …)."""
+    value = (source or "").strip() or "voice"
+    with _lock:
+        data = _read()
+        data["turn_source"] = value
+        if value.lower() != "chat":
+            data["chat_stream"] = None
+        _write(data)
+
+
+def turn_source() -> str:
+    with _lock:
+        return str(_read().get("turn_source") or "").strip()
+
+
+def reply_to_chat() -> bool:
+    """True when this turn was queued from the Electron chat app."""
+    return turn_source().lower() == "chat"
+
+
+_chat_stream_last_write = 0.0
+_CHAT_STREAM_MIN_INTERVAL = 0.05
+
+
+def set_chat_stream(text: str | None, *, done: bool = False, force: bool = False) -> None:
+    """Publish progressive assistant text for the chat UI (chat-origin turns)."""
+    global _chat_stream_last_write
+    if text is None:
+        with _lock:
+            data = _read()
+            data["chat_stream"] = None
+            _write(data)
+        return
+    clipped = str(text)[:8000]
+    now = time.monotonic()
+    if (
+        not force
+        and not done
+        and now - _chat_stream_last_write < _CHAT_STREAM_MIN_INTERVAL
+    ):
+        return
+    _chat_stream_last_write = now
+    with _lock:
+        data = _read()
+        data["chat_stream"] = {
+            "text": clipped,
+            "done": bool(done),
+            "ts": time.time(),
+        }
+        _write(data)
+
+
+def chat_stream_payload() -> dict[str, Any] | None:
+    with _lock:
+        raw = _read().get("chat_stream")
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get("text") or "")
+    if not text and not raw.get("done"):
+        return None
+    return {
+        "text": text,
+        "done": bool(raw.get("done")),
+        "ts": raw.get("ts"),
+    }
+
+
 def set_last_spoken(text: str) -> None:
     text = (text or "").strip()
     if not text:
@@ -531,6 +659,13 @@ def set_last_spoken(text: str) -> None:
             if prev != clipped:
                 inbox.append({"text": clipped, "ts": time.time()})
                 data["chat_inbox"] = inbox[-50:]
+        # Final line replaces the live stream so the UI can settle on history.
+        if str(data.get("turn_source") or "").lower() == "chat":
+            data["chat_stream"] = {
+                "text": clipped,
+                "done": True,
+                "ts": time.time(),
+            }
         _write(data)
 
 

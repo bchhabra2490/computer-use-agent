@@ -55,8 +55,8 @@ def command_for_orchestrator(text: str, *, look_at_screen: bool) -> str:
     body = (text or "").strip()
     if look_at_screen:
         if body:
-            return f"Look at the current screen. {body}"
-        return "Look at the current screen and tell me what you see."
+            return f"Look at the attached screenshot. {body}"
+        return "Look at the attached screenshot and tell me what you see."
     return body
 
 

@@ -29,11 +29,11 @@ class OrchestratorCommandTests(unittest.TestCase):
     def test_look_at_screen(self) -> None:
         self.assertEqual(
             command_for_orchestrator("what is this", look_at_screen=True),
-            "Look at the current screen. what is this",
+            "Look at the attached screenshot. what is this",
         )
         self.assertEqual(
             command_for_orchestrator("  ", look_at_screen=True),
-            "Look at the current screen and tell me what you see.",
+            "Look at the attached screenshot and tell me what you see.",
         )
 
 

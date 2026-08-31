@@ -11,6 +11,8 @@ const state = {
   shotMenuOpen: false,
   busy: false,
   thinking: false,
+  streamText: null,
+  streamDone: false,
   page: "chat", // chat | mcp | speakers | systems
   mcp: [],
   speakers: [],
@@ -129,7 +131,25 @@ function renderTranscript() {
     row.append(avatar, col);
     el.appendChild(row);
   }
-  if (state.thinking) {
+  if (state.streamText) {
+    const row = document.createElement("div");
+    row.className = "row assistant";
+    const avatar = document.createElement("img");
+    avatar.className = "avatar";
+    avatar.alt = "";
+    if (state.avatars.assistant) {
+      avatar.src = state.avatars.assistant;
+    } else {
+      avatar.classList.add("avatar-fallback-assistant");
+    }
+    const col = document.createElement("div");
+    const bubble = document.createElement("div");
+    bubble.className = "bubble streaming";
+    bubble.textContent = state.streamText;
+    col.appendChild(bubble);
+    row.append(avatar, col);
+    el.appendChild(row);
+  } else if (state.thinking) {
     const t = document.createElement("div");
     t.className = "thinking";
     t.textContent = state.screenshotOn ? "Looking at the screen…" : "Working…";
@@ -364,6 +384,8 @@ async function send() {
   if (!state.chatId) await newChat();
   state.busy = true;
   state.thinking = true;
+  state.streamText = null;
+  state.streamDone = false;
   $("btn-send").disabled = true;
   input.value = "";
   autosize();
@@ -445,6 +467,20 @@ async function pollStatus() {
       : "Orchestrator not running — start: python orchestrator.py --auto";
     const appended = Number(st.assistant_appended || 0);
     const inbox = st.inbox || [];
+    const stream = st.chat_stream;
+    const streamText = stream && stream.text ? String(stream.text) : "";
+    const streamDone = !!(stream && stream.done);
+    let needRender = false;
+    if (streamText) {
+      if (state.streamText !== streamText || state.streamDone !== streamDone) {
+        state.streamText = streamText;
+        state.streamDone = streamDone;
+        state.thinking = false;
+        needRender = true;
+      }
+    } else if (state.streamText && !streamDone) {
+      // Stream cleared after persist — keep showing until messages reload.
+    }
     // Legacy: older bridges returned inbox lines for the UI to save.
     if (inbox.length && state.chatId) {
       for (const line of inbox) {
@@ -458,6 +494,8 @@ async function pollStatus() {
     }
     if (appended > 0 || inbox.length) {
       state.thinking = false;
+      state.streamText = null;
+      state.streamDone = false;
       const target = state.chatId || st.active_chat_id;
       if (target) {
         if (target !== state.chatId) await selectChat(target);
@@ -465,9 +503,12 @@ async function pollStatus() {
           const data = await window.cuaChat.get(`/v1/chats/${state.chatId}/messages`);
           state.messages = data.messages || [];
           renderTranscript();
+          needRender = false;
         }
       }
       await refreshChats();
+    } else if (needRender) {
+      renderTranscript();
     }
   } catch (err) {
     $("status-foot").textContent = "Bridge offline — start chat from tray";
@@ -1498,7 +1539,7 @@ async function boot() {
   }
   await loadAvatars();
   await pollStatus();
-  setInterval(pollStatus, 800);
+  setInterval(pollStatus, 250);
 }
 
 boot();

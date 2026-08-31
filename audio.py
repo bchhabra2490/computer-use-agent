@@ -15,6 +15,7 @@ from app_status import (
     consume_utterance,
     set_reply_sink,
     set_reply_tts,
+    set_turn_source,
     speak_pending,
     utterance_pending,
 )
@@ -160,6 +161,7 @@ class AudioSession:
                 pass
             set_reply_sink("mac")
             set_reply_tts(True)
+            set_turn_source("voice")
             return strip_wake_prefix(remainder).strip() or remainder
         try:
             utterance = self.listen(listen_prompt or "Listening…")
@@ -187,6 +189,7 @@ class AudioSession:
                 return None
         set_reply_sink("mac")
         set_reply_tts(True)
+        set_turn_source("voice")
         return command or None
 
     def speak(self, text: str) -> str | None:

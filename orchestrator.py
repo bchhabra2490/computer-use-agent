@@ -75,12 +75,16 @@ from app_status import (
     request_mark_done,
     request_quit,
     reply_sink,
+    reply_to_chat,
     reply_tts_enabled,
+    set_chat_stream,
     set_last_spoken,
     set_reply_sink,
+    set_turn_source,
     speak_pending,
     speak_pending,
     consume_speak,
+    take_turn_chat_screenshot,
     unregister_orchestrator,
     upsert_agent,
     utterance_pending,
@@ -110,7 +114,7 @@ from mcp_client import (
     start_mcp,
     stop_mcp,
 )
-from orchestrator_prompts import build_system_prompt
+from orchestrator_prompts import build_system_prompt, local_datetime_line
 from session import Session, bind_session, get_session
 from session_compact import (
     SessionCompactState,
@@ -310,7 +314,7 @@ def _history_note(
     photo: bool = False,
     desktop_context: str = "",
 ) -> str:
-    prefix = ""
+    prefix = local_datetime_line() + "\n\n"
     if photo:
         prefix = (
             "The user sent a photo from their phone camera (image attached). "
@@ -327,6 +331,13 @@ def _history_note(
         + f"Computer task history so far:\n"
         + _format_task_history(task_history, task_summary=task_summary)
     )
+
+
+_CHAT_SCREENSHOT_CONTEXT = (
+    "The user attached a screenshot from the chat app (only the displays they "
+    "selected). Use the image. No accessibility tree or extra desktop capture "
+    "is included with this message."
+)
 
 
 def _user_turn_input(
@@ -541,7 +552,11 @@ def _create_response(
         kwargs["input"] = fold_orphan_tool_outputs(kwargs.get("input"))
     if llm_tts is not None and not reply_tts_enabled():
         llm_tts = None
-    use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
+    stream_to_chat = reply_to_chat()
+    use_stream = bool(
+        stream_to_chat
+        or (llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
+    )
     if not use_stream:
         return _sync_create_response(client, kwargs)
 
@@ -578,11 +593,15 @@ def _create_response(
             return
         if not _is_give_response(meta):
             return
-        if meta.get("call_id"):
+        if llm_tts is not None and meta.get("call_id"):
             llm_tts.bind_call(response_id, str(meta["call_id"]))
         decoded = decoded_message_prefix(meta.get("arguments") or "")
         if len(decoded) > streamed_msg_len:
-            llm_tts.add_text_chunk(decoded[streamed_msg_len:])
+            chunk = decoded[streamed_msg_len:]
+            if llm_tts is not None:
+                llm_tts.add_text_chunk(chunk)
+            if stream_to_chat:
+                set_chat_stream(decoded)
             streamed_msg_len = len(decoded)
 
     try:
@@ -590,7 +609,8 @@ def _create_response(
             etype = getattr(event, "type", None)
             if etype == "response.created":
                 response_id = event.response.id
-                llm_tts.start_stream(response_id)
+                if llm_tts is not None:
+                    llm_tts.start_stream(response_id)
                 print(f"[orchestrator] streaming response {response_id}", flush=True)
             elif etype == "response.output_item.added":
                 item = event.item
@@ -600,7 +620,12 @@ def _create_response(
                         "call_id": getattr(item, "call_id", "") or "",
                         "arguments": getattr(item, "arguments", None) or "",
                     }
-                    if response_id and items[item.id]["name"] == "give_response_to_user" and items[item.id]["call_id"]:
+                    if (
+                        llm_tts is not None
+                        and response_id
+                        and items[item.id]["name"] == "give_response_to_user"
+                        and items[item.id]["call_id"]
+                    ):
                         llm_tts.bind_call(response_id, items[item.id]["call_id"])
             elif etype == "response.function_call_arguments.delta":
                 meta = items.get(event.item_id)
@@ -697,6 +722,8 @@ def _create_response(
             llm_tts.add_text_chunk(give_response_text[streamed_msg_len:])
             streamed_msg_len = len(give_response_text)
         llm_tts.stop_stream()
+    elif stream_to_chat and give_response_text:
+        set_chat_stream(give_response_text, done=False, force=True)
 
     return final_response
 
@@ -1034,6 +1061,49 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: O
     return _speak(client, text)
 
 
+def _reply_to_chat_screenshot(
+    client: OpenAI,
+    utterance: str,
+    png: bytes,
+    *,
+    llm: OpenAI | None = None,
+) -> str | None:
+    """Look at a chat-attached screenshot while a computer task is running."""
+    api = llm if llm is not None else client
+    b64 = base64.b64encode(png).decode("ascii")
+    prompt = (
+        "Look at this screenshot the user attached from chat (selected displays only). "
+        f"They said: {utterance}\n"
+        "Reply in 2-5 spoken sentences. No markdown, no file paths."
+    )
+    get_session().enter("thinking", "Looking at chat screenshot")
+    try:
+        response = api.responses.create(
+            model=model_for_request(MODEL, has_image=True),
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{b64}",
+                            "detail": "high",
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        print(f"[orchestrator] chat screenshot vision failed: {e}", flush=True)
+        return _speak(client, "I could not look at that screenshot.")
+    text = _strip_wait_filler(_assistant_message_text(response))
+    if not text:
+        return _speak(client, "I could not make out that screenshot.")
+    log_llm(text, source="llm")
+    return _speak(client, text)
+
+
 def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     """If the agent is waiting on ask_user, speak/listen and reply. Returns True if handled."""
     req = ask_bridge.poll(timeout=0)
@@ -1116,6 +1186,7 @@ def _listen_command(
     if remainder:
         _clear_speaker_tag()
         set_reply_sink("mac")
+        set_turn_source("voice")
         return strip_wake_prefix(remainder).strip() or remainder
     try:
         utterance = listen_for_utterance(
@@ -1148,6 +1219,7 @@ def _listen_command(
                 print(f"[orchestrator] follow-up listen failed: {e}")
             return None
     set_reply_sink("mac")
+    set_turn_source("voice")
     return command or None
 
 
@@ -1247,9 +1319,23 @@ def _supervise_agent(
                 else:
                     continue
         else:
-            command = _confirm_heard(client, command)
-            print(f'\n[user] "{command}"')
-            status_log(f'[user] "{command}"')
+            chat_shot = take_turn_chat_screenshot()
+            if chat_shot:
+                print(
+                    "[orchestrator] chat screenshot — answering without stopping the computer task",
+                    flush=True,
+                )
+                print(f'\n[user] "{command}"')
+                status_log(f'[user] "{command}"')
+                barged = _reply_to_chat_screenshot(client, command, chat_shot, llm=llm)
+                if barged:
+                    command = barged
+                else:
+                    continue
+            else:
+                command = _confirm_heard(client, command)
+                print(f'\n[user] "{command}"')
+                status_log(f'[user] "{command}"')
         if record_speaker is not None:
             record_speaker()
         low = command.lower().strip()
@@ -1743,13 +1829,37 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     sess = Session()
     bind_session(sess)
 
+    def _shutdown_side_processes() -> None:
+        # Signal handlers may raise SystemExit without unwinding ``finally``.
+        # Tear down tray/face here so Ctrl+C always clears the menu bar.
+        try:
+            stop_phone_gateway()
+        except Exception:
+            pass
+        try:
+            stop_tray()
+        except Exception:
+            pass
+        try:
+            stop_dictation()
+        except Exception:
+            pass
+
     def _on_term(_signum=None, _frame=None) -> None:
         request_quit()
         print("\n[orchestrator] stop signal — shutting down…", flush=True)
+        _shutdown_side_processes()
         raise SystemExit(0)
 
     try:
         signal.signal(signal.SIGTERM, _on_term)
+        signal.signal(signal.SIGINT, _on_term)
+    except Exception:
+        pass
+    try:
+        import atexit
+
+        atexit.register(_shutdown_side_processes)
     except Exception:
         pass
 
@@ -1919,6 +2029,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if jpeg:
                     _phone_photo_in_session = True
 
+            # Chat-attached shot: use only the displays the user selected — no
+            # live desktop screenshot / accessibility dump for this turn.
+            chat_shot = take_turn_chat_screenshot()
+
             compact_state.begin_turn()
             emit("turn_start", lane="main", utterance=utterance[:160])
             cp = run_orchestrator_checkpoint(
@@ -1926,7 +2040,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 compact_state,
                 task_history,
                 pending_fn_outputs=pending_fn_outputs or None,
-                capture_desktop=True,
+                capture_desktop=not bool(chat_shot),
             )
             task_history = cp.task_history
             if cp.reset_thread:
@@ -1937,15 +2051,26 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     utterance = f"{utterance} {extras}".strip() if utterance else extras
                     print(f"[orchestrator] applied next_run queue: {extras!r}", flush=True)
 
-            desktop = cp.desktop
+            if chat_shot:
+                desktop_context = _CHAT_SCREENSHOT_CONTEXT
+                desktop_png = chat_shot
+                print(
+                    f"[orchestrator] chat screenshot attached "
+                    f"({len(chat_shot) / 1024.0:.0f} KB); skipped live desktop/AX",
+                    flush=True,
+                )
+            else:
+                desktop = cp.desktop
+                desktop_context = desktop.text
+                desktop_png = desktop.screenshot_png
             turn_input = _user_turn_input(
                 utterance,
                 task_history,
                 task_summary=compact_state.task_summary,
                 pending_fn_outputs=cp.pending_fn_outputs or None,
                 photo_jpeg=jpeg,
-                desktop_context=desktop.text,
-                desktop_screenshot_png=desktop.screenshot_png,
+                desktop_context=desktop_context,
+                desktop_screenshot_png=desktop_png,
             )
             pending_fn_outputs = []
             turn = TurnTrace(utterance)
@@ -1985,22 +2110,28 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                             llm,
                             compact_state,
                             task_history,
-                            capture_desktop=True,
+                            capture_desktop=not bool(chat_shot),
                             overflow=True,
                         )
                         task_history = cp.task_history
-                        desktop = cp.desktop
                         if cp.reset_thread:
                             previous_id = None
                         system = _system_prompt(session_summary=compact_state.session_summary)
+                        if chat_shot:
+                            overflow_context = _CHAT_SCREENSHOT_CONTEXT
+                            overflow_png = chat_shot
+                        else:
+                            desktop = cp.desktop
+                            overflow_context = desktop.text
+                            overflow_png = desktop.screenshot_png
                         turn_input = _user_turn_input(
                             utterance,
                             task_history,
                             task_summary=compact_state.task_summary,
                             pending_fn_outputs=None,
                             photo_jpeg=jpeg,
-                            desktop_context=desktop.text,
-                            desktop_screenshot_png=desktop.screenshot_png,
+                            desktop_context=overflow_context,
+                            desktop_screenshot_png=overflow_png,
                         )
                         continue
                     _announce_llm_failure(client, e)

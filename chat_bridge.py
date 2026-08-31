@@ -29,11 +29,14 @@ load_dotenv()
 
 from app_status import (  # noqa: E402
     RUNTIME_DIR,
+    chat_stream_payload,
     consume_chat_inbox,
     enqueue_utterance,
     pid_alive,
     read_status,
+    save_chat_screenshot_png,
     set_chat_bridge_pid,
+    set_chat_stream,
 )
 from chat_store import (  # noqa: E402
     PREF_CHAT_TTS,
@@ -274,8 +277,8 @@ def command_for_orchestrator(text: str, *, look_at_screen: bool) -> str:
     body = (text or "").strip()
     if look_at_screen:
         if body:
-            return f"Look at the current screen. {body}"
-        return "Look at the current screen and tell me what you see."
+            return f"Look at the attached screenshot. {body}"
+        return "Look at the attached screenshot and tell me what you see."
     return body
 
 
@@ -755,6 +758,11 @@ def persist_chat_inbox() -> dict[str, Any]:
         store.set_active_chat_id(chat_id)
     for text in lines:
         store.add_message(chat_id, "assistant", text)
+    # History now has the final line — drop the live stream cursor.
+    try:
+        set_chat_stream(None)
+    except Exception:
+        pass
     return {"ok": True, "appended": len(lines), "chat_id": chat_id}
 
 
@@ -850,6 +858,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         if path == "/v1/status":
             snap = read_status()
             persisted = persist_chat_inbox()
+            stream = chat_stream_payload()
             self._send(
                 200,
                 {
@@ -864,6 +873,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                     "inbox": [],
                     "assistant_appended": int(persisted.get("appended") or 0),
                     "active_chat_id": persisted.get("chat_id") or resolve_active_chat_id(store),
+                    "chat_stream": stream,
                 },
             )
             return
@@ -1122,6 +1132,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 self._send(400, {"ok": False, "error": "text or look_at_screen required"})
                 return
             relpath = None
+            shot_file = None
             if look:
                 try:
                     indexes = _parse_display_indexes(body.get("displays"))
@@ -1129,6 +1140,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                         indexes = screenshot_display_indexes(store)
                     png = _capture_desktop_png(display_indexes=indexes)
                     relpath = store.save_screenshot(chat_id, png)
+                    shot_file = save_chat_screenshot_png(png)
                 except Exception as e:
                     self._send(500, {"ok": False, "error": f"screenshot failed: {e}"})
                     return
@@ -1142,7 +1154,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 store.touch_chat(chat_id, model_id="orchestrator")
             cmd = command_for_orchestrator(text, look_at_screen=look)
             tts_on = store.get_pref(PREF_CHAT_TTS, "1") != "0"
-            enqueue_utterance(cmd, source="chat", tts=tts_on)
+            enqueue_utterance(cmd, source="chat", tts=tts_on, screenshot_file=shot_file)
             orch_ok = pid_alive(read_status().get("orchestrator_pid"))
             self._send(
                 200,

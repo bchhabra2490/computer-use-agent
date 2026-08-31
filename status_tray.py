@@ -61,6 +61,36 @@ STATE_GLYPH = {
 }
 
 
+def _tray_script_path() -> Path:
+    return Path(__file__).resolve()
+
+
+def _iter_orphan_tray_pids(*, exclude: int | None = None) -> list[int]:
+    """Find leftover ``status_tray.py`` processes for this checkout."""
+    script = str(_tray_script_path())
+    out: list[int] = []
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return out
+    me = os.getpid()
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid == me or (exclude is not None and pid == exclude):
+            continue
+        if pid_alive(pid):
+            out.append(pid)
+    return out
+
+
 def ensure_tray_running() -> subprocess.Popen | None:
     """
     Spawn the menu-bar process if not already running and STATUS_TRAY is enabled.
@@ -76,16 +106,12 @@ def ensure_tray_running() -> subprocess.Popen | None:
     try:
         data = read_status()
         tray_pid = data.get("tray_pid")
-        if isinstance(tray_pid, int) and tray_pid > 0:
-            try:
-                os.kill(tray_pid, 0)
-                return None
-            except OSError:
-                pass
+        if pid_alive(tray_pid):
+            return None
     except Exception:
         pass
 
-    script = Path(__file__).resolve()
+    script = _tray_script_path()
     env = os.environ.copy()
     env["STATUS_TRAY_CHILD"] = "1"
     # Don't poison Electron (started by the tray) into Node mode.
@@ -112,22 +138,7 @@ def ensure_tray_running() -> subprocess.Popen | None:
         return None
 
 
-def stop_tray(*, wait: float = 1.5) -> None:
-    """Ask the menu-bar process to close its NSPanel and exit."""
-    if os.environ.get("STATUS_TRAY_CHILD", "").strip() == "1":
-        return
-    try:
-        pid = read_status().get("tray_pid")
-    except Exception:
-        return
-    if not pid_alive(pid):
-        return
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return
-    if pid == os.getpid():
-        return
+def _kill_pid(pid: int, *, wait: float) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
@@ -135,12 +146,52 @@ def stop_tray(*, wait: float = 1.5) -> None:
     deadline = time.monotonic() + max(0.0, wait)
     while time.monotonic() < deadline:
         if not pid_alive(pid):
-            try:
-                set_tray_pid(None)
-            except Exception:
-                pass
             return
         time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    time.sleep(0.1)
+
+
+def stop_tray(*, wait: float = 2.0) -> None:
+    """Ask the menu-bar process to close overlays and exit; SIGKILL if needed."""
+    if os.environ.get("STATUS_TRAY_CHILD", "").strip() == "1":
+        return
+    targets: list[int] = []
+    try:
+        raw = read_status().get("tray_pid")
+        if raw is not None:
+            pid = int(raw)
+            if pid != os.getpid() and pid_alive(pid):
+                targets.append(pid)
+    except (TypeError, ValueError, Exception):
+        pass
+    for orphan in _iter_orphan_tray_pids(exclude=os.getpid()):
+        if orphan not in targets:
+            targets.append(orphan)
+    if not targets:
+        try:
+            set_tray_pid(None)
+        except Exception:
+            pass
+        return
+    for pid in targets:
+        print(f"[tray] stopping menu-bar status (pid={pid})", flush=True)
+        _kill_pid(pid, wait=wait)
+    try:
+        set_tray_pid(None)
+    except Exception:
+        pass
+    # Face/log panels die with the tray process; clear any stragglers.
+    for orphan in _iter_orphan_tray_pids(exclude=os.getpid()):
+        print(f"[tray] killing leftover tray (pid={orphan})", flush=True)
+        _kill_pid(orphan, wait=0.5)
+    try:
+        set_tray_pid(None)
+    except Exception:
+        pass
 
 
 def _add_memory_from_tray() -> None:
@@ -861,6 +912,10 @@ def main() -> None:
                 pass
             NSApplication.sharedApplication().terminate_(None)
 
+        def quitFromSignal_(self, _sender) -> None:
+            """Main-thread entry for SIGTERM/SIGINT (see _signal_quit)."""
+            self.quitTray_(None)
+
     set_tray_pid(os.getpid())
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
@@ -870,12 +925,27 @@ def main() -> None:
     app.setDelegate_(_TRAY_CONTROLLER)
 
     def _signal_quit(_signum=None, _frame=None) -> None:
-        # Close the panel on the AppKit thread, then terminate.
-        NSApplication.sharedApplication().performSelectorOnMainThread_withObject_waitUntilDone_(
-            "terminate:",
-            None,
-            False,
-        )
+        # Never call AppKit teardown directly from a signal handler — schedule
+        # quitTray on the main run loop so the face panel is destroyed first.
+        ctrl = _TRAY_CONTROLLER
+        if ctrl is not None:
+            try:
+                ctrl.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "quitFromSignal:",
+                    None,
+                    False,
+                )
+                return
+            except Exception:
+                pass
+        try:
+            NSApplication.sharedApplication().performSelectorOnMainThread_withObject_waitUntilDone_(
+                "terminate:",
+                None,
+                False,
+            )
+        except Exception:
+            os._exit(0)
 
     try:
         signal.signal(signal.SIGTERM, _signal_quit)

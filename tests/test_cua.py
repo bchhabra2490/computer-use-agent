@@ -78,10 +78,45 @@ class StartStopTests(unittest.TestCase):
     def test_stop_when_not_running(self) -> None:
         with (
             patch.object(cua, "running_pid", return_value=None),
+            patch.object(cua, "_cleanup_side_processes", return_value=[]) as cleanup,
             patch.object(cua, "_clear_pid_file") as clear,
         ):
             self.assertEqual(cua.cmd_stop(), 0)
+            cleanup.assert_called_once_with(include_dictation=False)
             clear.assert_called_once()
+
+    def test_stop_all_cleans_dictation(self) -> None:
+        with (
+            patch.object(cua, "running_pid", return_value=None),
+            patch.object(
+                cua,
+                "_cleanup_side_processes",
+                return_value=[(111, "dictation.py")],
+            ) as cleanup,
+            patch.object(cua, "_clear_pid_file"),
+        ):
+            self.assertEqual(cua.cmd_stop(all_procs=True), 0)
+            cleanup.assert_called_once_with(include_dictation=True)
+
+    def test_find_agent_pids_labels_pgrep_hits(self) -> None:
+        def fake_pgrep(*patterns: str) -> list[int]:
+            joined = " ".join(patterns)
+            if "phone_gateway.py" in joined:
+                return [4242]
+            return []
+
+        with (
+            patch.object(cua, "running_pid", return_value=None),
+            patch.object(cua, "_pgrep_pids", side_effect=fake_pgrep),
+            patch.object(cua, "_pid_alive", return_value=True),
+            patch(
+                "app_status.read_status",
+                return_value={},
+            ),
+            patch("app_status.pid_alive", return_value=False),
+        ):
+            found = cua.find_agent_pids()
+        self.assertIn((4242, "phone_gateway.py"), found)
 
     def test_start_launches_orchestrator_auto(self) -> None:
         proc = MagicMock()

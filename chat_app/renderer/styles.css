@@ -417,6 +417,20 @@ select,
   border-bottom-left-radius: 4px;
 }
 
+.row.assistant .bubble.streaming::after {
+  content: "▍";
+  display: inline-block;
+  margin-left: 2px;
+  animation: stream-caret 1s steps(1) infinite;
+  opacity: 0.7;
+}
+
+@keyframes stream-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
 .row.error .bubble {
   background: color-mix(in srgb, var(--danger) 28%, #1a1212);
   border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);

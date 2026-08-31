@@ -135,6 +135,15 @@ class UserTurnInputTests(unittest.TestCase):
         inp = _user_turn_input("open notes", [])
         self.assertIsInstance(inp, str)
         self.assertIn("open notes", inp)
+        self.assertIn("Current local date and time:", inp)
+
+    def test_injects_local_datetime_on_every_turn(self) -> None:
+        with patch(
+            "orchestrator.local_datetime_line",
+            return_value="Current local date and time: TEST.",
+        ):
+            inp = _user_turn_input("what time is it?", [])
+        self.assertIn("Current local date and time: TEST.", inp)
 
     def test_attaches_desktop_screenshot(self) -> None:
         png = b"\x89PNG" + b"\x00" * 20

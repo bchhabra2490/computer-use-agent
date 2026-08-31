@@ -45,6 +45,20 @@ class ChatStreamTests(unittest.TestCase):
         self.assertFalse(st.reply_to_chat())
         self.assertIsNone(st.chat_stream_payload())
 
+    def test_chat_text_only_when_tts_off(self) -> None:
+        st.enqueue_utterance("hello", source="chat", tts=False)
+        st.consume_utterance()
+        self.assertTrue(st.reply_to_chat())
+        self.assertFalse(st.reply_tts_enabled())
+        self.assertTrue(st.chat_text_only())
+
+    def test_chat_text_only_false_when_tts_on(self) -> None:
+        st.enqueue_utterance("hello", source="chat", tts=True)
+        st.consume_utterance()
+        self.assertTrue(st.reply_to_chat())
+        self.assertTrue(st.reply_tts_enabled())
+        self.assertFalse(st.chat_text_only())
+
 
 if __name__ == "__main__":
     unittest.main()

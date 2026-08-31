@@ -1,9 +1,10 @@
-"""Fn-key dictation: speak into the focused field via OpenAI Realtime STT.
+"""Fn-key dictation: hold Fn for live speech-to-text into the focused field.
 
-Hold Fn alone (no other modifiers) while a text field is focused, then
-release to send. The mic opens, Realtime transcription runs, and partial
-text is pasted as you speak. Release ends listening (send). Esc or Fn
-again while listening cancels.
+Hold Fn alone (no other modifiers) while a text field is focused. The mic
+opens immediately and partial transcript text is pasted in real time as you
+speak (OpenAI Realtime or rolling local Whisper when ``STT_PROVIDER=whisperflow``).
+Release Fn to finish and keep the final text. Esc or Fn again while listening
+cancels.
 
 The face overlay switches to listen mode while the mic is open (``stt_active``).
 A three-dot indicator appears near the cursor while you hold Fn
@@ -42,7 +43,7 @@ DICTATION_REQUIRE_EDITABLE = (
 # Ignore Fn edges this long after a session (debounce + avoid key-repeat noise).
 DICTATION_COOLDOWN = float(os.environ.get("DICTATION_COOLDOWN", "0.45"))
 # Batch rapid STT deltas before paste (seconds).
-DICTATION_PASTE_DEBOUNCE = float(os.environ.get("DICTATION_PASTE_DEBOUNCE", "0.08"))
+DICTATION_PASTE_DEBOUNCE = float(os.environ.get("DICTATION_PASTE_DEBOUNCE", "0.05"))
 # kVK_Function — Globe / Fn on Apple keyboards (emoji & character viewer).
 FN_KEYCODE = 63
 
@@ -460,7 +461,7 @@ class DictationDaemon:
             try:
                 from openai import OpenAI
 
-                from stt import ListenCancelled, NoSpeechError, listen_once
+                from stt import ListenCancelled, NoSpeechError, listen_dictation
 
                 client = OpenAI()
 
@@ -480,12 +481,9 @@ class DictationDaemon:
                     target=_hold_watch, name="dictation-hold", daemon=True
                 ).start()
 
-                text = listen_once(
+                text = listen_dictation(
                     client,
                     prompt="Dictation… (hold Fn; release to send; Esc cancels)",
-                    mode="freeform",
-                    max_attempts=1,
-                    announce_retries=False,
                     max_wait_for_speech=12.0,
                     on_partial=paster.on_partial,
                 )

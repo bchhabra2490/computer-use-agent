@@ -1007,7 +1007,7 @@ def wait_for_wake(
             if not sleeping_announced:
                 print(
                     f"[wake] Sleep — ignoring {format_wake_phrases()} "
-                    "(⌘⌥S or cua sleep off)",
+                    "(⌘⌃S or cua sleep off)",
                     flush=True,
                 )
                 sleeping_announced = True

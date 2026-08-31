@@ -3,7 +3,7 @@ macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
 Click for a menu with Send (while listening), Add Memory, Log Overlay, Face Overlay,
-Chat (⌘⌃C), Sleep (⌘⌥S), Mark Task Done, logs, and quit.
+Chat (⌘⌃C), Sleep (⌘⌃S), Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -339,7 +339,7 @@ def main() -> None:
 
                 def _global_hotkey(event):
                     # ⌘⌃C = chat toggle (avoids Chrome Inspect ⌘⌥C)
-                    # ⌘⌥S = sleep toggle
+                    # ⌘⌃S = sleep toggle (same modifier pattern as chat)
                     try:
                         flags = int(event.modifierFlags())
                         # Ignore Caps Lock / Fn bits; only care about cmd/opt/ctrl/shift.
@@ -347,16 +347,14 @@ def main() -> None:
                         chars = (event.charactersIgnoringModifiers() or "").lower()
                         now = time.monotonic()
                         if now - float(getattr(owner, "_hotkeyAt", 0.0) or 0.0) < 0.45:
-                            if chars in {"c", "s"} and (
-                                mods == (cmd | ctrl) or mods == (cmd | opt)
-                            ):
+                            if chars in {"c", "s"} and mods == (cmd | ctrl):
                                 return None
                             return event
                         if chars == "c" and mods == (cmd | ctrl):
                             owner._hotkeyAt = now
                             owner.toggleChat_(None)
                             return None
-                        if chars == "s" and mods == (cmd | opt):
+                        if chars == "s" and mods == (cmd | ctrl):
                             owner._hotkeyAt = now
                             owner.toggleSleep_(None)
                             return None
@@ -371,7 +369,7 @@ def main() -> None:
                     NSEventMaskKeyDown, _global_hotkey
                 )
                 self._hotkeyMonitors = [m for m in (g, loc) if m is not None]
-                print("[tray] hotkeys ⌘⌃C (chat) · ⌘⌥S (sleep) armed", flush=True)
+                print("[tray] hotkeys ⌘⌃C (chat) · ⌘⌃S (sleep) armed", flush=True)
             except Exception as e:
                 print(f"[tray] hotkeys unavailable: {e}", flush=True)
             try:
@@ -755,7 +753,7 @@ def main() -> None:
 
             sleep_on = sleep_mode_enabled(data)
             sleep_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Sleep (ignore wake) ⌘⌥S",
+                "Sleep (ignore wake) ⌘⌃S",
                 "toggleSleep:",
                 "",
             )

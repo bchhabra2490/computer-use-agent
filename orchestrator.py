@@ -63,6 +63,7 @@ from app_status import log as status_log
 from app_status import (
     active_agents,
     clear_phone_photo,
+    consume_cancel,
     consume_utterance,
     is_mark_done_utterance,
     log_llm,
@@ -77,11 +78,11 @@ from app_status import (
     reply_sink,
     reply_to_chat,
     reply_tts_enabled,
+    chat_text_only,
     set_chat_stream,
     set_last_spoken,
     set_reply_sink,
     set_turn_source,
-    speak_pending,
     speak_pending,
     consume_speak,
     take_turn_chat_screenshot,
@@ -943,17 +944,58 @@ def _save_screen_now(client: OpenAI, hint: str) -> str:
         return msg
 
 
-def _speak(client: OpenAI, text: str) -> str | None:
+def _wait_for_chat_reply() -> str:
+    """Block until the user sends the next chat message."""
+    timeout = float(os.environ.get("CHAT_ASK_TIMEOUT_SEC", "600"))
+    deadline = time.monotonic() + max(1.0, timeout)
+    print("[orchestrator] waiting for chat reply…", flush=True)
+    while time.monotonic() < deadline:
+        if quit_requested() or consume_cancel():
+            return "The user cancelled. Do not assume an answer."
+        if utterance_pending():
+            text = consume_utterance()
+            if text:
+                print(f'[orchestrator] chat answer: "{text}"', flush=True)
+                return text
+        time.sleep(0.15)
+    return "No chat reply arrived in time. Ask again if needed."
+
+
+def _prompt_for_answer(client: OpenAI, question: str) -> str:
+    """Speak or post a question, then wait for the user's answer."""
+    question = (question or "").strip()
+    if not question:
+        return "Error: empty question"
+    if chat_text_only():
+        set_last_spoken(question)
+        return _wait_for_chat_reply()
+    print(f"\n[ask_user] {question}")
+    interrupted = _speak(client, question, user_reply=True)
+    if not interrupted:
+        time.sleep(POST_TTS_COOLDOWN)
+    try:
+        return _listen_for_answer(client)
+    except Exception as e:
+        from stt import ListenCancelled
+
+        if isinstance(e, ListenCancelled):
+            return "The user cancelled listening. Do not assume an answer."
+        raise
+
+
+def _speak(client: OpenAI, text: str, *, user_reply: bool = False) -> str | None:
     """
     Speak `text`. If the user barges in (wake word or keyboard), stop and listen.
 
     Returns the spoken command on barge-in, or None if playback finished normally.
-    When reply TTS is off (chat mute), still records the line for the chat inbox.
+    When reply TTS is off (chat mute), still records user-facing replies for chat
+    when ``user_reply`` is True (give_response / ask_user).
     """
     if not text:
         return None
     log_llm(text, source="tts")
-    set_last_spoken(text)
+    if user_reply or not chat_text_only():
+        set_last_spoken(text)
     if not reply_tts_enabled():
         return None
     audio = get_audio()
@@ -968,12 +1010,13 @@ def _speak(client: OpenAI, text: str) -> str | None:
     return None
 
 
-def _speak_later(client: OpenAI, text: str) -> None:
+def _speak_later(client: OpenAI, text: str, *, user_reply: bool = False) -> None:
     """Start TTS without blocking the agent / tool loop."""
     if not text:
         return
     log_llm(text, source="tts")
-    set_last_spoken(text)
+    if user_reply or not chat_text_only():
+        set_last_spoken(text)
     if not reply_tts_enabled():
         return
     audio = get_audio()
@@ -1114,7 +1157,9 @@ def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     print(f"\n[orchestrator] agent ask_user: {question}")
     audio = get_audio()
     try:
-        if audio is not None:
+        if chat_text_only():
+            answer = _prompt_for_answer(client, question)
+        elif audio is not None:
             answer = audio.ask(question)
         else:
             get_session().enter_and_log("ask", f"Agent asks: {question[:160]}")
@@ -1500,7 +1545,7 @@ def _handle_tool(
             else:
                 output = f"Spoke to user. end_session={end_session}"
         elif message:
-            barge = _speak(client, message)
+            barge = _speak(client, message, user_reply=True)
             if barge:
                 handled_barge = True
                 end_session = False
@@ -1532,10 +1577,14 @@ def _handle_tool(
         # here anyway, listen without a wake word so the user can answer.
         if not handled_barge and not end_session and message and _looks_like_question(message):
             print(
-                "[orchestrator] give_response asked a question — " "listening without wake word",
+                "[orchestrator] give_response asked a question — "
+                + ("waiting for chat reply" if chat_text_only() else "listening without wake word"),
                 flush=True,
             )
-            answer = _listen_for_answer(client)
+            if chat_text_only():
+                answer = _wait_for_chat_reply()
+            else:
+                answer = _listen_for_answer(client)
             output = (
                 f"Spoke to user, then captured their answer (no wake word): {answer}. "
                 "Continue with that answer. Further questions must use ask_user "
@@ -1549,7 +1598,7 @@ def _handle_tool(
         if not question:
             output = "Error: empty question"
         else:
-            output = ask_user(client, question)
+            output = _prompt_for_answer(client, question)
             print(f"[orchestrator] ask_user answer: {output}")
             if turn is not None:
                 turn.add("ask_user", f"Q: {question}\nA: {output}")
@@ -1658,10 +1707,14 @@ def _process_response(
             if leftover and _looks_like_question(leftover) and not spoke_this_response:
                 print(
                     "[orchestrator] model asked in a message instead of ask_user — "
-                    "speaking and listening without wake word",
+                    + (
+                        "posting to chat and waiting for reply"
+                        if chat_text_only()
+                        else "speaking and listening without wake word"
+                    ),
                     flush=True,
                 )
-                answer = ask_user(client, leftover)
+                answer = _prompt_for_answer(client, leftover)
                 if turn is not None:
                     turn.add("ask_user", f"Q: {leftover}\nA: {answer}")
                 response = _create_response(
@@ -1682,12 +1735,19 @@ def _process_response(
                 )
                 continue
             if leftover and not spoke_this_response:
-                print(
-                    "[orchestrator] model replied with a message instead of "
-                    "give_response_to_user — speaking it in the background",
-                    flush=True,
-                )
-                _speak_later(client, leftover)
+                if chat_text_only():
+                    print(
+                        "[orchestrator] model plain message ignored in chat-text mode "
+                        "(use give_response_to_user)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[orchestrator] model replied with a message instead of "
+                        "give_response_to_user — speaking it in the background",
+                        flush=True,
+                    )
+                    _speak_later(client, leftover)
             elif leftover and spoke_this_response:
                 print(
                     "[orchestrator] skipping leftover message " "(already spoke this response)",

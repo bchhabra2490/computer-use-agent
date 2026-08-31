@@ -403,7 +403,7 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   listen / unsure / speak / think). Hidden
   from computer-use screenshots. Toggle **Face Overlay** in the menu-bar icon,
   or set `FACE_OVERLAY=0`.
-- **Sleep** — ignore the wake word (menu **Sleep** or **⌘⌥S** / `cua sleep on`).
+- **Sleep** — ignore the wake word (menu **Sleep** or **⌘⌃S** / `cua sleep on`).
   Face uses the sleep expression; turn Sleep off to wink and listen again.
 - **Chat** — Electron desktop front-end for the **orchestrator** (same queue as
   the wake word and phone `/v1/command`). Sidebar of saved chats, camera attach,

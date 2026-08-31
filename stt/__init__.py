@@ -50,6 +50,12 @@ SAMPLE_RATE = REALTIME_RATE
 
 # openai | sarvam | whisperflow
 STT_PROVIDER = os.environ.get("STT_PROVIDER", "openai").strip().lower()
+# Fn dictation STT: auto (whisperflow → local streaming, else realtime), realtime, whisperflow
+DICTATION_STT = os.environ.get("DICTATION_STT", "auto").strip().lower()
+DICTATION_WHISPER_CHUNK_SECONDS = float(
+    os.environ.get("DICTATION_WHISPER_CHUNK_SECONDS", "0.65")
+)
+DICTATION_WHISPER_MODEL = (os.environ.get("DICTATION_WHISPER_MODEL") or "").strip()
 # Live Realtime transcription model (OpenAI path).
 TRANSCRIBE_MODEL = os.environ.get("STT_MODEL", "gpt-live-transcribe")
 # Optional file re-transcribe / judge (not used by default listen_once).
@@ -502,6 +508,20 @@ def _use_file_stt() -> bool:
     return _use_sarvam() or _use_whisperflow()
 
 
+def _dictation_provider() -> str:
+    """Which STT backend Fn dictation uses."""
+    choice = DICTATION_STT
+    if choice in {"", "auto", "inherit"}:
+        if _use_whisperflow():
+            return "whisperflow"
+        return "realtime"
+    if choice in {"realtime", "openai", "live"}:
+        return "realtime"
+    if choice in {"whisperflow", "whisper-flow", "whisper", "mlx", "local"}:
+        return "whisperflow"
+    return choice
+
+
 def _send_requested() -> bool:
     """True once when the menu-bar Send item is clicked during this listen."""
     try:
@@ -699,6 +719,7 @@ def listen_realtime(
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
     on_partial: Callable[[str], None] | None = None,
+    hold_mode: bool = False,
 ) -> tuple[str, bytes]:
     """
     Capture one utterance and return (transcript, wav_bytes).
@@ -744,6 +765,8 @@ def listen_realtime(
                     prompt=prompt,
                     mode=mode,
                     max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                    hold_mode=hold_mode,
                 )
         with timed("listen_openai_realtime"):
             return _listen_realtime_body(
@@ -752,6 +775,7 @@ def listen_realtime(
                 mode=mode,
                 max_wait_for_speech=max_wait_for_speech,
                 on_partial=on_partial,
+                hold_mode=hold_mode,
             )
     finally:
         if set_stt_listening is not None:
@@ -851,8 +875,17 @@ def _listen_whisperflow(
     prompt: str | None = None,
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
+    hold_mode: bool = False,
 ) -> tuple[str, bytes]:
-    """Record until pause, then transcribe with local WhisperFlow."""
+    """Record until pause (or Fn release in hold mode), then transcribe with local Whisper."""
+    if hold_mode:
+        return _listen_whisperflow_hold(
+            client,
+            prompt=prompt,
+            max_wait_for_speech=max_wait_for_speech,
+            on_partial=on_partial,
+        )
     from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav
 
     return _listen_record_then_transcribe(
@@ -865,6 +898,168 @@ def _listen_whisperflow(
         mode=mode,
         max_wait_for_speech=max_wait_for_speech,
     )
+
+
+def _listen_whisperflow_hold(
+    client: OpenAI,
+    *,
+    prompt: str | None = None,
+    max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
+) -> tuple[str, bytes]:
+    """Hold-to-talk dictation with rolling local Whisper partials (WhisperFlow-style)."""
+    from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav
+
+    del client
+    model = DICTATION_WHISPER_MODEL or None
+    chunk_interval = max(0.35, DICTATION_WHISPER_CHUNK_SECONDS)
+    wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
+    speech_peak = float(os.environ.get("DICTATION_SPEECH_PEAK", "0.012"))
+    min_pcm = int(0.28 * REALTIME_RATE)
+
+    _prepare_mic()
+    capture_rate = _capture_sample_rate()
+    _log_mic_settings(capture_rate)
+    print(
+        prompt
+        or (
+            f"Dictation… (hold Fn; live local Whisper; release to send; "
+            f"chunk={chunk_interval:g}s)"
+        ),
+        flush=True,
+    )
+
+    stop = threading.Event()
+    finish = threading.Event()
+    cancelled = threading.Event()
+    chunks_lock = threading.Lock()
+    pcm_chunks: list[np.ndarray] = []
+    state: dict = {"text": "", "heard": False, "last_tx": 0.0}
+    started_at = time.monotonic()
+    errors: queue.Queue[BaseException] = queue.Queue()
+
+    hotkeys = _ListenHotkeys(cancel_keys=STT_CANCEL_KEYS, send_keys=STT_SEND_KEYS)
+    hotkeys.start()
+
+    def transcribe_worker() -> None:
+        try:
+            while not stop.is_set():
+                time.sleep(0.1)
+                if cancelled.is_set():
+                    return
+                now = time.monotonic()
+                if not finish.is_set():
+                    if not state["heard"] and (now - started_at) >= wait_limit:
+                        errors.put(NoSpeechError("No speech detected — try again."))
+                        finish.set()
+                        return
+                    if state["heard"] and (now - state["last_tx"]) < chunk_interval:
+                        continue
+                with chunks_lock:
+                    if not pcm_chunks:
+                        if finish.is_set():
+                            return
+                        continue
+                    pcm = np.concatenate(pcm_chunks)
+                if pcm.size < min_pcm and not finish.is_set():
+                    continue
+                wav = _float_to_wav(_normalize_peak(pcm), REALTIME_RATE)
+                try:
+                    with timed("dictation_whisper_chunk", bytes=len(wav)):
+                        text = transcribe_wav(wav, model=model)
+                except Exception as exc:
+                    if finish.is_set():
+                        errors.put(NoSpeechError(f"WhisperFlow dictation failed: {exc}"))
+                        return
+                    print(f"[stt] dictation whisper chunk failed ({exc})", flush=True)
+                    continue
+                text = (text or "").strip()
+                if text and text != state["text"]:
+                    state["text"] = text
+                    state["last_tx"] = now
+                    _print_live(text)
+                    _emit_partial(on_partial, text)
+                if finish.is_set():
+                    return
+        except BaseException as exc:  # noqa: BLE001
+            errors.put(exc)
+
+    def record_worker() -> None:
+        chunk_frames = max(1, int(CHUNK_SECONDS * capture_rate))
+        warmup_frames = int(MIC_WARMUP_SECONDS * capture_rate)
+        noise = FanNoiseFilter(capture_rate, FAN_HIGHPASS_HZ)
+        try:
+            with _open_input_stream(capture_rate, chunk_frames) as stream:
+                _cue_listen_start()
+                if warmup_frames:
+                    data, _ = stream.read(warmup_frames)
+                    cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                    pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
+                    if pcm_24k.size:
+                        with chunks_lock:
+                            pcm_chunks.append(pcm_24k.copy())
+                total = 0.0
+                while not finish.is_set() and total < MAX_RECORD_SECONDS:
+                    if hotkeys.cancel.is_set() or _cancel_pending():
+                        cancelled.set()
+                        finish.set()
+                        try:
+                            from app_status import consume_cancel
+
+                            consume_cancel()
+                        except Exception:
+                            pass
+                        return
+                    if _send_requested() or hotkeys.send.is_set():
+                        finish.set()
+                        return
+                    data, _ = stream.read(chunk_frames)
+                    cleaned = noise.process(np.asarray(data, dtype=np.float32).reshape(-1))
+                    pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
+                    with chunks_lock:
+                        pcm_chunks.append(pcm_24k.copy())
+                    total += CHUNK_SECONDS
+                    if _peak(cleaned) >= speech_peak:
+                        state["heard"] = True
+        except BaseException as exc:  # noqa: BLE001
+            errors.put(exc)
+            finish.set()
+
+    tx_thread = threading.Thread(target=transcribe_worker, name="dictation-whisper", daemon=True)
+    rec_thread = threading.Thread(target=record_worker, name="dictation-mic", daemon=True)
+    tx_thread.start()
+    rec_thread.start()
+    try:
+        while rec_thread.is_alive() or (tx_thread.is_alive() and not finish.is_set()):
+            if not errors.empty():
+                raise errors.get()
+            rec_thread.join(timeout=0.15)
+        finish.set()
+        rec_thread.join(timeout=2.0)
+        tx_thread.join(timeout=max(30.0, chunk_interval * 8))
+        if not errors.empty():
+            raise errors.get()
+    finally:
+        stop.set()
+        hotkeys.stop()
+
+    if cancelled.is_set():
+        raise ListenCancelled("Listen cancelled")
+
+    with chunks_lock:
+        pcm_all = np.concatenate(pcm_chunks) if pcm_chunks else np.zeros(0, dtype=np.float32)
+    wav = _float_to_wav(_normalize_peak(pcm_all), REALTIME_RATE)
+    text = (state["text"] or "").strip()
+    if not text and pcm_all.size >= min_pcm:
+        try:
+            text = transcribe_wav(wav, model=model).strip()
+        except Exception as exc:
+            raise NoSpeechError(f"WhisperFlow dictation failed: {exc}") from exc
+    if not text:
+        raise NoSpeechError("Transcription came back empty — try speaking again.")
+    _emit_partial(on_partial, text)
+    print(f"[stt] model=whisperflow-hold:{model or WHISPERFLOW_MODEL}", flush=True)
+    return text, wav
 
 
 def _emit_partial(on_partial: Callable[[str], None] | None, live: str) -> None:
@@ -883,6 +1078,7 @@ def _listen_realtime_body(
     mode: str = "freeform",
     max_wait_for_speech: float | None = None,
     on_partial: Callable[[str], None] | None = None,
+    hold_mode: bool = False,
 ) -> tuple[str, bytes]:
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     _prepare_mic()
@@ -890,14 +1086,21 @@ def _listen_realtime_body(
     _log_mic_settings(capture_rate)
     idle = CONFIRM_RECORD_SECONDS if mode == "confirm" else TRANSCRIPT_IDLE_SECONDS
     hint = _listen_end_hint()
-    print(
-        prompt
-        or (
-            f"Listening for yes/no… (sends after {idle:g}s without new words, {hint}; Esc cancels)"
-            if mode == "confirm"
-            else f"Listening… (sends after {idle:g}s without new words, {hint}; Esc cancels)"
+    if hold_mode:
+        print(
+            prompt
+            or "Dictation… (hold Fn; live transcript; release to send; Esc cancels)",
+            flush=True,
         )
-    )
+    else:
+        print(
+            prompt
+            or (
+                f"Listening for yes/no… (sends after {idle:g}s without new words, {hint}; Esc cancels)"
+                if mode == "confirm"
+                else f"Listening… (sends after {idle:g}s without new words, {hint}; Esc cancels)"
+            )
+        )
     if _phone_pending():
         raise PhoneCommandReady()
 
@@ -1053,6 +1256,21 @@ def _listen_realtime_body(
                         reason = "Send — processing audio."
                     _finish_listen(connection, reason)
                     return
+                if hold_mode:
+                    if first is None or not text:
+                        if (now - started_at) >= wait_limit:
+                            print(
+                                f"[stt] no words after {wait_limit:g}s — aborting listen.",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            errors.put(NoSpeechError("No speech transcribed — try again."))
+                            stop.set()
+                            _close_connection(connection)
+                        continue
+                    if now >= mic_deadline:
+                        _finish_listen(connection, "max record time — sending.", settle=0.4)
+                    continue
                 # No words yet: wait (do not run the 3s send timer).
                 if first is None or not text or last is None:
                     if (now - started_at) >= wait_limit:
@@ -1688,6 +1906,42 @@ def _tag_speaker(wav_bytes: bytes | None) -> None:
         set_last_speaker(identify(wav_bytes))
     except Exception as e:
         print(f"[speaker] tag failed ({e})", flush=True)
+
+
+def listen_dictation(
+    client: OpenAI,
+    *,
+    prompt: str | None = None,
+    max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
+) -> str:
+    """Hold-to-talk dictation with live partials; ends on Fn release (Send), not silence."""
+    provider = _dictation_provider()
+    try:
+        with timed("listen_dictation", provider=provider):
+            if provider == "whisperflow":
+                live, wav = _listen_whisperflow_hold(
+                    client,
+                    prompt=prompt,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                )
+            else:
+                live, wav = _listen_realtime_body(
+                    client,
+                    prompt=prompt,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                    hold_mode=True,
+                )
+    except ListenCancelled:
+        raise
+    try:
+        save_recording(wav, transcript=live, kind="dictation", live_transcript=live)
+    except Exception:
+        pass
+    print(f'[dictation] "{live}"', flush=True)
+    return live
 
 
 def listen_once(

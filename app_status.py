@@ -118,9 +118,22 @@ def _read() -> dict[str, Any]:
 def _write(data: dict[str, Any]) -> None:
     _ensure_dir()
     data["updated_at"] = time.time()
-    tmp = STATUS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(STATUS_PATH)
+    payload = json.dumps(data, indent=2) + "\n"
+    # Per-write temp path — a shared ``status.tmp`` races when tray, bridge, and
+    # orchestrator replace in parallel (one writer's tmp is already moved).
+    tmp = RUNTIME_DIR / f"status.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, STATUS_PATH)
+    except FileNotFoundError:
+        _ensure_dir()
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, STATUS_PATH)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def read_status() -> dict[str, Any]:
@@ -268,7 +281,7 @@ def cmd_sleep(mode: str | None) -> int:
     key = (mode or "status").strip().lower()
     if key in {"on", "sleep", "1", "true"}:
         set_sleep_mode(True)
-        print("sleep on — wake word ignored (⌘⌥S to wake)")
+        print("sleep on — wake word ignored (⌘⌃S to wake)")
         return 0
     if key in {"off", "wake", "0", "false"}:
         set_sleep_mode(False)
@@ -596,6 +609,11 @@ def turn_source() -> str:
 def reply_to_chat() -> bool:
     """True when this turn was queued from the Electron chat app."""
     return turn_source().lower() == "chat"
+
+
+def chat_text_only() -> bool:
+    """Chat turn with speaker off — reply in the UI, not via TTS or status blurbs."""
+    return reply_to_chat() and not reply_tts_enabled()
 
 
 _chat_stream_last_write = 0.0
@@ -1241,7 +1259,7 @@ def format_tooltip(data: dict[str, Any] | None = None, *, max_log_lines: int = 1
     task = (data.get("task") or "").strip()
     lines = [f"Jarvis · {state}"]
     if data.get("sleep_mode"):
-        lines.append("Sleep · wake word ignored (⌘⌥S)")
+        lines.append("Sleep · wake word ignored (⌘⌃S)")
     if detail:
         lines.append(detail[:120])
     agents = active_agents(data)

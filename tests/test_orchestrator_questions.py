@@ -12,6 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import orchestrator  # noqa: E402
 from orchestrator import (  # noqa: E402
     TurnTrace,
     _assistant_message_text,
@@ -206,6 +207,30 @@ class ListenForAnswerTests(unittest.TestCase):
         ):
             out = _listen_for_answer(SimpleNamespace())
         self.assertIn("No speech was captured", out)
+
+
+class ChatTextOnlySpeakTests(unittest.TestCase):
+    def test_speak_skips_chat_for_status_blurbs(self) -> None:
+        with (
+            patch("orchestrator.chat_text_only", return_value=True),
+            patch("orchestrator.reply_tts_enabled", return_value=False),
+            patch("orchestrator.set_last_spoken") as last,
+            patch("orchestrator.get_audio", return_value=None),
+            patch("orchestrator.log_llm"),
+        ):
+            orchestrator._speak(SimpleNamespace(), "Starting that now.")
+        last.assert_not_called()
+
+    def test_speak_publishes_user_replies(self) -> None:
+        with (
+            patch("orchestrator.chat_text_only", return_value=True),
+            patch("orchestrator.reply_tts_enabled", return_value=False),
+            patch("orchestrator.set_last_spoken") as last,
+            patch("orchestrator.get_audio", return_value=None),
+            patch("orchestrator.log_llm"),
+        ):
+            orchestrator._speak(SimpleNamespace(), "The time is noon.", user_reply=True)
+        last.assert_called_once_with("The time is noon.")
 
 
 if __name__ == "__main__":

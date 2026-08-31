@@ -182,6 +182,19 @@ class FlagTests(unittest.TestCase):
         st.set_last_spoken("secret")
         self.assertEqual(st.consume_chat_inbox(), [])
 
+    def test_concurrent_writes_use_unique_temp_files(self) -> None:
+        import concurrent.futures
+
+        def bump(i: int) -> None:
+            with st._lock:
+                data = st._read()
+                data["detail"] = f"n={i}"
+                st._write(data)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            list(pool.map(bump, range(60)))
+        self.assertIn("detail", st.read_status())
+
 
 if __name__ == "__main__":
     unittest.main()

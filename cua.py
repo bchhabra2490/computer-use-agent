@@ -51,7 +51,7 @@ Desktop chat (Electron; ⌘⌃C)::
     cua chat off
     # first time: cd chat_app && npm install
 
-Sleep mode (ignore wake word; ⌘⌥S)::
+Sleep mode (ignore wake word; ⌘⌃S)::
 
     cua sleep on
     cua sleep off
@@ -559,7 +559,7 @@ CHAT (Electron desktop app — screenshot attach off by default; ⌘⌃C)
   cua chat toggle
   # first time: cd chat_app && npm install
 
-SLEEP (ignore wake word; face sleeps. ⌘⌥S or menu Sleep)
+SLEEP (ignore wake word; face sleeps. ⌘⌃S or menu Sleep)
   cua sleep on
   cua sleep off
   cua sleep toggle
@@ -758,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sleep_p = sub.add_parser(
         "sleep",
-        help="Ignore wake word (Sleep). Hotkey ⌘⌥S. Face uses sleep vs wink.",
+        help="Ignore wake word (Sleep). Hotkey ⌘⌃S. Face uses sleep vs wink.",
     )
     sleep_p.add_argument(
         "mode",

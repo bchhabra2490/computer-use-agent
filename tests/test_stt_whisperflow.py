@@ -120,6 +120,32 @@ class WhisperflowProviderTests(unittest.TestCase):
         path.assert_called_once()
         realtime.assert_not_called()
 
+    def test_dictation_provider_auto_whisperflow(self) -> None:
+        with patch.object(stt, "STT_PROVIDER", "whisperflow"):
+            self.assertEqual(stt._dictation_provider(), "whisperflow")
+
+    def test_dictation_provider_auto_openai(self) -> None:
+        with patch.object(stt, "STT_PROVIDER", "openai"):
+            self.assertEqual(stt._dictation_provider(), "realtime")
+
+    def test_listen_dictation_uses_whisperflow_hold(self) -> None:
+        partials: list[str] = []
+        with (
+            patch.object(stt, "DICTATION_STT", "auto"),
+            patch.object(stt, "STT_PROVIDER", "whisperflow"),
+            patch(
+                "stt._listen_whisperflow_hold",
+                return_value=("hello world", b"RIFF"),
+            ) as hold,
+            patch("stt.save_recording"),
+        ):
+            heard = stt.listen_dictation(
+                MagicMock(),
+                on_partial=partials.append,
+            )
+        self.assertEqual(heard, "hello world")
+        hold.assert_called_once()
+
 
 class SttTimingTests(unittest.TestCase):
     def test_timed_writes_function_and_ms(self) -> None:

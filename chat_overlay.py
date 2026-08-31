@@ -11,12 +11,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from app_status import (
+    RUNTIME_DIR,
     pid_alive,
     read_status,
     set_chat_app_pid,
@@ -26,6 +27,7 @@ from app_status import (
 _OFF = {"0", "false", "no", "off"}
 ROOT = Path(__file__).resolve().parent
 CHAT_APP_DIR = ROOT / "chat_app"
+CHAT_CONTROL_PORT = int(os.environ.get("CHAT_CONTROL_PORT", "8744"))
 
 
 def chat_overlay_env_enabled() -> bool:
@@ -112,7 +114,7 @@ def ensure_chat_bridge_and_app(*, focus: bool = False) -> None:
     pid = data.get("chat_app_pid")
     if pid_alive(pid):
         if focus:
-            _focus_electron()
+            show_chat_app()
         return
     electron = _electron_bin()
     if not electron:
@@ -154,32 +156,34 @@ def ensure_chat_bridge_and_app(*, focus: bool = False) -> None:
     print(f"[chat] Electron started (pid={proc.pid}){extra}", flush=True)
 
 
-def _focus_electron() -> None:
-    """Best-effort raise on macOS, including over fullscreen Spaces."""
-    if sys.platform != "darwin":
-        return
+def _control_chat_app(action: str) -> bool:
+    """Ask the warm Electron process to change visibility over loopback."""
     pid = read_status().get("chat_app_pid")
-    script = None
-    if isinstance(pid, int) and pid > 0 and pid_alive(pid):
-        script = (
-            'tell application "System Events" to set frontmost of '
-            f"first process whose unix id is {int(pid)} to true"
-        )
-    else:
-        script = (
-            'tell application "System Events" to set frontmost of '
-            'first process whose name contains "Electron" to true'
-        )
+    if not pid_alive(pid):
+        return False
     try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            check=False,
-            timeout=2,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        token = (os.environ.get("CHAT_BRIDGE_TOKEN") or "").strip()
+        if not token:
+            token = (RUNTIME_DIR / "chat.token").read_text(encoding="utf-8").strip()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{CHAT_CONTROL_PORT}/{action}",
+            method="POST",
+            headers={"Authorization": f"Bearer {token}"},
         )
+        with urllib.request.urlopen(req, timeout=0.35) as response:
+            return response.status == 204
     except Exception:
-        pass
+        return False
+
+
+def show_chat_app() -> bool:
+    """Reveal and focus an already-running chat process."""
+    return _control_chat_app("show")
+
+
+def hide_chat_app() -> bool:
+    """Hide the chat while leaving Electron and its bridge warm."""
+    return _control_chat_app("hide")
 
 
 def stop_chat_app(*, wait: float = 1.5) -> None:
@@ -205,15 +209,11 @@ def stop_chat_app(*, wait: float = 1.5) -> None:
 
 
 def sync_chat_app(data: dict[str, Any] | None = None) -> None:
-    """Tray poll: start Electron when enabled, stop when disabled."""
+    """Tray poll: ensure an enabled chat exists; disabled chats stay warm."""
     snap = data if data is not None else read_status()
     want = chat_overlay_enabled(snap)
     if want:
         ensure_chat_bridge_and_app(focus=False)
-    else:
-        # Hide by quitting the app (reopens quickly on next toggle).
-        if pid_alive(snap.get("chat_app_pid")):
-            stop_chat_app()
 
 
 def cmd_chat(mode: str | None) -> int:
@@ -232,7 +232,7 @@ def cmd_chat(mode: str | None) -> int:
         return 0
     if key in {"off", "hide", "0", "false"}:
         set_chat_overlay_enabled(False)
-        stop_chat_app()
+        hide_chat_app()
         print("chat window off")
         return 0
     if key in {"toggle", ""}:
@@ -247,7 +247,7 @@ def cmd_chat(mode: str | None) -> int:
                 pass
             ensure_chat_bridge_and_app(focus=True)
         else:
-            stop_chat_app()
+            hide_chat_app()
         print("chat window " + ("off" if now else "on (Electron)"))
         return 0
     if key == "status":

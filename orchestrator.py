@@ -983,7 +983,13 @@ def _prompt_for_answer(client: OpenAI, question: str) -> str:
         raise
 
 
-def _speak(client: OpenAI, text: str, *, user_reply: bool = False) -> str | None:
+def _speak(
+    client: OpenAI,
+    text: str,
+    *,
+    user_reply: bool = False,
+    publish_to_chat: bool = True,
+) -> str | None:
     """
     Speak `text`. If the user barges in (wake word or keyboard), stop and listen.
 
@@ -995,7 +1001,7 @@ def _speak(client: OpenAI, text: str, *, user_reply: bool = False) -> str | None
         return None
     log_llm(text, source="tts")
     if user_reply or not chat_text_only():
-        set_last_spoken(text)
+        set_last_spoken(text, enqueue_chat=publish_to_chat)
     if not reply_tts_enabled():
         return None
     audio = get_audio()
@@ -1984,6 +1990,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pending = _speak(
             client,
             "Ready. Say the wake word, then tell me what you need.",
+            publish_to_chat=False,
         )
         if pending is None:
             audio.cooldown()

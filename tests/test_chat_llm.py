@@ -16,7 +16,10 @@ from chat_overlay import (  # noqa: E402
     chat_overlay_enabled,
     chat_should_show,
     command_for_orchestrator,
+    hide_chat_app,
     relative_chat_time,
+    show_chat_app,
+    sync_chat_app,
 )
 from chat_store import ChatStore, PREF_SELECTED_MODEL, title_from_text  # noqa: E402
 
@@ -124,6 +127,28 @@ class ChatToggleTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_show_and_hide_signal_warm_electron(self) -> None:
+        with (
+            patch("chat_overlay.read_status", return_value={"chat_app_pid": 4321}),
+            patch("chat_overlay.pid_alive", return_value=True),
+            patch("chat_overlay._control_chat_app", return_value=True) as control,
+        ):
+            self.assertTrue(show_chat_app())
+            self.assertTrue(hide_chat_app())
+        self.assertEqual(
+            [call.args[0] for call in control.call_args_list],
+            ["show", "hide"],
+        )
+
+    def test_sync_does_not_stop_disabled_warm_app(self) -> None:
+        with (
+            patch("chat_overlay.ensure_chat_bridge_and_app") as ensure,
+            patch("chat_overlay.stop_chat_app") as stop,
+        ):
+            sync_chat_app({"chat_overlay_enabled": False, "chat_app_pid": 4321})
+        ensure.assert_not_called()
+        stop.assert_not_called()
 
 
 if __name__ == "__main__":

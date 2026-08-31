@@ -1235,6 +1235,16 @@ def serve_forever(*, host: str = HOST, port: int = PORT) -> None:
 
 def ensure_chat_bridge() -> subprocess.Popen | None:
     """Start the bridge subprocess if not already running."""
+    # The PID file can be stale after an unclean restart. The listening server
+    # is the source of truth; do not create a process storm against an occupied
+    # port merely because its recorded PID has gone away.
+    try:
+        import urllib.request
+
+        urllib.request.urlopen(f"http://{HOST}:{PORT}/v1/health", timeout=0.2)
+        return None
+    except Exception:
+        pass
     data = read_status()
     pid = data.get(PID_KEY)
     if pid_alive(pid):

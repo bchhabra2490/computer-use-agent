@@ -663,7 +663,7 @@ def chat_stream_payload() -> dict[str, Any] | None:
     }
 
 
-def set_last_spoken(text: str) -> None:
+def set_last_spoken(text: str, *, enqueue_chat: bool = True) -> None:
     text = (text or "").strip()
     if not text:
         return
@@ -671,7 +671,7 @@ def set_last_spoken(text: str) -> None:
     with _lock:
         data = _read()
         data["last_spoken"] = clipped
-        if data.get("chat_overlay_enabled"):
+        if enqueue_chat and data.get("chat_overlay_enabled"):
             inbox = list(data.get("chat_inbox") or [])
             prev = inbox[-1].get("text") if inbox and isinstance(inbox[-1], dict) else None
             if prev != clipped:

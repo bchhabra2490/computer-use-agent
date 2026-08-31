@@ -852,7 +852,7 @@ def main() -> None:
             self.applyStatus(read_status())
 
         def toggleChat_(self, _sender) -> None:
-            from chat_overlay import chat_overlay_enabled, ensure_chat_bridge_and_app, stop_chat_app
+            from chat_overlay import chat_overlay_enabled, ensure_chat_bridge_and_app, hide_chat_app
 
             data = read_status()
             on = not chat_overlay_enabled(data)
@@ -862,7 +862,7 @@ def main() -> None:
             if on:
                 ensure_chat_bridge_and_app(focus=True)
             else:
-                stop_chat_app()
+                hide_chat_app()
             self.applyStatus(read_status())
 
         def toggleSleep_(self, _sender) -> None:

@@ -182,6 +182,12 @@ class FlagTests(unittest.TestCase):
         st.set_last_spoken("secret")
         self.assertEqual(st.consume_chat_inbox(), [])
 
+    def test_last_spoken_can_skip_chat_inbox(self) -> None:
+        st.set_chat_overlay_enabled(True)
+        st.set_last_spoken("Ready.", enqueue_chat=False)
+        self.assertEqual(st.read_status().get("last_spoken"), "Ready.")
+        self.assertEqual(st.consume_chat_inbox(), [])
+
     def test_concurrent_writes_use_unique_temp_files(self) -> None:
         import concurrent.futures
 

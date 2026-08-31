@@ -4,12 +4,54 @@ const path = require("path");
 const http = require("http");
 
 const BRIDGE_PORT = Number(process.env.CHAT_BRIDGE_PORT || 8743);
+const CONTROL_PORT = Number(process.env.CHAT_CONTROL_PORT || 8744);
 const RUNTIME_DIR =
   process.env.AGENT_RUNTIME_DIR ||
   path.join(path.dirname(__dirname), ".runtime");
 const TOKEN_PATH = path.join(RUNTIME_DIR, "chat.token");
 
 let mainWindow = null;
+let quitting = false;
+let controlServer = null;
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  applyOverlayBehavior(mainWindow);
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function hideMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+}
+
+function startControlServer() {
+  controlServer = http.createServer((req, res) => {
+    const expected = readToken();
+    const authorized =
+      expected && req.headers.authorization === `Bearer ${expected}`;
+    if (!authorized) {
+      res.writeHead(401).end();
+      return;
+    }
+    if (req.method === "POST" && req.url === "/show") {
+      showMainWindow();
+      res.writeHead(204).end();
+      return;
+    }
+    if (req.method === "POST" && req.url === "/hide") {
+      hideMainWindow();
+      res.writeHead(204).end();
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  controlServer.on("error", (err) => {
+    console.error("chat control server failed:", err);
+  });
+  controlServer.listen(CONTROL_PORT, "127.0.0.1");
+}
 
 function readToken() {
   try {
@@ -140,17 +182,23 @@ function createWindow() {
   applyOverlayBehavior(mainWindow);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.once("ready-to-show", () => {
-    applyOverlayBehavior(mainWindow);
-    mainWindow.show();
-    mainWindow.focus();
+    showMainWindow();
   });
   mainWindow.on("show", () => applyOverlayBehavior(mainWindow));
+  mainWindow.on("close", (event) => {
+    if (!quitting) {
+      event.preventDefault();
+      hideMainWindow();
+    }
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 }
 
 app.whenReady().then(async () => {
+  startControlServer();
+  createWindow();
   if (process.platform === "darwin") {
     try {
       const status = systemPreferences.getMediaAccessStatus("microphone");
@@ -168,16 +216,14 @@ app.whenReady().then(async () => {
     }
     callback(false);
   });
-  createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      applyOverlayBehavior(mainWindow);
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    else showMainWindow();
   });
+});
+
+app.on("before-quit", () => {
+  quitting = true;
 });
 
 app.on("window-all-closed", () => {
@@ -200,9 +246,5 @@ ipcMain.handle("open-external", async (_e, url) => {
   }
 });
 ipcMain.handle("focus-window", async () => {
-  if (!mainWindow) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  applyOverlayBehavior(mainWindow);
-  mainWindow.show();
-  mainWindow.focus();
+  showMainWindow();
 });

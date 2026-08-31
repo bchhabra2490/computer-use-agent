@@ -230,7 +230,25 @@ class ChatTextOnlySpeakTests(unittest.TestCase):
             patch("orchestrator.log_llm"),
         ):
             orchestrator._speak(SimpleNamespace(), "The time is noon.", user_reply=True)
-        last.assert_called_once_with("The time is noon.")
+        last.assert_called_once_with("The time is noon.", enqueue_chat=True)
+
+    def test_speak_can_exclude_startup_announcement_from_chat(self) -> None:
+        with (
+            patch("orchestrator.chat_text_only", return_value=False),
+            patch("orchestrator.reply_tts_enabled", return_value=False),
+            patch("orchestrator.set_last_spoken") as last,
+            patch("orchestrator.get_audio", return_value=None),
+            patch("orchestrator.log_llm"),
+        ):
+            orchestrator._speak(
+                SimpleNamespace(),
+                "Ready. Say the wake word, then tell me what you need.",
+                publish_to_chat=False,
+            )
+        last.assert_called_once_with(
+            "Ready. Say the wake word, then tell me what you need.",
+            enqueue_chat=False,
+        )
 
 
 if __name__ == "__main__":

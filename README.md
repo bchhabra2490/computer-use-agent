@@ -310,6 +310,26 @@ lane. Set `LIGHTPANDA_BIN` for a non-PATH executable,
 the overall deadline. `CHROMIUM_BIN` selects another Chrome/Chromium executable,
 and `CHROMIUM_WAIT_MS` tunes its DOM-capture wait.
 
+### WebMCP page tools
+
+`browser_webmcp` lets both agent brains discover structured tools registered by
+public HTTPS pages through `document.modelContext`, then invoke a selected tool
+inside an isolated headless Chrome profile. Discovery records the page URL,
+origin, schemas, annotations, and tool descriptions. Calls rediscover the tool
+and verify its name, origin, and read-only annotation before execution, validate
+common JSON Schema input constraints, bound returned data, and discard the
+temporary profile afterward.
+
+Use `operation=list` before DOM automation. Tools marked `readOnlyHint: true` can
+run on the fast path. Other tools return `confirmation_required` unless
+`allow_mutation=true`; set that only when the user explicitly requested or
+confirmed the exact side effect. All page-supplied metadata and results remain
+untrusted input. This path does not inherit signed-in Chrome cookies; authenticated
+WebMCP remains in the visible browser lane. Chrome must support WebMCP and Node.js
+22+ must be available for the CDP bridge. Optional settings:
+`WEBMCP_NODE_BIN`, `WEBMCP_TIMEOUT`, `WEBMCP_WAIT_MS`, and
+`WEBMCP_MAX_RESULT_CHARS`.
+
 Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: wake word,
 then the instruction. While Jarvis is speaking, say the wake word again to
 interrupt TTS and give a new command (`TTS_BARGE_IN=1` by default). Wake barge-in

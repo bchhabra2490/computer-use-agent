@@ -794,3 +794,7 @@ When a task **completes**, reusable workflows are saved automatically as skills
 - `tts/` — speech-out (`tts.openai`, `tts.sarvam`, `tts.piper`, `tts.kokoro`, `tts.low_latency`; `TTS_PROVIDER`).
 - **Windows/Linux**: `pyautogui` is cross-platform; check display scaling vs the
   Retina handling in `DesktopController`.
+
+## License
+
+This project is open source under the [MIT License](LICENSE).

@@ -822,9 +822,10 @@ def leftover_is_screenshot_only(text: str) -> bool:
 
 def save_recipe_screenshot(*, dest: Path | None = None) -> Path:
     from actions import DesktopController
+    from artifact_paths import ensure_output_dir
 
     png = DesktopController().capture_screenshot()
-    path = dest or (Path.home() / "Desktop" / f"jarvis-{int(time.time())}.png")
+    path = dest or (ensure_output_dir() / f"jarvis-{int(time.time())}.png")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(png)
     print(f"[recipe] saved screenshot {path}", flush=True)

@@ -316,11 +316,40 @@
           <button type="button" class="btn-back" id="btn-back-chat-systems">← Chat</button>
           <div>
             <h1>Systems</h1>
-            <p class="sub" id="systems-sub">Observe drafts and saved memories</p>
+            <p class="sub" id="systems-sub">Performance, observe drafts, and saved memories</p>
           </div>
         </header>
 
         <section class="systems-body">
+          <div class="systems-card" id="latency-card">
+            <div class="systems-row">
+              <div>
+                <h2 class="section-title">Voice-to-action latency</h2>
+                <p class="mcp-note" id="latency-note">
+                  End-to-end timing from wake detection to the first computer action.
+                </p>
+              </div>
+              <div class="systems-actions">
+                <button type="button" class="btn-back" id="latency-refresh">Refresh</button>
+              </div>
+            </div>
+            <div class="latency-summary" id="latency-summary"></div>
+            <div class="latency-breakdown" id="latency-breakdown"></div>
+            <div class="latency-recent-wrap">
+              <table class="latency-table">
+                <thead>
+                  <tr>
+                    <th>Task</th>
+                    <th>First action</th>
+                    <th>Total</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody id="latency-recent"></tbody>
+              </table>
+            </div>
+          </div>
+
           <div class="systems-card">
             <div class="systems-row">
               <div>

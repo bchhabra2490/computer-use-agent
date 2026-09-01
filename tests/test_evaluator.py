@@ -53,3 +53,18 @@ def test_resolve_agent_model_hard(monkeypatch):
     assert route.difficulty == "hard"
     assert route.max_steps == 200
     assert route.model == ev.MODEL_HARD
+
+
+def test_fast_path_skips_llm_router(monkeypatch):
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    client = MagicMock()
+    route = ev.resolve_agent_model(
+        client,
+        "open the site",
+        execution_path="fast",
+        specialist_lane="browser",
+    )
+    assert route.difficulty == "easy"
+    assert route.model == ev.MODEL_EASY
+    assert route.max_steps == ev.DIFFICULTY_MAX_STEPS["easy"]
+    client.responses.create.assert_not_called()

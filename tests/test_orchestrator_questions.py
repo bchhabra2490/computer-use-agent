@@ -146,6 +146,15 @@ class UserTurnInputTests(unittest.TestCase):
             inp = _user_turn_input("what time is it?", [])
         self.assertIn("Current local date and time: TEST.", inp)
 
+    def test_injects_execution_route(self) -> None:
+        inp = _user_turn_input(
+            "open notes",
+            [],
+            execution_route="Execution route:\n- path: fast\n- specialist lane: desktop",
+        )
+        self.assertIn("path: fast", inp)
+        self.assertIn("specialist lane: desktop", inp)
+
     def test_attaches_desktop_screenshot(self) -> None:
         png = b"\x89PNG" + b"\x00" * 20
         inp = _user_turn_input(

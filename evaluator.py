@@ -139,6 +139,8 @@ def resolve_agent_model(
     log: TaskLog | None = None,
     *,
     fallback_max_steps: int | None = None,
+    execution_path: str | None = None,
+    specialist_lane: str | None = None,
 ) -> AgentRoute:
     """
     Choose the computer-agent model and step budget.
@@ -160,6 +162,27 @@ def resolve_agent_model(
                 {"model": override, "difficulty": difficulty, "max_steps": steps},
             )
         return AgentRoute(model=override, difficulty=difficulty, max_steps=steps)
+
+    if (execution_path or "").strip().lower() == "fast":
+        route = _route(MODEL_EASY, "easy")
+        lane = (specialist_lane or "general").strip().lower()
+        print(
+            f"[router] fast/{lane} → {route.model} (max_steps={route.max_steps})",
+            flush=True,
+        )
+        if log is not None:
+            log.record(
+                "router",
+                f"fast/{lane} → {route.model}",
+                {
+                    "execution_path": "fast",
+                    "specialist_lane": lane,
+                    "difficulty": "easy",
+                    "model": route.model,
+                    "max_steps": route.max_steps,
+                },
+            )
+        return route
 
     if not AGENT_ROUTE:
         route = _route(MODEL_HARD, "hard")

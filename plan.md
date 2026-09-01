@@ -249,118 +249,29 @@ The phone gateway ships (`phone_gateway.py`, `PHONE_GATEWAY=1`). On the **same W
 
 **Done when.** Mac on Tailscale, phone on LTE, companion reaches `/v1/health` and queues a command that Jarvis speaks on the Mac — no same-Wi‑Fi requirement.
 
-## 10. Tiered browser-data backend (HTTP → Lightpanda → Chromium → desktop)
+## 10. Remaining browser-data work
 
-Today, obtaining information from a webpage often falls through to the visual
-computer-use loop. That is appropriate when layout matters or the user needs
-their signed-in browser, but it is expensive and slow for read-only extraction.
-Add a dedicated browser-data layer to the Browser and Research specialist lanes.
+The read-only HTTP → Lightpanda → headless Chromium → visible desktop flow is
+complete. Remaining work:
 
-Do **not** build a new browser engine and do not treat Lightpanda as a Chromium
-replacement. Lightpanda and Chromium are complementary backends behind one
-interface.
+1. Replace or augment the basic HTML extractor with a focused readability parser
+   for cleaner article Markdown and better structured-field extraction.
+2. Add bounded parallel retrieval for multi-source research while preserving
+   per-page backend, timing, evidence, and failure metadata.
+3. Extend Chromium through CDP/Playwright for screenshots, iframe inspection,
+   downloads, uploads, dialogs, navigation events, and verified final URL/status.
+   Keep these capabilities behind the existing `browser_data` contract.
+4. Enforce robots policy consistently across the HTTP and Chromium paths, and
+   strengthen redirect/private-network protection for browser-rendered requests.
+5. Add an optional authenticated automation profile only as an explicit opt-in,
+   with encrypted storage, narrow account scope, revocation, and deletion controls.
+   Never copy the user's normal Chrome profile, cookies, passwords, or local storage.
+6. Add evaluation fixtures for article readability, parallel retrieval,
+   JavaScript rendering, iframes, downloads, authentication boundaries,
+   private-network redirects, timeouts, and visual-only pages.
 
-### Backend ladder
-
-Choose the least expensive backend that can satisfy and verify the request:
-
-1. **HTTP fetch + HTML/Markdown extraction** — static pages, feeds, APIs, and
-   server-rendered articles. Use `httpx` plus a focused HTML/readability parser.
-2. **Lightpanda** — JavaScript-rendered public pages, link discovery, structured
-   extraction, and parallel research. Prefer its direct HTML/Markdown dump for
-   read-only work. Run locally and expose only a loopback CDP endpoint.
-3. **Headless Chromium** — complex DOM interaction, screenshots, downloads,
-   uploads, iframes, dialogs, navigation events, or Lightpanda compatibility
-   failures. Drive through Playwright/CDP.
-4. **Existing desktop Chrome path** — authenticated work that must use the
-   user's visible session, visual-layout tasks, or interactions where the user
-   expects to see the browser. This remains the final fallback.
-
-Escalation is one-way for a request:
-
-```text
-HTTP extraction insufficient
-  → Lightpanda
-    → headless Chromium
-      → visible desktop Chrome
-```
-
-Carry the URL, requested fields, extracted evidence, and failure reason into the
-next backend. Do not restart research from scratch after escalation.
-
-### Common interface
-
-Add a backend-independent `browser_data` service/tool:
-
-```python
-class BrowserBackend:
-    def fetch(self, url, *, wait=None) -> PageResult: ...
-    def extract(self, url, *, query=None) -> PageResult: ...
-    def links(self, url) -> list[Link]: ...
-```
-
-`PageResult` should include the final URL, title, status, Markdown/text, selected
-structured fields, backend name, timings, and evidence/error metadata. Put
-backend implementations under a small `browser_backends/` package rather than
-inside the orchestrator.
-
-### Routing policy
-
-- “Summarize this article” → HTTP, with Lightpanda fallback.
-- “Get the values from this JavaScript table” → Lightpanda.
-- “Search five public sites and compare them” → parallel read-only Lightpanda
-  workers with bounded concurrency.
-- “Log in and download my invoice” → Chromium or visible desktop Chrome.
-- “Tell me what this chart shows” → Chromium screenshot or desktop vision.
-- “Post this on X” → visible signed-in Chrome plus the existing confirmation
-  policy; never use a public-data backend for representational actions.
-
-The fast/slow router should classify public extraction as `fast/research` or
-`fast/browser`. Escalating to Chromium does not automatically make a task slow;
-visual grounding or sensitive interaction does.
-
-### Lightpanda boundary
-
-Use Lightpanda initially for read-oriented tasks only. It has no graphical
-rendering and its CDP/Playwright coverage is still less complete than Chromium,
-particularly around screenshots, uploads, input events, popups, dialogs,
-navigation waits, browser contexts, and complex iframe behavior. Unsupported or
-timed-out operations must fail quickly and escalate to Chromium rather than
-looping.
-
-Prefer Lightpanda's direct `fetch --dump markdown`/HTML path before CDP when it
-covers the request; this avoids depending on incomplete automation surfaces.
-
-### Authentication and privacy boundary
-
-Keep isolated automation separate from the user's browser identity:
-
-- **Isolated mode** — HTTP, Lightpanda, and headless Chromium use fresh profiles
-  without personal cookies. Suitable for public information.
-- **User-session mode** — the existing desktop browser path uses the user's
-  visible, signed-in Chrome session.
-
-Never copy cookies, local storage, passwords, or the user's Chrome profile into
-Lightpanda/headless Chromium automatically. An authenticated isolated profile
-must be an explicit future opt-in with its own storage and deletion controls.
-
-Apply robots directives, request timeouts, response-size limits, domain and
-redirect validation, bounded concurrency, and content-type checks. Treat all
-page content as untrusted input.
-
-### Implementation sequence
-
-1. Define `PageResult`, `BrowserBackend`, and the `browser_data` tool contract.
-2. Ship the HTTP/Markdown backend with tests and latency logging.
-3. Add optional Lightpanda process management and read-only extraction.
-4. Add Chromium/Playwright fallback and a capability/error matrix.
-5. Connect the Browser and Research lanes to the escalation ladder.
-6. Add eval fixtures for static HTML, JavaScript rendering, iframes, downloads,
-   authentication boundaries, and visual-only pages.
-
-**Done when.** “Summarize these five public pages” completes without taking over
-the mouse, reports which backend handled each URL, and uses bounded parallelism;
-a JavaScript page automatically escalates from HTTP to Lightpanda; an unsupported
-Lightpanda feature escalates to Chromium; and an authenticated request uses the
-visible desktop browser without copying the user's session into either isolated
-backend.
+**Done when.** Multi-page research runs with bounded concurrency and clean
+article extraction; Chromium handles screenshots and complex browser features
+with verified navigation metadata; all isolated backends enforce the same
+network policy; and authenticated automation is explicit, scoped, revocable,
+and separate from the user's everyday browser profile.

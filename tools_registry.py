@@ -202,6 +202,45 @@ CANCEL_TIMER_TOOL = {
     "strict": True,
 }
 
+BROWSER_DATA_TOOL = {
+    "type": "function",
+    "name": "browser_data",
+    "description": (
+        "Read a public webpage without driving the visible browser. Prefer this for "
+        "research, article extraction, and link discovery. It blocks private/local "
+        "network addresses. Auto mode escalates JavaScript-heavy pages from static "
+        "HTTP to isolated Lightpanda and then isolated headless Chromium. "
+        "Do not use it for signed-in pages or actions in the user's browser session."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Absolute public http(s) URL."},
+            "operation": {
+                "type": "string",
+                "enum": ["fetch", "extract", "links"],
+                "description": "Fetch all text, extract matching blocks, or list links.",
+            },
+            "query": {
+                "type": ["string", "null"],
+                "description": "Case-insensitive phrase used by extract; otherwise null.",
+            },
+            "max_chars": {
+                "type": ["integer", "null"],
+                "description": "Maximum returned page-text characters; null uses the safe default.",
+            },
+            "backend": {
+                "type": "string",
+                "enum": ["auto", "http", "lightpanda", "chromium"],
+                "description": "Use auto normally; explicit backends are available for diagnostics.",
+            },
+        },
+        "required": ["url", "operation", "query", "max_chars", "backend"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 LIST_SKILLS_TOOL = {
     "type": "function",
     "name": "list_skills",
@@ -451,6 +490,7 @@ SHARED_TOOL_NAMES = frozenset(
         "set_timer",
         "list_timers",
         "cancel_timer",
+        "browser_data",
     }
 )
 
@@ -504,6 +544,7 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT),
     _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT),
+    _entry(BROWSER_DATA_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_SKILLS_TOOL, AGENT),
     _entry(READ_SKILL_TOOL, AGENT),
     _entry(READ_UI_TEXT_TOOL, AGENT),
@@ -605,6 +646,10 @@ def execute_prepared_tool(
             from timers import run_timer_tool
 
             return ToolOutcome(output=run_timer_tool(name, args))
+        if name == "browser_data":
+            from browser_data import run_browser_data_tool
+
+            return ToolOutcome(output=run_browser_data_tool(args))
         return ToolOutcome(output=f"Unsupported tool: {name}", is_error=True)
     except Exception as e:
         return ToolOutcome(output=f"Error: {e}", is_error=True)

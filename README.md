@@ -264,6 +264,10 @@ then transcribes your request and lets an LLM choose tools:
 | `who_am_i` | Read `README.md` and answer who this agent is / what it can do |
 | `start_task` | Run the computer-use agent on a concrete UI task |
 | `set_timer` | Native countdown / reminder (notification; TTS if they asked to be reminded) |
+| `browser_data` | Safely read public HTTP(S) pages as Markdown or links without taking over the visible browser |
+| `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
+| `give_response_to_user` | Speak a reply (set `end_session` to stop) |
+| `mcp_call` | Tools from servers in `mcp.json` (search, GitHub, Linear, …) when configured |
 
 **Recipes** (`recipes/*.json`) are better when the first step is `open` a URL: a matching recipe is chosen from phrases/templates, then `EVAL_MODEL` fills `{{placeholders}}` from the full task text (regex only if the LLM fails or `RECIPE_LLM_FILL=0`). If you also asked to zoom or screenshot, the vision agent continues from that page and is told not to redo the prefix. After a successful run the agent may save a new recipe (`RECIPE_RECORD=0` to disable).
 
@@ -274,9 +278,9 @@ LLM routing call—into a **fast** or **slow** path and a specialist lane:
 
 - **Integration/API** — native timers, memory, MCP, and connected services.
 - **Terminal** — files, Git, scripts, and other verifiable CLI work.
-- **Browser** — recipes/direct URLs first, then visual page interaction.
+- **Browser** — `browser_data` for public reading, then recipes/direct URLs and visual interaction.
 - **Desktop** — app skills, keyboard, and Accessibility before coordinates.
-- **Research** — connected retrieval first, browser inspection when needed.
+- **Research** — connected retrieval and `browser_data` first, visual inspection when needed.
 - **Visual** — dense or unfamiliar interfaces with screenshot verification.
 
 Fast routes use the inexpensive agent model and easy step budget, attempting
@@ -285,9 +289,26 @@ back to normal visual computer use. Slow routes retain difficulty-based model
 routing and evaluator coaching. Every route also carries safety-verifier and
 completion-verifier guidance. The selected path/lane is written into the task
 log and voice latency trace.
-| `ask_user` | Speak a clarifying question and capture your answer (via orchestrator while a computer task is running) |
-| `give_response_to_user` | Speak a reply (set `end_session` to stop) |
-| `mcp_call` | Tools from servers in `mcp.json` (search, GitHub, Linear, …) when configured |
+
+### Public webpage data
+
+`browser_data` gives both agent brains a fast, isolated path for static public
+webpages. It supports full-page Markdown, phrase-focused extraction, and link
+discovery. Requests are limited by timeout, response size, content type, and
+public-address validation; redirects are checked too. It never reuses the
+user's browser cookies or profile. Thin JavaScript application shells return a
+`fallback_required: lightpanda` signal so the browser lane can escalate instead
+of treating an empty page as a successful read. The Lightpanda backend runs an
+isolated one-shot process, obeys robots.txt, disables telemetry, and enforces a
+hard deadline. If it is unavailable or cannot render the page, the result carries
+forward its evidence and failure reason to isolated headless Chromium. Chromium
+uses a new temporary `--user-data-dir` on every request and deletes it afterward;
+it never opens or copies the user's normal Chrome profile. If Chromium also
+fails, the result carries `fallback_required: desktop` for the visible browser
+lane. Set `LIGHTPANDA_BIN` for a non-PATH executable,
+`LIGHTPANDA_WAIT_MS` to tune rendering wait time, and `BROWSER_DATA_TIMEOUT` for
+the overall deadline. `CHROMIUM_BIN` selects another Chrome/Chromium executable,
+and `CHROMIUM_WAIT_MS` tunes its DOM-capture wait.
 
 Say the wake phrase then “goodbye” / “quit” to stop. Mid-task updates: wake word,
 then the instruction. While Jarvis is speaking, say the wake word again to

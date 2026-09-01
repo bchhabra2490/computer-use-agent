@@ -35,16 +35,18 @@ class ExecutionRoute:
                 "for a remaining step that cannot be verified from command output."
             ),
             "browser": (
-                "Prefer a matching recipe or direct URL/search prelude. Reuse the open "
-                "browser state and use visual control only for page interaction left over."
+                "Use browser_data first for public webpage reading and link discovery. "
+                "Reuse the open browser state and use visual control for authentication, "
+                "interactive page work, or a reported rendering fallback."
             ),
             "desktop": (
                 "Prefer app skills, keyboard shortcuts, and Accessibility labels before "
                 "screenshot coordinate actions."
             ),
             "research": (
-                "Use connected search/API tools first, collect only the evidence needed, "
-                "and use browser navigation when a source must be inspected visually."
+                "Use connected search/API tools first, then browser_data for public sources. "
+                "Collect only the evidence needed and use visual browser navigation only "
+                "for authentication, interaction, or a reported rendering fallback."
             ),
             "visual": (
                 "Use the screenshot and Accessibility together, verify each state change, "

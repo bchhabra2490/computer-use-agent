@@ -50,6 +50,7 @@ def _default_state() -> dict[str, Any]:
         "done_requested": False,
         "done_agent_id": None,
         "send_requested": False,
+        "listen_requested": False,
         "cancel_requested": False,
         "stt_active": False,
         "agents": [],  # active subagents / computer-agent jobs
@@ -1049,6 +1050,31 @@ def set_stt_listening(active: bool) -> None:
             data["send_requested"] = False
             data["cancel_requested"] = False
         _write(data)
+
+
+def request_listen() -> None:
+    """Ask the idle orchestrator to bypass wake detection and open the mic."""
+    with _lock:
+        data = _read()
+        data["listen_requested"] = True
+        _write(data)
+    log("Listen shortcut requested — opening mic")
+
+
+def listen_pending() -> bool:
+    with _lock:
+        return bool(_read().get("listen_requested"))
+
+
+def consume_listen() -> bool:
+    """Consume one global listen-shortcut request."""
+    with _lock:
+        data = _read()
+        if not data.get("listen_requested"):
+            return False
+        data["listen_requested"] = False
+        _write(data)
+        return True
 
 
 def request_send() -> None:

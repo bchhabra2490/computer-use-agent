@@ -12,7 +12,9 @@ from typing import Any, Callable
 from openai import OpenAI
 
 from app_status import (
+    consume_listen,
     consume_utterance,
+    listen_pending,
     set_reply_sink,
     set_reply_tts,
     set_turn_source,
@@ -117,6 +119,8 @@ class AudioSession:
         """Wake word → one cloud STT utterance. Returns None if stopped or empty."""
 
         def _stop() -> bool:
+            if listen_pending():
+                return True
             if utterance_pending():
                 return True
             if speak_pending():
@@ -144,7 +148,13 @@ class AudioSession:
                 pass
             return queued
 
+        shortcut = consume_listen()
+        if shortcut:
+            return self._listen_shortcut(listen_prompt)
+
         if not self.wait_for_wake(should_stop=_stop, prompt=wake_prompt):
+            if consume_listen():
+                return self._listen_shortcut(listen_prompt)
             return consume_utterance()
         if quit_check is not None and quit_check():
             return None
@@ -191,6 +201,24 @@ class AudioSession:
         set_reply_tts(True)
         set_turn_source("voice")
         return command or None
+
+    def _listen_shortcut(self, listen_prompt: str | None = None) -> str | None:
+        """Capture a normal Jarvis command without requiring a wake word."""
+        self._phase("listening", "Keyboard shortcut heard — listening", log=True)
+        try:
+            utterance = self.listen(listen_prompt or "Listening…")
+        except Exception as e:
+            from stt import ListenCancelled
+
+            if isinstance(e, ListenCancelled):
+                print("[audio] shortcut listen cancelled", flush=True)
+            else:
+                print(f"[audio] shortcut listen failed: {e}", flush=True)
+            return None
+        set_reply_sink("mac")
+        set_reply_tts(True)
+        set_turn_source("voice")
+        return strip_wake_prefix(utterance).strip() or None
 
     def speak(self, text: str) -> str | None:
         """Speak ``text``. On barge-in, listen and return the new command."""

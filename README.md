@@ -405,6 +405,8 @@ A small **menu-bar icon** starts with the orchestrator or agent:
   or set `FACE_OVERLAY=0`.
 - **Sleep** — ignore the wake word (menu **Sleep** or **⌘⌃S** / `cua sleep on`).
   Face uses the sleep expression; turn Sleep off to wink and listen again.
+- **Listen now** — press **⌘⌃J** to start normal Jarvis command listening
+  immediately, without saying the wake word.
 - **Chat** — Electron desktop front-end for the **orchestrator** (same queue as
   the wake word and phone `/v1/command`). Sidebar of saved chats, camera attach,
   and spoken replies in bubbles. History is SQLite under `.runtime/chat/`. Needs

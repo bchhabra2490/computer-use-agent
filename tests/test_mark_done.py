@@ -136,6 +136,12 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(st.consume_speak(), "timer ding")
         self.assertTrue(st.reply_tts_enabled())
 
+    def test_listen_shortcut_request_is_consumed_once(self) -> None:
+        st.request_listen()
+        self.assertTrue(st.listen_pending())
+        self.assertTrue(st.consume_listen())
+        self.assertFalse(st.consume_listen())
+
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")
         st.enqueue_utterance("two")

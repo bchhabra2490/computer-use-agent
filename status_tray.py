@@ -32,6 +32,7 @@ from app_status import (
     read_status,
     request_mark_done,
     request_cancel,
+    request_listen,
     request_send,
     set_face_overlay_enabled,
     set_overlay_enabled,
@@ -339,7 +340,7 @@ def main() -> None:
 
                 def _global_hotkey(event):
                     # ⌘⌃C = chat toggle (avoids Chrome Inspect ⌘⌥C)
-                    # ⌘⌃S = sleep toggle (same modifier pattern as chat)
+                    # ⌘⌃S = sleep toggle; ⌘⌃J = listen without wake word.
                     try:
                         flags = int(event.modifierFlags())
                         # Ignore Caps Lock / Fn bits; only care about cmd/opt/ctrl/shift.
@@ -347,7 +348,7 @@ def main() -> None:
                         chars = (event.charactersIgnoringModifiers() or "").lower()
                         now = time.monotonic()
                         if now - float(getattr(owner, "_hotkeyAt", 0.0) or 0.0) < 0.45:
-                            if chars in {"c", "s"} and mods == (cmd | ctrl):
+                            if chars in {"c", "s", "j"} and mods == (cmd | ctrl):
                                 return None
                             return event
                         if chars == "c" and mods == (cmd | ctrl):
@@ -357,6 +358,10 @@ def main() -> None:
                         if chars == "s" and mods == (cmd | ctrl):
                             owner._hotkeyAt = now
                             owner.toggleSleep_(None)
+                            return None
+                        if chars == "j" and mods == (cmd | ctrl):
+                            owner._hotkeyAt = now
+                            owner.listenNow_(None)
                             return None
                         return event
                     except Exception:
@@ -369,7 +374,11 @@ def main() -> None:
                     NSEventMaskKeyDown, _global_hotkey
                 )
                 self._hotkeyMonitors = [m for m in (g, loc) if m is not None]
-                print("[tray] hotkeys ⌘⌃C (chat) · ⌘⌃S (sleep) armed", flush=True)
+                print(
+                    "[tray] hotkeys ⌘⌃C (chat) · ⌘⌃S (sleep) · "
+                    "⌘⌃J (listen) armed",
+                    flush=True,
+                )
             except Exception as e:
                 print(f"[tray] hotkeys unavailable: {e}", flush=True)
             try:
@@ -873,6 +882,12 @@ def main() -> None:
                 flush=True,
             )
             self.applyStatus(read_status())
+
+        def listenNow_(self, _sender) -> None:
+            data = read_status()
+            if bool(data.get("stt_active")):
+                return
+            request_listen()
 
         def sendAudio_(self, _sender) -> None:
             data = read_status()

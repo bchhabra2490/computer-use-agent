@@ -64,9 +64,11 @@ from app_status import (
     active_agents,
     clear_phone_photo,
     consume_cancel,
+    consume_listen,
     consume_utterance,
     is_mark_done_utterance,
     log_llm,
+    listen_pending,
     mark_done_pending,
     phone_photo_jpeg,
     phone_photo_pending,
@@ -1209,6 +1211,8 @@ def _listen_command(
     get_session().enter("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
 
     def _stop() -> bool:
+        if listen_pending():
+            return True
         if utterance_pending():
             return True
         if speak_pending():
@@ -1226,7 +1230,31 @@ def _listen_command(
     if queued:
         _clear_speaker_tag()
         return queued
+    shortcut = consume_listen()
+    if shortcut:
+        get_session().enter_and_log("listening", "Keyboard shortcut heard — listening")
+        try:
+            utterance = listen_for_utterance(client, prompt=listen_prompt or "Listening…")
+        except Exception as e:
+            print(f"[orchestrator] shortcut listen failed: {e}", flush=True)
+            return None
+        set_reply_sink("mac")
+        set_turn_source("voice")
+        return strip_wake_prefix(utterance).strip() or None
     if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
+        if consume_listen():
+            get_session().enter_and_log("listening", "Keyboard shortcut heard — listening")
+            try:
+                utterance = listen_for_utterance(
+                    client,
+                    prompt=listen_prompt or "Listening…",
+                )
+            except Exception as e:
+                print(f"[orchestrator] shortcut listen failed: {e}", flush=True)
+                return None
+            set_reply_sink("mac")
+            set_turn_source("voice")
+            return strip_wake_prefix(utterance).strip() or None
         return consume_utterance()
     if quit_requested():
         return None

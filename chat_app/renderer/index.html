@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' blob:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CUA Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell" id="shell">
+      <button
+        type="button"
+        class="shot-menu-backdrop"
+        id="shot-menu-backdrop"
+        hidden
+        aria-label="Close display menu"
+        tabindex="-1"
+      ></button>
+      <div class="shot-lightbox" id="shot-lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot">
+        <button type="button" class="shot-lightbox-close" id="shot-lightbox-close" aria-label="Close">
+          ×
+        </button>
+        <img class="shot-lightbox-img" id="shot-lightbox-img" alt="Screenshot" />
+      </div>
+      <button
+        type="button"
+        class="sidebar-backdrop"
+        id="sidebar-backdrop"
+        aria-label="Close menu"
+        tabindex="-1"
+      ></button>
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top drag">
+          <div class="brand">
+            <img class="brand-mark" id="brand-mark" alt="" width="40" height="40" />
+            <div>
+              <div class="brand-name">Jarvis</div>
+              <div class="brand-sub">desktop chat</div>
+            </div>
+          </div>
+          <button type="button" class="btn-link" id="btn-systems" title="Systems">
+            Systems
+          </button>
+          <button type="button" class="btn-link" id="btn-speakers" title="Manage speakers">
+            Manage speakers
+          </button>
+          <button type="button" class="btn-link" id="btn-mcp" title="MCP connections">
+            MCP connections
+          </button>
+          <button type="button" class="btn-new" id="btn-new" title="New chat">
+            + New
+          </button>
+        </div>
+        <div class="chat-list" id="chat-list"></div>
+        <div class="sidebar-foot" id="status-foot">Connecting…</div>
+      </aside>
+
+      <div class="content">
+      <main class="main" id="view-chat">
+        <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
+          <div>
+            <h1 id="chat-title">New chat</h1>
+          </div>
+        </header>
+
+        <section class="transcript" id="transcript" aria-live="polite"></section>
+
+        <footer class="composer-wrap">
+          <div class="composer" id="composer">
+            <div class="shot-controls">
+              <button
+                type="button"
+                class="icon-btn"
+                id="btn-shot"
+                title="Attach current screen"
+                aria-pressed="false"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M7 5h12a2 2 0 0 1 2 2v10h-2V7H7V5zm-3 3h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zm0 2v9h12v-9H4z"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="icon-btn shot-menu-btn"
+                id="btn-shot-menu"
+                title="Choose displays for screenshot"
+                aria-haspopup="true"
+                aria-expanded="false"
+                aria-controls="shot-display-menu"
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                  <path fill="currentColor" d="M7 10l5 5 5-5H7z" />
+                </svg>
+              </button>
+              <div class="shot-menu" id="shot-display-menu" hidden role="menu">
+                <div class="shot-menu-title">Screenshot displays</div>
+                <div class="shot-menu-list" id="shot-display-list"></div>
+                <p class="shot-menu-note" id="shot-display-note"></p>
+              </div>
+            </div>
+            <button
+              type="button"
+              class="icon-btn"
+              id="btn-tts"
+              title="Speak replies"
+              aria-pressed="true"
+            >
+              <svg class="tts-icon-on" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"
+                />
+              </svg>
+              <svg class="tts-icon-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" hidden>
+                <path
+                  fill="currentColor"
+                  d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"
+                />
+              </svg>
+            </button>
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Message Jarvis…"
+              autocomplete="off"
+            ></textarea>
+            <button type="button" class="send-btn" id="btn-send" title="Send">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M3 11.5 21 3l-6.5 18-3.2-6.3L3 11.5z" />
+              </svg>
+            </button>
+          </div>
+          <p class="hint" id="hint">Enter to send · Shift+Enter for newline</p>
+        </footer>
+      </main>
+
+      <main class="main mcp-main" id="view-mcp" hidden>
+        <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="btn-back" id="btn-back-chat">← Chat</button>
+          <div>
+            <h1>MCP connections</h1>
+            <p class="main-sub" id="mcp-path">Servers from mcp.json</p>
+          </div>
+        </header>
+
+        <section class="mcp-body">
+          <div class="mcp-list" id="mcp-list"></div>
+
+          <form class="mcp-form" id="mcp-form">
+            <h2>Add connection</h2>
+            <label>
+              Name
+              <input id="mcp-name" name="name" required placeholder="linear" autocomplete="off" />
+            </label>
+            <label>
+              Kind
+              <select id="mcp-kind" name="kind">
+                <option value="http">Remote URL (HTTP)</option>
+                <option value="stdio">Local command (stdio)</option>
+              </select>
+            </label>
+            <div id="mcp-http-fields">
+              <label>
+                URL
+                <input
+                  id="mcp-url"
+                  name="url"
+                  placeholder="https://mcp.example.com/mcp"
+                  autocomplete="off"
+                />
+              </label>
+              <label>
+                Auth
+                <select id="mcp-auth" name="auth">
+                  <option value="">None</option>
+                  <option value="oauth">OAuth (cua mcp login)</option>
+                  <option value="token">Bearer token</option>
+                </select>
+              </label>
+              <label id="mcp-token-wrap" hidden>
+                Bearer token
+                <input
+                  id="mcp-token"
+                  name="token"
+                  type="password"
+                  placeholder="Optional — stored in mcp.json headers"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+            <div id="mcp-stdio-fields" hidden>
+              <label>
+                Command
+                <input
+                  id="mcp-command"
+                  name="command"
+                  placeholder="/path/to/python"
+                  autocomplete="off"
+                />
+              </label>
+              <label>
+                Args (one per line)
+                <textarea
+                  id="mcp-args"
+                  name="args"
+                  rows="3"
+                  placeholder="/path/to/server.py"
+                ></textarea>
+              </label>
+              <label>
+                Env (JSON object, optional)
+                <textarea
+                  id="mcp-env"
+                  name="env"
+                  rows="3"
+                  placeholder='{"API_KEY":"…"}'
+                ></textarea>
+              </label>
+            </div>
+            <p class="mcp-note" id="mcp-form-note">
+              Saved to mcp.json. Restart the orchestrator to load new servers.
+            </p>
+            <button type="submit" class="btn-primary" id="mcp-save">Save connection</button>
+          </form>
+        </section>
+      </main>
+
+      <main class="main mcp-main" id="view-speakers" hidden>
+        <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="btn-back" id="btn-back-chat-speakers">← Chat</button>
+          <div>
+            <h1>Manage speakers</h1>
+            <p class="main-sub" id="speakers-sub">Voice ID profiles</p>
+          </div>
+        </header>
+
+        <section class="mcp-body speakers-body">
+          <div>
+            <h2 class="section-title">Saved speakers</h2>
+            <div class="mcp-list" id="speakers-list"></div>
+          </div>
+
+          <div class="mcp-form" id="speaker-enroll">
+            <h2>Add new speaker</h2>
+            <label>
+              Name
+              <input id="speaker-name" required placeholder="Bharat" autocomplete="off" />
+            </label>
+            <p class="mcp-note">
+              Read each passage aloud, then stop recording. Use the same mic you use with Jarvis.
+            </p>
+            <div class="passage-list" id="passage-list"></div>
+            <p class="mcp-note" id="speaker-form-note"></p>
+            <button type="button" class="btn-primary" id="speaker-save" disabled>
+              Save speaker
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <main class="main mcp-main" id="view-systems" hidden>
+        <header class="main-head drag">
+          <button
+            type="button"
+            class="btn-menu"
+            data-menu-toggle
+            aria-label="Open menu"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <span class="btn-menu-bars" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="btn-back" id="btn-back-chat-systems">← Chat</button>
+          <div>
+            <h1>Systems</h1>
+            <p class="sub" id="systems-sub">Observe drafts and saved memories</p>
+          </div>
+        </header>
+
+        <section class="systems-body">
+          <div class="systems-card">
+            <div class="systems-row">
+              <div>
+                <h2 class="section-title">Observe mode</h2>
+                <p class="mcp-note" id="observe-note">
+                  Watches your clicks and drafts memories/skills after ~10 minutes.
+                </p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="observe-toggle" />
+                <span class="toggle-ui" aria-hidden="true"></span>
+                <span class="toggle-label" id="observe-label">Off</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="systems-card" id="face-card">
+            <div class="systems-row">
+              <div>
+                <h2 class="section-title">Face overlay</h2>
+                <p class="mcp-note" id="face-note">
+                  Top-center blobatar. Tray picks up changes on the next poll.
+                </p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="face-toggle" />
+                <span class="toggle-ui" aria-hidden="true"></span>
+                <span class="toggle-label" id="face-label">Off</span>
+              </label>
+            </div>
+            <div class="face-preview-row">
+              <img class="face-preview" id="face-preview" alt="" width="72" height="72" hidden />
+              <div>
+                <div class="face-current" id="face-current">—</div>
+                <p class="mcp-note" id="face-current-blurb"></p>
+              </div>
+            </div>
+            <div class="blobatar-grid" id="blobatar-grid" role="listbox" aria-label="Blobatar presets"></div>
+            <form class="face-custom" id="face-custom-form">
+              <label class="mcp-field">
+                <span>Custom seed</span>
+                <input
+                  id="face-custom-seed"
+                  placeholder="jarvis, rekha, …"
+                  autocomplete="off"
+                  maxlength="128"
+                />
+              </label>
+              <button type="submit" class="btn-primary" id="face-custom-apply">Apply</button>
+            </form>
+            <p class="mcp-note" id="face-form-note"></p>
+          </div>
+
+          <div class="systems-card" id="drafts-card">
+            <div class="systems-row">
+              <button
+                type="button"
+                class="section-collapse"
+                id="drafts-collapse"
+                aria-expanded="true"
+                aria-controls="drafts-panel"
+              >
+                <span class="collapse-chevron" aria-hidden="true">▾</span>
+                <h2 class="section-title">Proposed drafts</h2>
+                <span class="collapse-count" id="drafts-count"></span>
+              </button>
+              <div class="systems-actions" id="drafts-toolbar">
+                <button type="button" class="btn-back" id="drafts-refresh">Refresh</button>
+                <button type="button" class="btn-primary" id="drafts-accept-all">
+                  Accept all
+                </button>
+                <button type="button" class="btn-back" id="drafts-reject-all">
+                  Reject all
+                </button>
+              </div>
+            </div>
+            <div class="drafts-panel" id="drafts-panel">
+              <p class="mcp-note" id="drafts-note"></p>
+              <div class="mcp-list drafts-scroll" id="drafts-list"></div>
+            </div>
+          </div>
+
+          <div class="systems-card" id="memories-card">
+            <div class="systems-row">
+              <button
+                type="button"
+                class="section-collapse"
+                id="memories-collapse"
+                aria-expanded="true"
+                aria-controls="memories-panel"
+              >
+                <span class="collapse-chevron" aria-hidden="true">▾</span>
+                <h2 class="section-title">Saved memories</h2>
+                <span class="collapse-count" id="memories-count"></span>
+              </button>
+              <div class="systems-actions" id="memories-toolbar">
+                <button type="button" class="btn-back" id="memories-refresh">Refresh</button>
+              </div>
+            </div>
+            <div class="drafts-panel" id="memories-panel">
+              <p class="mcp-note" id="memories-note">
+                Personal, app, and screen notes under memory/.
+              </p>
+              <div class="memories-layout">
+                <div class="mcp-list drafts-scroll" id="memories-list"></div>
+                <div class="memory-editor" id="memory-editor" hidden>
+                  <div class="memory-editor-head">
+                    <strong id="memory-edit-title">Edit</strong>
+                    <span class="mcp-note" id="memory-edit-rel"></span>
+                  </div>
+                  <textarea id="memory-edit-text" rows="16" spellcheck="false"></textarea>
+                  <div class="draft-actions">
+                    <button type="button" class="accept" id="memory-save">Save</button>
+                    <button type="button" id="memory-cancel">Cancel</button>
+                  </div>
+                  <p class="mcp-note" id="memory-edit-note"></p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -44,7 +44,18 @@ Blobatar face overlay::
 
     cua face
     cua face pebble
-    cua face jarvis
+
+Desktop chat (Electron; ⌘⌃C)::
+
+    cua chat on
+    cua chat off
+    # first time: cd chat_app && npm install
+
+Sleep mode (ignore wake word; ⌘⌃S)::
+
+    cua sleep on
+    cua sleep off
+    cua sleep toggle
 """
 
 from __future__ import annotations
@@ -72,6 +83,16 @@ SHIM_MARK = "# cua — computer-use-agent daemon CLI"
 _LEGACY_SHIM_MARK = "# cau — computer-use-agent daemon CLI"
 
 _STOP_WAIT_SECONDS = 8.0
+
+# Scripts that keep the agent "on" after the orchestrator pid file is gone.
+_LEFTOVER_SCRIPTS = (
+    "orchestrator.py",
+    "status_tray.py",
+    "phone_gateway.py",
+    "chat_bridge.py",
+    "face_overlay.py",
+)
+_ALL_SCRIPTS = _LEFTOVER_SCRIPTS + ("dictation.py",)
 
 
 def _python() -> str:
@@ -307,38 +328,175 @@ def _stop_phone_gateway() -> None:
         pass
 
 
-def cmd_stop() -> int:
-    pid = running_pid()
-    if pid is None:
-        print("cua is not running")
-        _clear_pid_file()
-        return 0
-
+def _stop_chat() -> None:
     try:
-        from app_status import request_quit
+        from chat_overlay import stop_chat_app
 
-        request_quit()
+        stop_chat_app()
     except Exception:
         pass
 
-    stopped = _terminate(pid)
+
+def _stop_dictation() -> None:
+    try:
+        from dictation import stop_dictation
+
+        stop_dictation()
+    except Exception:
+        pass
+
+
+def _pgrep_pids(*patterns: str) -> list[int]:
+    """PIDs whose command line matches any pattern (via ``pgrep -f``)."""
+    found: list[int] = []
+    seen: set[int] = set()
+    me = os.getpid()
+    for pattern in patterns:
+        if not pattern:
+            continue
+        try:
+            out = subprocess.check_output(
+                ["pgrep", "-f", pattern],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            continue
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pid = int(line.split()[0])
+            except ValueError:
+                continue
+            if pid <= 0 or pid == me or pid in seen:
+                continue
+            seen.add(pid)
+            found.append(pid)
+    return found
+
+
+def find_agent_pids(*, include_dictation: bool = False) -> list[tuple[int, str]]:
+    """Return ``(pid, label)`` for live agent-related processes under this repo."""
+    scripts = _ALL_SCRIPTS if include_dictation else _LEFTOVER_SCRIPTS
+    labeled: list[tuple[int, str]] = []
+    seen: set[int] = set()
+
+    def _add(pid: int, label: str) -> None:
+        if pid <= 0 or pid in seen or not _pid_alive(pid):
+            return
+        seen.add(pid)
+        labeled.append((pid, label))
+
+    orch = running_pid()
+    if orch is not None:
+        _add(orch, "orchestrator")
+
+    try:
+        from app_status import pid_alive, read_status
+
+        data = read_status()
+        for key, label in (
+            ("orchestrator_pid", "orchestrator"),
+            ("tray_pid", "tray"),
+            ("phone_gateway_pid", "phone_gateway"),
+            ("chat_bridge_pid", "chat_bridge"),
+            ("chat_app_pid", "chat_app"),
+            ("agent_pid", "agent"),
+        ):
+            raw = data.get(key)
+            try:
+                pid = int(raw) if raw is not None else 0
+            except (TypeError, ValueError):
+                continue
+            if pid_alive(pid):
+                _add(pid, label)
+    except Exception:
+        pass
+
+    root = str(ROOT)
+    for script in scripts:
+        for pid in _pgrep_pids(f"{root}/{script}", f"{root}/{script} "):
+            _add(pid, script)
+    # Electron chat window(s) launched from this repo.
+    for pid in _pgrep_pids(f"{root}/chat_app"):
+        _add(pid, "chat_app")
+    return labeled
+
+
+def kill_agent_pids(
+    pids: list[tuple[int, str]] | None = None,
+    *,
+    include_dictation: bool = False,
+    wait: float = 2.0,
+) -> list[tuple[int, str]]:
+    """SIGTERM→SIGKILL agent processes. Returns the list that was targeted."""
+    targets = pids if pids is not None else find_agent_pids(include_dictation=include_dictation)
+    for pid, _label in targets:
+        _terminate(pid, wait=wait)
+    return targets
+
+
+def _cleanup_side_processes(*, include_dictation: bool = False) -> list[tuple[int, str]]:
+    """Stop known side processes, then sweep any remaining orphans by cmdline."""
     _stop_tray()
     _stop_phone_gateway()
+    _stop_chat()
+    if include_dictation:
+        _stop_dictation()
+    leftovers = find_agent_pids(include_dictation=include_dictation)
+    if leftovers:
+        kill_agent_pids(leftovers, wait=1.0)
+    return leftovers
+
+
+def cmd_stop(*, all_procs: bool = False) -> int:
+    """Stop the orchestrator and leftover agent UI/audio processes."""
+    pid = running_pid()
+    stopped = True
+    if pid is None:
+        print("cua orchestrator is not running")
+    else:
+        try:
+            from app_status import request_quit
+
+            request_quit()
+        except Exception:
+            pass
+        stopped = _terminate(pid)
+        if stopped:
+            print(f"cua stopped (pid {pid})")
+        else:
+            print(f"cua did not exit (pid {pid})", file=sys.stderr)
+
+    killed = _cleanup_side_processes(include_dictation=all_procs)
     _clear_pid_file()
-    if stopped:
-        print(f"cua stopped (pid {pid})")
-        return 0
-    print(f"cua did not exit (pid {pid})", file=sys.stderr)
-    return 1
+    if killed:
+        for kpid, label in killed:
+            print(f"killed leftover {label} (pid {kpid})")
+    elif pid is None:
+        print("no leftover agent processes")
+
+    return 0 if stopped else 1
 
 
 def cmd_status() -> int:
     pid = running_pid()
-    if pid is None:
+    leftovers = find_agent_pids(include_dictation=True)
+    if pid is None and not leftovers:
         print("cua is not running")
         return 1
-    print(f"cua is running (pid {pid})")
-    return 0
+    if pid is not None:
+        print(f"cua is running (pid {pid})")
+    else:
+        print("cua orchestrator is not running")
+    extras = [(p, label) for p, label in leftovers if p != pid]
+    if extras:
+        print("leftover processes:")
+        for p, label in extras:
+            print(f"  {p}  {label}")
+    return 0 if pid is not None else 1
 
 
 def format_help() -> str:
@@ -350,9 +508,11 @@ DAEMON
   cua start [--no-auto] [--max-steps N]
       Start the voice orchestrator in the background (logs: logs/cua.log).
       Installs a PATH shim on first run (~/.local/bin/cua).
-  cua stop              Stop the orchestrator, tray, and phone gateway.
+  cua stop [--all]      Stop the orchestrator and leftover agent processes
+                        (tray, phone gateway, chat). ``--all`` also stops
+                        dictation.
   cua restart           Stop then start.
-  cua status            Print whether the daemon is running.
+  cua status            Print whether the daemon is running (and leftovers).
   cua install           Install the cua shim onto PATH.
 
 VOICE (foreground — same orchestrator, attached terminal)
@@ -392,6 +552,18 @@ FACE (blobatar overlay — any name, or pebble / droplet / cloud / sun)
   cua face              List blobatars (* = current)
   cua face pebble       Curated shortcut
   cua face jarvis       Any other name hashes to a unique blobatar
+
+CHAT (Electron desktop app — screenshot attach off by default; ⌘⌃C)
+  cua chat on
+  cua chat off
+  cua chat toggle
+  # first time: cd chat_app && npm install
+
+SLEEP (ignore wake word; face sleeps. ⌘⌃S or menu Sleep)
+  cua sleep on
+  cua sleep off
+  cua sleep toggle
+  cua sleep status
 
 SKILLS (playbooks under skills/*/SKILL.md)
   cua skills condense [--name SKILL] [--force] [--dry-run]
@@ -452,7 +624,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     restart_p.add_argument("--max-steps", type=int, default=25)
 
-    sub.add_parser("stop", help="Stop the background orchestrator")
+    stop_p = sub.add_parser(
+        "stop",
+        help="Stop the orchestrator and leftover agent processes",
+    )
+    stop_p.add_argument(
+        "--all",
+        action="store_true",
+        help="Also stop dictation and any other leftover agent processes",
+    )
     sub.add_parser("status", help="Print whether the daemon is running")
     sub.add_parser("install", help="Install the cua command on PATH")
     sub.add_parser("help", help="Show all commands (daemon, observe, speaker, …)")
@@ -563,6 +743,28 @@ def main(argv: list[str] | None = None) -> int:
         "name",
         nargs="*",
         help="preset name, or any seed (omit to list)",
+    )
+
+    chat_p = sub.add_parser(
+        "chat",
+        help="Show or hide the desktop chat window (hotkey ⌘⌃C)",
+    )
+    chat_p.add_argument(
+        "mode",
+        nargs="?",
+        default="status",
+        help="on | off | toggle | status",
+    )
+
+    sleep_p = sub.add_parser(
+        "sleep",
+        help="Ignore wake word (Sleep). Hotkey ⌘⌃S. Face uses sleep vs wink.",
+    )
+    sleep_p.add_argument(
+        "mode",
+        nargs="?",
+        default="status",
+        help="on | off | toggle | status",
     )
 
     accept_p = obs_sub.add_parser(
@@ -685,11 +887,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "start":
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
     if args.command == "stop":
-        return cmd_stop()
+        return cmd_stop(all_procs=bool(getattr(args, "all", False)))
     if args.command == "status":
         return cmd_status()
     if args.command == "restart":
-        cmd_stop()
+        cmd_stop(all_procs=False)
         return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
     if args.command == "install":
         return cmd_install()
@@ -766,6 +968,14 @@ def main(argv: list[str] | None = None) -> int:
         from face_overlay import cmd_face
 
         return cmd_face(args.name)
+    if args.command == "chat":
+        from chat_overlay import cmd_chat
+
+        return cmd_chat(args.mode)
+    if args.command == "sleep":
+        from app_status import cmd_sleep
+
+        return cmd_sleep(args.mode)
     if args.command == "speaker":
         from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
 

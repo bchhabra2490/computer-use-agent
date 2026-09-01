@@ -29,6 +29,7 @@ PHONE_SCREEN_QUALITY = int(os.environ.get("PHONE_SCREEN_QUALITY", "60"))
 PHONE_PHOTO_PATH = RUNTIME_DIR / "phone-photo.jpg"
 PHONE_PHOTO_TTL_SEC = float(os.environ.get("PHONE_PHOTO_TTL_SEC", str(30 * 60)))
 PHONE_SPEECH_PATH = RUNTIME_DIR / "phone-tts.wav"
+CHAT_SCREENSHOTS_DIR = RUNTIME_DIR / "chat-shots"
 MAX_LOG_LINES = int(os.environ.get("STATUS_LOG_LINES", "40"))
 
 _lock = threading.Lock()
@@ -49,6 +50,7 @@ def _default_state() -> dict[str, Any]:
         "done_requested": False,
         "done_agent_id": None,
         "send_requested": False,
+        "listen_requested": False,
         "cancel_requested": False,
         "stt_active": False,
         "agents": [],  # active subagents / computer-agent jobs
@@ -56,15 +58,21 @@ def _default_state() -> dict[str, Any]:
         "overlay_ack_hidden": False,
         "overlay_enabled": True,
         "face_overlay_enabled": True,
+        "chat_overlay_enabled": False,
+        "sleep_mode": False,
         "face_preset": "pebble",
         "tts_playing": False,
         "tts_play_depth": 0,
         "phone_gateway_pid": None,
+        "chat_bridge_pid": None,
+        "chat_app_pid": None,
         "pending_utterances": [],
         "pending_speaks": [],
+        "chat_inbox": [],
         "last_spoken": None,
         "last_llm": None,
         "reply_sink": "mac",
+        "reply_tts": True,
         "speech_at": None,
         "speech_bytes": None,
         "screen_at": None,
@@ -74,6 +82,9 @@ def _default_state() -> dict[str, Any]:
         "phone_photo_pending": False,
         "phone_photo_width": None,
         "phone_photo_height": None,
+        "turn_chat_screenshot": None,
+        "turn_source": None,
+        "chat_stream": None,
     }
 
 
@@ -98,6 +109,8 @@ def _read() -> dict[str, Any]:
             base["pending_utterances"] = []
         if not isinstance(base.get("pending_speaks"), list):
             base["pending_speaks"] = []
+        if not isinstance(base.get("chat_inbox"), list):
+            base["chat_inbox"] = []
         return base
     except Exception:
         return _default_state()
@@ -106,9 +119,22 @@ def _read() -> dict[str, Any]:
 def _write(data: dict[str, Any]) -> None:
     _ensure_dir()
     data["updated_at"] = time.time()
-    tmp = STATUS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(STATUS_PATH)
+    payload = json.dumps(data, indent=2) + "\n"
+    # Per-write temp path — a shared ``status.tmp`` races when tray, bridge, and
+    # orchestrator replace in parallel (one writer's tmp is already moved).
+    tmp = RUNTIME_DIR / f"status.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, STATUS_PATH)
+    except FileNotFoundError:
+        _ensure_dir()
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, STATUS_PATH)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def read_status() -> dict[str, Any]:
@@ -214,6 +240,65 @@ def set_face_overlay_enabled(enabled: bool) -> None:
         _write(data)
 
 
+def set_chat_overlay_enabled(enabled: bool) -> None:
+    """Show or hide the desktop chat window (tray menu / cua chat)."""
+    with _lock:
+        data = _read()
+        data["chat_overlay_enabled"] = bool(enabled)
+        _write(data)
+
+
+def sleep_mode_enabled(data: dict[str, Any] | None = None) -> bool:
+    """When True, wake word is ignored (Sleep)."""
+    snap = data if data is not None else read_status()
+    return bool(snap.get("sleep_mode"))
+
+
+def set_sleep_mode(enabled: bool) -> bool:
+    """Enable/disable Sleep (ignore wake). Returns the new value."""
+    on = bool(enabled)
+    with _lock:
+        data = _read()
+        data["sleep_mode"] = on
+        _write(data)
+    try:
+        from wake import on_sleep_mode_changed
+
+        on_sleep_mode_changed(on)
+    except Exception:
+        pass
+    return on
+
+
+def toggle_sleep_mode() -> bool:
+    """Flip Sleep mode; returns True when Sleep is now on."""
+    now = not sleep_mode_enabled()
+    set_sleep_mode(now)
+    return now
+
+
+def cmd_sleep(mode: str | None) -> int:
+    """``cua sleep`` / ``on`` / ``off`` / ``toggle``."""
+    key = (mode or "status").strip().lower()
+    if key in {"on", "sleep", "1", "true"}:
+        set_sleep_mode(True)
+        print("sleep on — wake word ignored (⌘⌃S to wake)")
+        return 0
+    if key in {"off", "wake", "0", "false"}:
+        set_sleep_mode(False)
+        print("sleep off — listening for wake word")
+        return 0
+    if key in {"toggle", ""}:
+        on = toggle_sleep_mode()
+        print("sleep on — wake word ignored" if on else "sleep off — listening for wake word")
+        return 0
+    if key == "status":
+        print("on" if sleep_mode_enabled() else "off")
+        return 0
+    print("usage: cua sleep [on|off|toggle|status]")
+    return 2
+
+
 def set_face_preset(name: str) -> None:
     """Which blobatar the overlay draws (tray picks this up on the next poll)."""
     with _lock:
@@ -269,14 +354,37 @@ def set_phone_gateway_pid(pid: int | None) -> None:
         _write(data)
 
 
+def set_chat_bridge_pid(pid: int | None) -> None:
+    with _lock:
+        data = _read()
+        data["chat_bridge_pid"] = pid
+        _write(data)
+
+
+def set_chat_app_pid(pid: int | None) -> None:
+    with _lock:
+        data = _read()
+        data["chat_app_pid"] = pid
+        _write(data)
+
+
 def enqueue_utterance(
     text: str,
     *,
     source: str = "phone",
     photo: bool = False,
     sink: str | None = None,
+    tts: bool | None = None,
+    screenshot_file: str | None = None,
 ) -> None:
-    """Queue a text command (phone gateway). Orchestrator consumes it like STT."""
+    """Queue a text command (chat, phone, or API). Orchestrator consumes it like STT.
+
+    ``tts``: when False, the orchestrator still answers in chat but skips speaking.
+    ``None`` means speak (default).
+
+    ``screenshot_file``: basename under ``CHAT_SCREENSHOTS_DIR`` for a chat-attached
+    PNG. When set, the orchestrator should use that image and skip live desktop/AX.
+    """
     text = (text or "").strip()
     if not text:
         return
@@ -286,17 +394,62 @@ def enqueue_utterance(
         "source": source,
         "ts": time.time(),
         "photo": bool(photo),
+        "tts": True if tts is None else bool(tts),
     }
     if sink is not None:
         item["sink"] = _normalize_sink(sink)
+    shot = (screenshot_file or "").strip()
+    if shot:
+        item["screenshot_file"] = Path(shot).name
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
         pending.append(item)
         data["pending_utterances"] = pending[-20:]
         _write(data)
-    kind = "photo" if photo else "queued"
-    log(f"[phone] {kind}: {text[:160]}")
+    kind = "photo" if photo else ("chat-shot" if shot else "queued")
+    log(f"[{source}] {kind}: {text[:160]}")
+
+
+def save_chat_screenshot_png(png: bytes) -> str:
+    """Write a chat-attached PNG for the orchestrator; return basename for enqueue."""
+    if not png:
+        raise ValueError("empty screenshot")
+    CHAT_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"shot-{time.time_ns()}.png"
+    path = CHAT_SCREENSHOTS_DIR / name
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(png)
+    tmp.replace(path)
+    # Keep the directory from growing forever.
+    try:
+        shots = sorted(CHAT_SCREENSHOTS_DIR.glob("shot-*.png"), key=lambda p: p.stat().st_mtime)
+        for old in shots[:-30]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return name
+
+
+def take_turn_chat_screenshot() -> bytes | None:
+    """Read and clear the chat PNG attached to the utterance just consumed."""
+    with _lock:
+        data = _read()
+        name = str(data.get("turn_chat_screenshot") or "").strip()
+        data["turn_chat_screenshot"] = None
+        _write(data)
+    if not name:
+        return None
+    path = CHAT_SCREENSHOTS_DIR / Path(name).name
+    try:
+        png = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return png or None
 
 
 def utterance_pending() -> bool:
@@ -310,7 +463,11 @@ def _normalize_sink(sink: str | None) -> str:
 
 
 def parse_reply_sink_param(value: Any) -> str | None:
-    """Parse optional API ``sink`` / ``speaker``; ``None`` leaves reply_sink unchanged."""
+    """Parse optional API ``sink`` / ``speaker``.
+
+    ``None`` / empty means this request does not select a speaker; consuming the
+    utterance switches ``reply_sink`` back to Mac.
+    """
     if value is None:
         return None
     s = str(value).strip().lower()
@@ -333,6 +490,19 @@ def reply_sink() -> str:
         return _normalize_sink(_read().get("reply_sink"))
 
 
+def set_reply_tts(enabled: bool) -> None:
+    """Whether the current turn should speak replies (vs chat text only)."""
+    with _lock:
+        data = _read()
+        data["reply_tts"] = bool(enabled)
+        _write(data)
+
+
+def reply_tts_enabled() -> bool:
+    with _lock:
+        return bool(_read().get("reply_tts", True))
+
+
 def consume_utterance() -> str | None:
     """Pop the next queued text command, or None."""
     with _lock:
@@ -342,8 +512,23 @@ def consume_utterance() -> str | None:
             return None
         item = pending.pop(0)
         data["pending_utterances"] = pending
-        if isinstance(item, dict) and item.get("sink") is not None:
-            data["reply_sink"] = _normalize_sink(str(item.get("sink")))
+        data["turn_chat_screenshot"] = None
+        if isinstance(item, dict):
+            # Per-turn speaker: phone only when this item requested it.
+            if item.get("sink") is not None:
+                data["reply_sink"] = _normalize_sink(str(item.get("sink")))
+            else:
+                data["reply_sink"] = "mac"
+            data["reply_tts"] = bool(item.get("tts", True))
+            data["turn_source"] = str(item.get("source") or "phone").strip() or "phone"
+            shot = str(item.get("screenshot_file") or "").strip()
+            if shot:
+                data["turn_chat_screenshot"] = Path(shot).name
+        else:
+            data["reply_tts"] = True
+            data["turn_source"] = "stt"
+        if str(data.get("turn_source") or "").lower() == "chat":
+            data["chat_stream"] = None
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -396,6 +581,8 @@ def consume_speak() -> str | None:
         data["pending_speaks"] = pending
         if isinstance(item, dict):
             data["reply_sink"] = _normalize_sink(item.get("sink"))
+        # Timer / queued speaks always play audio.
+        data["reply_tts"] = True
         _write(data)
     if isinstance(item, str):
         text = item.strip()
@@ -404,14 +591,119 @@ def consume_speak() -> str | None:
     return text or None
 
 
-def set_last_spoken(text: str) -> None:
+def set_turn_source(source: str) -> None:
+    """Tag the current orchestrator turn (chat / voice / phone / …)."""
+    value = (source or "").strip() or "voice"
+    with _lock:
+        data = _read()
+        data["turn_source"] = value
+        if value.lower() != "chat":
+            data["chat_stream"] = None
+        _write(data)
+
+
+def turn_source() -> str:
+    with _lock:
+        return str(_read().get("turn_source") or "").strip()
+
+
+def reply_to_chat() -> bool:
+    """True when this turn was queued from the Electron chat app."""
+    return turn_source().lower() == "chat"
+
+
+def chat_text_only() -> bool:
+    """Chat turn with speaker off — reply in the UI, not via TTS or status blurbs."""
+    return reply_to_chat() and not reply_tts_enabled()
+
+
+_chat_stream_last_write = 0.0
+_CHAT_STREAM_MIN_INTERVAL = 0.05
+
+
+def set_chat_stream(text: str | None, *, done: bool = False, force: bool = False) -> None:
+    """Publish progressive assistant text for the chat UI (chat-origin turns)."""
+    global _chat_stream_last_write
+    if text is None:
+        with _lock:
+            data = _read()
+            data["chat_stream"] = None
+            _write(data)
+        return
+    clipped = str(text)[:8000]
+    now = time.monotonic()
+    if (
+        not force
+        and not done
+        and now - _chat_stream_last_write < _CHAT_STREAM_MIN_INTERVAL
+    ):
+        return
+    _chat_stream_last_write = now
+    with _lock:
+        data = _read()
+        data["chat_stream"] = {
+            "text": clipped,
+            "done": bool(done),
+            "ts": time.time(),
+        }
+        _write(data)
+
+
+def chat_stream_payload() -> dict[str, Any] | None:
+    with _lock:
+        raw = _read().get("chat_stream")
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get("text") or "")
+    if not text and not raw.get("done"):
+        return None
+    return {
+        "text": text,
+        "done": bool(raw.get("done")),
+        "ts": raw.get("ts"),
+    }
+
+
+def set_last_spoken(text: str, *, enqueue_chat: bool = True) -> None:
     text = (text or "").strip()
     if not text:
         return
+    clipped = text[:2000]
     with _lock:
         data = _read()
-        data["last_spoken"] = text[:2000]
+        data["last_spoken"] = clipped
+        if enqueue_chat and data.get("chat_overlay_enabled"):
+            inbox = list(data.get("chat_inbox") or [])
+            prev = inbox[-1].get("text") if inbox and isinstance(inbox[-1], dict) else None
+            if prev != clipped:
+                inbox.append({"text": clipped, "ts": time.time()})
+                data["chat_inbox"] = inbox[-50:]
+        # Final line replaces the live stream so the UI can settle on history.
+        if str(data.get("turn_source") or "").lower() == "chat":
+            data["chat_stream"] = {
+                "text": clipped,
+                "done": True,
+                "ts": time.time(),
+            }
         _write(data)
+
+
+def consume_chat_inbox() -> list[str]:
+    """Pop spoken lines queued for the chat window (orchestrator / TTS)."""
+    with _lock:
+        data = _read()
+        items = list(data.get("chat_inbox") or [])
+        data["chat_inbox"] = []
+        _write(data)
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            line = item.strip()
+        else:
+            line = str((item or {}).get("text") or "").strip()
+        if line:
+            out.append(line)
+    return out
 
 
 def write_phone_speech(wav_bytes: bytes) -> None:
@@ -591,7 +883,15 @@ def register_orchestrator(pid: int | None = None) -> None:
         data["send_requested"] = False
         data["cancel_requested"] = False
         data["stt_active"] = False
+        # Always start awake — Sleep is an opt-in toggle for the session.
+        data["sleep_mode"] = False
         _write(data)
+    try:
+        from wake import on_sleep_mode_changed
+
+        on_sleep_mode_changed(False)
+    except Exception:
+        pass
 
 
 def unregister_orchestrator() -> None:
@@ -752,6 +1052,31 @@ def set_stt_listening(active: bool) -> None:
         _write(data)
 
 
+def request_listen() -> None:
+    """Ask the idle orchestrator to bypass wake detection and open the mic."""
+    with _lock:
+        data = _read()
+        data["listen_requested"] = True
+        _write(data)
+    log("Listen shortcut requested — opening mic")
+
+
+def listen_pending() -> bool:
+    with _lock:
+        return bool(_read().get("listen_requested"))
+
+
+def consume_listen() -> bool:
+    """Consume one global listen-shortcut request."""
+    with _lock:
+        data = _read()
+        if not data.get("listen_requested"):
+            return False
+        data["listen_requested"] = False
+        _write(data)
+        return True
+
+
 def request_send() -> None:
     """End the current listen immediately and transcribe what was captured."""
     with _lock:
@@ -836,9 +1161,22 @@ def pid_alive(pid: Any) -> bool:
         return False
     try:
         os.kill(p, 0)
-        return True
     except OSError:
         return False
+    # Zombies still accept signal 0; treat them as dead so callers respawn.
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["ps", "-p", str(p), "-o", "state="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if out.upper().startswith("Z"):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def signal_quit_orchestrator() -> bool:
@@ -946,6 +1284,8 @@ def format_tooltip(data: dict[str, Any] | None = None, *, max_log_lines: int = 1
     detail = (data.get("detail") or "").strip()
     task = (data.get("task") or "").strip()
     lines = [f"Jarvis · {state}"]
+    if data.get("sleep_mode"):
+        lines.append("Sleep · wake word ignored (⌘⌃S)")
     if detail:
         lines.append(detail[:120])
     agents = active_agents(data)
@@ -974,6 +1314,8 @@ def status_label(data: dict[str, Any] | None = None) -> str:
     data = data or read_status()
     agents = active_agents(data)
     state = data.get("state") or "idle"
+    if data.get("sleep_mode"):
+        return f"sleep · {state}"[:80]
     if agents:
         return f"{state} · {len(agents)} agent(s)"[:80]
     detail = (data.get("detail") or "").strip()

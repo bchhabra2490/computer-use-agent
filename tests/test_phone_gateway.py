@@ -163,6 +163,18 @@ class PhoneGatewayHttpTests(unittest.TestCase):
         self.assertEqual(st.consume_utterance(), "open notes")
         self.assertEqual(st.reply_sink(), "phone")
 
+    def test_command_without_sink_switches_back_to_mac(self) -> None:
+        st.set_reply_sink("phone")
+        h = self._handler(
+            "POST",
+            "/v1/command",
+            {"text": "open notes"},
+            token="test-token-abc",
+        )
+        self.assertEqual(h._code, 200)
+        self.assertEqual(st.consume_utterance(), "open notes")
+        self.assertEqual(st.reply_sink(), "mac")
+
     def test_control_set_sink(self) -> None:
         h = self._handler(
             "POST",

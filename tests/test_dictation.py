@@ -140,7 +140,7 @@ class FnFlagTests(unittest.TestCase):
         shown: list[str] = []
         hidden: list[str] = []
         fake_stt = MagicMock()
-        fake_stt.listen_once.return_value = "hello"
+        fake_stt.listen_dictation.return_value = "hello"
         fake_stt.ListenCancelled = type("ListenCancelled", (Exception,), {})
         fake_stt.NoSpeechError = type("NoSpeechError", (Exception,), {})
         with (

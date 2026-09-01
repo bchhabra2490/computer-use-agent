@@ -12,6 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import orchestrator  # noqa: E402
 from orchestrator import (  # noqa: E402
     TurnTrace,
     _assistant_message_text,
@@ -135,6 +136,15 @@ class UserTurnInputTests(unittest.TestCase):
         inp = _user_turn_input("open notes", [])
         self.assertIsInstance(inp, str)
         self.assertIn("open notes", inp)
+        self.assertIn("Current local date and time:", inp)
+
+    def test_injects_local_datetime_on_every_turn(self) -> None:
+        with patch(
+            "orchestrator.local_datetime_line",
+            return_value="Current local date and time: TEST.",
+        ):
+            inp = _user_turn_input("what time is it?", [])
+        self.assertIn("Current local date and time: TEST.", inp)
 
     def test_attaches_desktop_screenshot(self) -> None:
         png = b"\x89PNG" + b"\x00" * 20
@@ -197,6 +207,48 @@ class ListenForAnswerTests(unittest.TestCase):
         ):
             out = _listen_for_answer(SimpleNamespace())
         self.assertIn("No speech was captured", out)
+
+
+class ChatTextOnlySpeakTests(unittest.TestCase):
+    def test_speak_skips_chat_for_status_blurbs(self) -> None:
+        with (
+            patch("orchestrator.chat_text_only", return_value=True),
+            patch("orchestrator.reply_tts_enabled", return_value=False),
+            patch("orchestrator.set_last_spoken") as last,
+            patch("orchestrator.get_audio", return_value=None),
+            patch("orchestrator.log_llm"),
+        ):
+            orchestrator._speak(SimpleNamespace(), "Starting that now.")
+        last.assert_not_called()
+
+    def test_speak_publishes_user_replies(self) -> None:
+        with (
+            patch("orchestrator.chat_text_only", return_value=True),
+            patch("orchestrator.reply_tts_enabled", return_value=False),
+            patch("orchestrator.set_last_spoken") as last,
+            patch("orchestrator.get_audio", return_value=None),
+            patch("orchestrator.log_llm"),
+        ):
+            orchestrator._speak(SimpleNamespace(), "The time is noon.", user_reply=True)
+        last.assert_called_once_with("The time is noon.", enqueue_chat=True)
+
+    def test_speak_can_exclude_startup_announcement_from_chat(self) -> None:
+        with (
+            patch("orchestrator.chat_text_only", return_value=False),
+            patch("orchestrator.reply_tts_enabled", return_value=False),
+            patch("orchestrator.set_last_spoken") as last,
+            patch("orchestrator.get_audio", return_value=None),
+            patch("orchestrator.log_llm"),
+        ):
+            orchestrator._speak(
+                SimpleNamespace(),
+                "Ready. Say the wake word, then tell me what you need.",
+                publish_to_chat=False,
+            )
+        last.assert_called_once_with(
+            "Ready. Say the wake word, then tell me what you need.",
+            enqueue_chat=False,
+        )
 
 
 if __name__ == "__main__":

@@ -73,6 +73,20 @@ class AudioSessionTests(unittest.TestCase):
             cmd = self.audio.listen_command()
         self.assertEqual(cmd, "from phone")
 
+    def test_listen_shortcut_bypasses_wake_word(self) -> None:
+        with (
+            patch("audio.consume_utterance", return_value=None),
+            patch("audio.consume_listen", return_value=True),
+            patch.object(self.audio, "listen", return_value="open notes") as listen,
+            patch("audio.wait_for_wake") as wake,
+            patch("audio.set_reply_sink") as sink,
+        ):
+            cmd = self.audio.listen_command()
+        self.assertEqual(cmd, "open notes")
+        listen.assert_called_once_with("Listening…")
+        wake.assert_not_called()
+        sink.assert_called_with("mac")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,12 @@ class LlmErrorSpeechTests(unittest.TestCase):
         err = Exception("network timeout")
         self.assertFalse(is_fatal_llm_error(err))
 
+    def test_unavailable_error_is_not_rewrapped_as_openai(self) -> None:
+        err = LlmUnavailableError("No tool call found for tool output with call_id x.")
+        spoken = llm_error_speech(err)
+        self.assertEqual(spoken, str(err))
+        self.assertNotIn("OpenAI", spoken)
+
 
 class CreateResponseQuotaTests(unittest.TestCase):
     def test_stream_quota_does_not_retry_sync_create(self) -> None:
@@ -76,6 +82,44 @@ class CreateResponseQuotaTests(unittest.TestCase):
         with patch("orchestrator.TTS_STREAM", False):
             with self.assertRaises(LlmUnavailableError):
                 _create_response(client, llm_tts=None, model="gpt-5-mini", input="hi")
+
+    def test_deepseek_tool_followup_replays_function_calls(self) -> None:
+        from types import SimpleNamespace
+
+        client = MagicMock()
+        done = SimpleNamespace(output=[], id="r2")
+        client.responses.create.return_value = done
+        prior = SimpleNamespace(
+            id="r1",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    call_id="call_1",
+                    name="who_am_i",
+                    arguments="{}",
+                )
+            ],
+        )
+        outputs = [
+            {"type": "function_call_output", "call_id": "call_1", "output": "README"}
+        ]
+        with patch("orchestrator.TTS_STREAM", False), patch.dict(
+            "os.environ",
+            {"ORCHESTRATOR_MODEL": "deepseek-v4-pro", "ORCHESTRATOR_BACKEND": "deepseek"},
+            clear=False,
+        ):
+            _create_response(
+                client,
+                llm_tts=None,
+                prior_response=prior,
+                model="deepseek-v4-pro",
+                previous_response_id="r1",
+                input=outputs,
+            )
+        kwargs = client.responses.create.call_args.kwargs
+        self.assertNotIn("previous_response_id", kwargs)
+        self.assertEqual(kwargs["input"][0]["type"], "function_call")
+        self.assertEqual(kwargs["input"][1]["type"], "function_call_output")
 
 
 if __name__ == "__main__":

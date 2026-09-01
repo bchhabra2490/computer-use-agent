@@ -143,6 +143,13 @@ class PromptExtractTests(unittest.TestCase):
         self.assertIn("refer to memory first", text)
         self.assertIn("read_memory", text)
 
+    def test_local_datetime_line_is_readable(self) -> None:
+        from orchestrator_prompts import local_datetime_line
+
+        line = local_datetime_line()
+        self.assertTrue(line.startswith("Current local date and time:"))
+        self.assertIn("202", line)  # year fragment
+
 
 if __name__ == "__main__":
     unittest.main()

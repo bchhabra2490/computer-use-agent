@@ -540,9 +540,9 @@ If nothing is worth saving, return {"items": []}.
 
 
 def _new_extract_client() -> Any:
-    from openai import OpenAI
+    from llm_client import make_llm_client
 
-    return OpenAI()
+    return make_llm_client(model=MEMORY_EXTRACT_MODEL)
 
 
 def _extract_run_memories_impl(

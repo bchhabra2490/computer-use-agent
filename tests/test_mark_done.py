@@ -115,6 +115,33 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(st.consume_utterance(), "play a song")
         self.assertEqual(st.reply_sink(), "phone")
 
+    def test_enqueue_without_sink_switches_back_to_mac(self) -> None:
+        st.set_reply_sink("phone")
+        st.enqueue_utterance("from chat")
+        self.assertEqual(st.consume_utterance(), "from chat")
+        self.assertEqual(st.reply_sink(), "mac")
+
+    def test_enqueue_tts_false_disables_reply_tts(self) -> None:
+        st.set_reply_tts(True)
+        st.enqueue_utterance("quiet chat", tts=False)
+        self.assertEqual(st.consume_utterance(), "quiet chat")
+        self.assertFalse(st.reply_tts_enabled())
+        st.enqueue_utterance("speak please", tts=True)
+        self.assertEqual(st.consume_utterance(), "speak please")
+        self.assertTrue(st.reply_tts_enabled())
+
+    def test_consume_speak_reenables_reply_tts(self) -> None:
+        st.set_reply_tts(False)
+        st.enqueue_speak("timer ding")
+        self.assertEqual(st.consume_speak(), "timer ding")
+        self.assertTrue(st.reply_tts_enabled())
+
+    def test_listen_shortcut_request_is_consumed_once(self) -> None:
+        st.request_listen()
+        self.assertTrue(st.listen_pending())
+        self.assertTrue(st.consume_listen())
+        self.assertFalse(st.consume_listen())
+
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")
         st.enqueue_utterance("two")
@@ -148,6 +175,37 @@ class FlagTests(unittest.TestCase):
         self.assertTrue(blob.startswith(b"RIFF"))
         self.assertFalse(st.utterance_pending())
         self.assertTrue(st.read_status().get("speech_at"))
+
+    def test_chat_inbox_from_spoken_when_overlay_on(self) -> None:
+        st.set_chat_overlay_enabled(True)
+        st.set_last_spoken("hello there")
+        st.set_last_spoken("hello there")
+        self.assertEqual(st.consume_chat_inbox(), ["hello there"])
+        self.assertEqual(st.consume_chat_inbox(), [])
+
+    def test_chat_inbox_skipped_when_overlay_off(self) -> None:
+        st.set_chat_overlay_enabled(False)
+        st.set_last_spoken("secret")
+        self.assertEqual(st.consume_chat_inbox(), [])
+
+    def test_last_spoken_can_skip_chat_inbox(self) -> None:
+        st.set_chat_overlay_enabled(True)
+        st.set_last_spoken("Ready.", enqueue_chat=False)
+        self.assertEqual(st.read_status().get("last_spoken"), "Ready.")
+        self.assertEqual(st.consume_chat_inbox(), [])
+
+    def test_concurrent_writes_use_unique_temp_files(self) -> None:
+        import concurrent.futures
+
+        def bump(i: int) -> None:
+            with st._lock:
+                data = st._read()
+                data["detail"] = f"n={i}"
+                st._write(data)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            list(pool.map(bump, range(60)))
+        self.assertIn("detail", st.read_status())
 
 
 if __name__ == "__main__":

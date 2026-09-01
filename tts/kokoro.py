@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import threading
+import unicodedata
 import wave
 from pathlib import Path
 
@@ -29,6 +31,57 @@ _lock = threading.Lock()
 _mlx_model = None
 _onnx_engine = None
 _logged = False
+
+# Misaki's English G2P can leave out-of-dictionary tokens as ``None`` when
+# eSpeak is unavailable. Its final join then raises ``None + str``. A spelling
+# fallback keeps proper nouns usable instead of dropping the whole TTS chunk.
+_LETTER_PHONEMES = {
+    "a": "eɪ", "b": "bi", "c": "si", "d": "di", "e": "i", "f": "ɛf",
+    "g": "ʤi", "h": "eɪʧ", "i": "aɪ", "j": "ʤeɪ", "k": "keɪ",
+    "l": "ɛl", "m": "ɛm", "n": "ɛn", "o": "oʊ", "p": "pi",
+    "q": "kju", "r": "ɑɹ", "s": "ɛs", "t": "ti", "u": "ju",
+    "v": "vi", "w": "dʌbəlju", "x": "ɛks", "y": "waɪ", "z": "zi",
+}
+
+
+def _spelling_fallback(token) -> tuple[str, int]:
+    """Misaki fallback for unknown English words when eSpeak is absent."""
+    text = str(getattr(token, "text", "") or "").lower()
+    phonemes = " ".join(_LETTER_PHONEMES[c] for c in text if c in _LETTER_PHONEMES)
+    return phonemes, 1
+
+
+def _prepare_text(text: str) -> str:
+    """Turn common report/Markdown symbols into speakable Kokoro input."""
+    value = unicodedata.normalize("NFKC", text)
+    replacements = {
+        "₹": " rupees ",
+        "$": " dollars ",
+        "€": " euros ",
+        "£": " pounds ",
+        "·": ", ",
+        "•": ", ",
+        "—": ", ",
+        "–": " to ",
+        "−": " minus ",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    value = re.sub(r"[*_`#]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _ensure_mlx_g2p_fallback(model, lang_code: str) -> None:
+    """Install a non-crashing OOV fallback on mlx-audio's cached pipeline."""
+    if lang_code not in {"a", "b"}:
+        return
+    get_pipeline = getattr(model, "_get_pipeline", None)
+    if not callable(get_pipeline):
+        return
+    pipeline = get_pipeline(lang_code)
+    g2p = getattr(pipeline, "g2p", None)
+    if g2p is not None and getattr(g2p, "fallback", None) is None:
+        g2p.fallback = _spelling_fallback
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
@@ -148,11 +201,13 @@ def _synthesize_mlx(text: str, voice: str) -> bytes:
     model = _load_mlx()
     pieces = []
     rate = KOKORO_SAMPLE_RATE
+    lang_code = _lang_code(voice)
+    _ensure_mlx_g2p_fallback(model, lang_code)
     kwargs = {
-        "text": text,
+        "text": _prepare_text(text),
         "voice": voice,
         "speed": KOKORO_SPEED,
-        "lang_code": _lang_code(voice),
+        "lang_code": lang_code,
     }
     for result in model.generate(**kwargs):
         audio = _audio_from_result(result)
@@ -169,7 +224,7 @@ def _synthesize_mlx(text: str, voice: str) -> bytes:
 def _synthesize_onnx(text: str, voice: str) -> bytes:
     engine = _load_onnx()
     samples, rate = engine.create(
-        text,
+        _prepare_text(text),
         voice=voice,
         speed=KOKORO_SPEED,
         lang=_lang_code(voice),

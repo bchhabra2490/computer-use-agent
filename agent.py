@@ -39,6 +39,15 @@ from collections.abc import Callable
 
 from openai import OpenAI
 
+from llm_client import (
+    agent_provider,
+    input_has_image,
+    make_llm_client,
+    merge_tool_followup_input,
+    model_for_request,
+    supports_previous_response_id,
+)
+
 from actions import DesktopController, desktop_logical_size, list_monitors
 from accessibility import read_ui_text
 from app_status import (
@@ -111,6 +120,25 @@ class TaskMarkedDone(Exception):
     def __init__(self, summary: str = "Task complete."):
         self.summary = (summary or "Task complete.").strip()
         super().__init__(self.summary)
+
+
+def _continue_response(client, *, model: str, tools: list, response, next_input, provider: str):
+    """Follow-up Responses turn. DeepSeek must replay function_call items (stateless)."""
+    from llm_client import fold_orphan_tool_outputs
+
+    req_model = model_for_request(
+        model,
+        has_image=input_has_image(next_input),
+        provider=provider,
+    )
+    kwargs: dict = {"model": req_model, "tools": tools, "input": next_input}
+    if supports_previous_response_id(model, provider=os.environ.get("AGENT_BACKEND")):
+        kwargs["previous_response_id"] = response.id
+    else:
+        kwargs["input"] = fold_orphan_tool_outputs(
+            merge_tool_followup_input(response, next_input)
+        )
+    return client.responses.create(**kwargs)
 
 
 def confirm(actions: list, *, client: OpenAI | None = None, voice: bool = False) -> bool:
@@ -414,9 +442,11 @@ def _handle_function_call(
     *,
     auto: bool = False,
     voice: bool = False,
+    audio_client: OpenAI | None = None,
 ) -> dict:
+    speak_client = audio_client if audio_client is not None else client
     if call.name == "ask_user":
-        return _handle_ask_user(client, call, log, ask_user_bridge=ask_user_bridge)
+        return _handle_ask_user(speak_client, call, log, ask_user_bridge=ask_user_bridge)
     if call.name == "list_skills":
         return _handle_list_skills(call, log)
     if call.name == "read_skill":
@@ -424,7 +454,7 @@ def _handle_function_call(
     if call.name == "read_ui_text":
         return _handle_read_ui_text(call, log)
     if call.name == "run_terminal":
-        return _handle_run_terminal(call, log, auto=auto, client=client, voice=voice)
+        return _handle_run_terminal(call, log, auto=auto, client=speak_client, voice=voice)
     if call.name in SHARED_TOOL_NAMES:
         args = json.loads(call.arguments or "{}")
         outcome = run_tool(
@@ -461,6 +491,65 @@ def _handle_function_call(
         "call_id": call.call_id,
         "output": f"Unsupported tool: {call.name}",
     }
+
+
+def _handle_desktop_actions(
+    desktop: DesktopController,
+    call,
+    auto: bool,
+    log: TaskLog,
+    *,
+    client: OpenAI | None = None,
+    voice: bool = False,
+) -> list[dict] | None:
+    """DeepSeek / non-OpenAI path: function-tool desktop control + screenshot."""
+    try:
+        args = json.loads(call.arguments or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    actions = args.get("actions") or []
+    if not isinstance(actions, list):
+        actions = []
+    summary = _action_summary(actions)
+    if not auto and not confirm(actions, client=client, voice=voice):
+        log.record("desktop_actions_skipped", "user declined actions", {"actions": summary})
+        print("Skipped this batch. Ending run.")
+        return None
+
+    log.record("desktop_actions", f"{len(summary)} action(s)", {"actions": summary})
+    desktop.run_actions(actions)
+    screenshot_bytes = desktop.capture_screenshot()
+    screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+    log.record(
+        "screenshot",
+        f"{len(screenshot_bytes)} bytes",
+        {"bytes": len(screenshot_bytes)},
+    )
+    n = len(summary)
+    return [
+        {
+            "type": "function_call_output",
+            "call_id": call.call_id,
+            "output": (
+                f"Ran {n} desktop action(s). A fresh screenshot is attached as "
+                "the next user message."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "[Screenshot after desktop_actions]",
+                },
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/png;base64,{screenshot_b64}",
+                    "detail": "original",
+                },
+            ],
+        },
+    ]
 
 
 def _handle_computer_call(
@@ -689,7 +778,8 @@ def run(
     the goal (user words or a short leftover step), never a UI screenplay.
     `speaker_context` is optional voice-ID text from the orchestrator (may be empty).
     """
-    client = OpenAI()
+    audio_client = OpenAI()
+    client = audio_client
     standalone = ask_user_bridge is None and message_inbox is None
     own_session = False
     if standalone:
@@ -870,8 +960,19 @@ def run(
             )
         model = route.model
         max_steps = route.max_steps
+        provider = agent_provider(model)
+        client = make_llm_client(
+            model=model,
+            provider=os.environ.get("AGENT_BACKEND"),
+        )
+        tools = agent_tools(provider=provider)
+        gui_tool = (
+            "desktop_actions"
+            if provider == "deepseek"
+            else "the computer tool"
+        )
         print(
-            f"[agent] model={model} difficulty={route.difficulty} "
+            f"[agent] provider={provider} model={model} difficulty={route.difficulty} "
             f"max_steps={max_steps} eval_every={EVAL_EVERY}"
         )
         if message_inbox is not None:
@@ -915,7 +1016,7 @@ def run(
                 f"{not_to_do}\n\n"
                 "Workflow:\n"
                 "1. If a skill matches this task, call read_skill for it (and any "
-                "companion files you need) before using the computer tool. For "
+                f"companion files you need) before using {gui_tool}. For "
                 "accounts, names, or app preferences, call read_memory first "
                 "(skill read-memory).\n"
                 "1b. After a recipe handoff (or whenever the target UI may already "
@@ -927,14 +1028,14 @@ def run(
                 "call who_am_i then mark_done with a short spoken summary from the "
                 "README (do not drive the desktop or read the README aloud).\n"
                 "3. If an MCP server can search, fetch, or change the data, call "
-                "mcp_call before using the computer tool or scraping with "
+                f"mcp_call before using {gui_tool} or scraping with "
                 "run_terminal.\n"
                 "3b. For physical hardware/device control (lights, switches, TV, "
                 "AC, locks, sensors), use hardware MCP via mcp_call. Do not use "
                 "desktop UI clicks as a workaround when MCP can do it.\n"
                 "3c. Open windows, running apps, and browser tabs are listed in "
                 "the occupancy block. Call list_open_apps for a fresh snapshot "
-                "(do not scrape the tab bar with the computer tool).\n"
+                f"(do not scrape the tab bar with {gui_tool}).\n"
                 "3d. For a countdown or reminder (tea, oven, 5 minutes), call "
                 "set_timer and mark_done. Do not open Clock, do not sleep, do not "
                 "watch the screen until it rings. speak=true when they asked to "
@@ -947,7 +1048,7 @@ def run(
                 "5b. If the task is opening a known site, map, or search page, "
                 "prefer `open 'https://...'` (put the place/query in the URL) "
                 "instead of Spotlight and typing in the address bar.\n"
-                "6. Use the computer tool for UI actions on this real desktop. "
+                f"6. Use {gui_tool} for UI actions on this real desktop. "
                 "The screenshot shows every monitor, labeled screen N. Click the "
                 "display that holds the target app (see occupancy). Do not assume "
                 "the task is on the primary display.\n"
@@ -966,7 +1067,7 @@ def run(
                 "to use if memory already says. "
                 "save_memory when they state a durable fact. "
                 "If they want the current display remembered, call save_screen_memory "
-                "(screenshot + description) — do not use the computer tool for that.\n"
+                f"(screenshot + description) — do not use {gui_tool} for that.\n"
                 "10. Before each turn, you may receive new user messages that arrived "
                 "via ZeroMQ / Jarvis while you were working — follow them immediately.\n"
                 "10b. A line like “Media playing: yes|no” reports Music/Spotify "
@@ -975,7 +1076,7 @@ def run(
                 "11. You may periodically receive evaluator coaching — treat it as "
                 "advisory guidance and adapt.\n"
                 "12. When the request is complete and no other action is required, "
-                "call mark_done (do not keep using the computer tool).\n"
+                f"call mark_done (do not keep using {gui_tool}).\n"
                 "13. Do not tell the user to say “stop” without the wake word while "
                 "you are clicking. Mid-task cancel is wake word then “stop”. During "
                 "ask_user, bare “stop” already cancels."
@@ -998,8 +1099,12 @@ def run(
             api_input = prompt_body
 
         response = client.responses.create(
-            model=model,
-            tools=agent_tools(),
+            model=model_for_request(
+                model,
+                has_image=input_has_image(api_input),
+                provider=provider,
+            ),
+            tools=tools,
             input=api_input,
         )
 
@@ -1012,6 +1117,9 @@ def run(
 
             computer_calls = [i for i in response.output if i.type == "computer_call"]
             function_calls = [i for i in response.output if i.type == "function_call"]
+            desktop_calls = [i for i in function_calls if getattr(i, "name", "") == "desktop_actions"]
+            other_calls = [i for i in function_calls if getattr(i, "name", "") != "desktop_actions"]
+            gui_turns = bool(computer_calls or desktop_calls)
 
             if not computer_calls and not function_calls:
                 # If the user sent mid-task guidance as we finished, keep going.
@@ -1021,17 +1129,19 @@ def run(
                         "[agent] model stopped but ZeroMQ messages pending — continuing",
                         flush=True,
                     )
-                    response = client.responses.create(
+                    response = _continue_response(
+                        client,
                         model=model,
-                        tools=agent_tools(),
-                        previous_response_id=response.id,
-                        input=[_user_input_item(leftover)],
+                        tools=tools,
+                        response=response,
+                        next_input=[_user_input_item(leftover)],
+                        provider=provider,
                     )
                     continue
 
                 print("\nDone — no further actions.")
                 if voice:
-                    speak_later(client, "Done.")
+                    speak_later(audio_client, "Done.")
                 log.finish("completed")
                 maybe_create_skill(client, log, voice=voice)
                 maybe_save_recipe(client, log, task)
@@ -1044,26 +1154,47 @@ def run(
             tool_outputs: list[dict] = []
             last_shot_b64: str | None = None
 
-            for call in function_calls:
+            for call in other_calls:
                 if call.name == "read_screen":
                     out, png = _handle_read_screen(call, log)
-                    # Computer tool + previous_response_id rejects extra input_image
-                    # ("Computer tool only allows input image without previous
-                    # response"). AX/display text is already in the tool output;
-                    # tell the model to use the computer tool for pixels.
-                    if png:
-                        out = {
-                            **out,
-                            "output": (
-                                f"{out['output']}\n\n"
-                                "(Screenshot was captured but not attached: the "
-                                "computer tool forbids input_image when continuing "
-                                "with previous_response_id. Use the computer tool "
-                                "for a fresh screenshot if you need pixels; the "
-                                "accessibility and display text above is current.)"
-                            ),
-                        }
-                    tool_outputs.append(out)
+                    # OpenAI computer tool + previous_response_id rejects extra
+                    # input_image. DeepSeek desktop_actions allows attaching it.
+                    if png and provider == "deepseek":
+                        tool_outputs.append(out)
+                        tool_outputs.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": "[Screenshot from read_screen]",
+                                    },
+                                    {
+                                        "type": "input_image",
+                                        "image_url": (
+                                            "data:image/png;base64,"
+                                            + base64.b64encode(png).decode("utf-8")
+                                        ),
+                                        "detail": "original",
+                                    },
+                                ],
+                            }
+                        )
+                        last_shot_b64 = base64.b64encode(png).decode("utf-8")
+                    else:
+                        if png:
+                            out = {
+                                **out,
+                                "output": (
+                                    f"{out['output']}\n\n"
+                                    "(Screenshot was captured but not attached: the "
+                                    "computer tool forbids input_image when continuing "
+                                    "with previous_response_id. Use the computer tool "
+                                    "for a fresh screenshot if you need pixels; the "
+                                    "accessibility and display text above is current.)"
+                                ),
+                            }
+                        tool_outputs.append(out)
                 else:
                     tool_outputs.append(
                         _handle_function_call(
@@ -1073,11 +1204,38 @@ def run(
                             ask_user_bridge=ask_user_bridge,
                             auto=auto,
                             voice=voice,
+                            audio_client=audio_client,
                         )
                     )
 
+            for call in desktop_calls:
+                outputs = _handle_desktop_actions(
+                    desktop,
+                    call,
+                    auto,
+                    log,
+                    client=audio_client,
+                    voice=voice,
+                )
+                if outputs is None:
+                    log.finish("aborted", "User skipped a desktop action batch.")
+                    return "aborted"
+                tool_outputs.extend(outputs)
+                for item in outputs:
+                    if isinstance(item, dict) and item.get("role") == "user":
+                        for part in item.get("content") or []:
+                            if (
+                                isinstance(part, dict)
+                                and part.get("type") == "input_image"
+                            ):
+                                url = str(part.get("image_url") or "")
+                                if url.startswith("data:image/png;base64,"):
+                                    last_shot_b64 = url.split(",", 1)[1]
+
             for call in computer_calls:
-                output = _handle_computer_call(desktop, call, auto, log, client=client, voice=voice)
+                output = _handle_computer_call(
+                    desktop, call, auto, log, client=audio_client, voice=voice
+                )
                 if output is None:
                     log.finish("aborted", "User skipped a computer action batch.")
                     return "aborted"
@@ -1095,7 +1253,7 @@ def run(
                 from speaker_output import speaker_output_block
 
                 audio_now = speaker_output_block()
-                if audio_now and computer_calls:
+                if audio_now and gui_turns:
                     next_input.append(_user_input_item(audio_now))
             except Exception:
                 pass
@@ -1107,8 +1265,8 @@ def run(
                     flush=True,
                 )
 
-            # Periodic coach after every EVAL_EVERY computer turns.
-            if EVAL_EVERY > 0 and computer_calls and steps % EVAL_EVERY == 0:
+            # Periodic coach after every EVAL_EVERY GUI turns.
+            if EVAL_EVERY > 0 and gui_turns and steps % EVAL_EVERY == 0:
                 tip = coach_agent(
                     client,
                     task=task,
@@ -1119,11 +1277,13 @@ def run(
                 if tip:
                     next_input.append(_user_input_item(tip))
 
-            response = client.responses.create(
+            response = _continue_response(
+                client,
                 model=model,
-                tools=agent_tools(),
-                previous_response_id=response.id,
-                input=next_input,
+                tools=tools,
+                response=response,
+                next_input=next_input,
+                provider=provider,
             )
 
         print(f"\nStopped: hit max-steps ({max_steps}) without finishing.")
@@ -1136,7 +1296,7 @@ def run(
     except TaskMarkedDone as e:
         print(f"\nDone — {e.summary}")
         if voice:
-            speak_later(client, "Done.")
+            speak_later(audio_client, "Done.")
         log.finish("completed", e.summary)
         maybe_create_skill(client, log, voice=voice)
         maybe_save_recipe(client, log, task)

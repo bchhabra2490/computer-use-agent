@@ -3,7 +3,7 @@ macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
 Click for a menu with Send (while listening), Add Memory, Log Overlay, Face Overlay,
-Mark Task Done, logs, and quit.
+Chat (⌘⌃C), Sleep (⌘⌃S), Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -32,12 +32,16 @@ from app_status import (
     read_status,
     request_mark_done,
     request_cancel,
+    request_listen,
     request_send,
     set_face_overlay_enabled,
     set_overlay_enabled,
+    set_chat_overlay_enabled,
     set_tray_pid,
     signal_quit_orchestrator,
+    sleep_mode_enabled,
     status_label,
+    toggle_sleep_mode,
 )
 from task_log import LOGS_DIR
 
@@ -58,6 +62,36 @@ STATE_GLYPH = {
 }
 
 
+def _tray_script_path() -> Path:
+    return Path(__file__).resolve()
+
+
+def _iter_orphan_tray_pids(*, exclude: int | None = None) -> list[int]:
+    """Find leftover ``status_tray.py`` processes for this checkout."""
+    script = str(_tray_script_path())
+    out: list[int] = []
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return out
+    me = os.getpid()
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid == me or (exclude is not None and pid == exclude):
+            continue
+        if pid_alive(pid):
+            out.append(pid)
+    return out
+
+
 def ensure_tray_running() -> subprocess.Popen | None:
     """
     Spawn the menu-bar process if not already running and STATUS_TRAY is enabled.
@@ -73,49 +107,39 @@ def ensure_tray_running() -> subprocess.Popen | None:
     try:
         data = read_status()
         tray_pid = data.get("tray_pid")
-        if isinstance(tray_pid, int) and tray_pid > 0:
-            try:
-                os.kill(tray_pid, 0)
-                return None
-            except OSError:
-                pass
+        if pid_alive(tray_pid):
+            return None
     except Exception:
         pass
 
-    script = Path(__file__).resolve()
+    script = _tray_script_path()
     env = os.environ.copy()
     env["STATUS_TRAY_CHILD"] = "1"
+    # Don't poison Electron (started by the tray) into Node mode.
+    env.pop("ELECTRON_RUN_AS_NODE", None)
     try:
+        from app_status import RUNTIME_DIR
+
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = RUNTIME_DIR / "tray.log"
+        log_f = open(log_path, "a", encoding="utf-8", buffering=1)
+        log_f.write(f"\n--- tray spawn {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        log_f.flush()
         proc = subprocess.Popen(
             [sys.executable, str(script)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
             env=env,
         )
-        print(f"[tray] started menu-bar status (pid={proc.pid})", flush=True)
+        print(f"[tray] started menu-bar status (pid={proc.pid}) log={log_path}", flush=True)
         return proc
     except Exception as e:
         print(f"[tray] failed to start: {e}", file=sys.stderr)
         return None
 
 
-def stop_tray(*, wait: float = 1.5) -> None:
-    """Ask the menu-bar process to close its NSPanel and exit."""
-    if os.environ.get("STATUS_TRAY_CHILD", "").strip() == "1":
-        return
-    try:
-        pid = read_status().get("tray_pid")
-    except Exception:
-        return
-    if not pid_alive(pid):
-        return
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return
-    if pid == os.getpid():
-        return
+def _kill_pid(pid: int, *, wait: float) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
@@ -123,12 +147,52 @@ def stop_tray(*, wait: float = 1.5) -> None:
     deadline = time.monotonic() + max(0.0, wait)
     while time.monotonic() < deadline:
         if not pid_alive(pid):
-            try:
-                set_tray_pid(None)
-            except Exception:
-                pass
             return
         time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    time.sleep(0.1)
+
+
+def stop_tray(*, wait: float = 2.0) -> None:
+    """Ask the menu-bar process to close overlays and exit; SIGKILL if needed."""
+    if os.environ.get("STATUS_TRAY_CHILD", "").strip() == "1":
+        return
+    targets: list[int] = []
+    try:
+        raw = read_status().get("tray_pid")
+        if raw is not None:
+            pid = int(raw)
+            if pid != os.getpid() and pid_alive(pid):
+                targets.append(pid)
+    except (TypeError, ValueError, Exception):
+        pass
+    for orphan in _iter_orphan_tray_pids(exclude=os.getpid()):
+        if orphan not in targets:
+            targets.append(orphan)
+    if not targets:
+        try:
+            set_tray_pid(None)
+        except Exception:
+            pass
+        return
+    for pid in targets:
+        print(f"[tray] stopping menu-bar status (pid={pid})", flush=True)
+        _kill_pid(pid, wait=wait)
+    try:
+        set_tray_pid(None)
+    except Exception:
+        pass
+    # Face/log panels die with the tray process; clear any stragglers.
+    for orphan in _iter_orphan_tray_pids(exclude=os.getpid()):
+        print(f"[tray] killing leftover tray (pid={orphan})", flush=True)
+        _kill_pid(orphan, wait=0.5)
+    try:
+        set_tray_pid(None)
+    except Exception:
+        pass
 
 
 def _add_memory_from_tray() -> None:
@@ -168,7 +232,9 @@ def _add_memory_from_tray() -> None:
     threading.Thread(target=_describe_and_save, name="tray-add-memory", daemon=True).start()
 
 
-def _glyph_for(state: str) -> str:
+def _glyph_for(state: str, data: dict | None = None) -> str:
+    if data is not None and data.get("sleep_mode"):
+        return "☾"
     key = (state or "idle").lower().strip()
     if key in STATE_GLYPH:
         return STATE_GLYPH[key]
@@ -254,6 +320,67 @@ def main() -> None:
             self.lastSig = None
             self.overlay = None
             self.face = None
+            self._hotkeyAt = 0.0
+            self._hotkeyMonitors = []
+            try:
+                from AppKit import (  # type: ignore
+                    NSEvent,
+                    NSEventMaskKeyDown,
+                    NSEventModifierFlagCommand,
+                    NSEventModifierFlagOption,
+                    NSEventModifierFlagControl,
+                    NSEventModifierFlagShift,
+                )
+
+                cmd = int(NSEventModifierFlagCommand)
+                opt = int(NSEventModifierFlagOption)
+                shift = int(NSEventModifierFlagShift)
+                ctrl = int(NSEventModifierFlagControl)
+                owner = self
+
+                def _global_hotkey(event):
+                    # ⌘⌃C = chat toggle (avoids Chrome Inspect ⌘⌥C)
+                    # ⌘⌃S = sleep toggle; ⌘⌃J = listen without wake word.
+                    try:
+                        flags = int(event.modifierFlags())
+                        # Ignore Caps Lock / Fn bits; only care about cmd/opt/ctrl/shift.
+                        mods = flags & (cmd | opt | shift | ctrl)
+                        chars = (event.charactersIgnoringModifiers() or "").lower()
+                        now = time.monotonic()
+                        if now - float(getattr(owner, "_hotkeyAt", 0.0) or 0.0) < 0.45:
+                            if chars in {"c", "s", "j"} and mods == (cmd | ctrl):
+                                return None
+                            return event
+                        if chars == "c" and mods == (cmd | ctrl):
+                            owner._hotkeyAt = now
+                            owner.toggleChat_(None)
+                            return None
+                        if chars == "s" and mods == (cmd | ctrl):
+                            owner._hotkeyAt = now
+                            owner.toggleSleep_(None)
+                            return None
+                        if chars == "j" and mods == (cmd | ctrl):
+                            owner._hotkeyAt = now
+                            owner.listenNow_(None)
+                            return None
+                        return event
+                    except Exception:
+                        return event
+
+                g = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    NSEventMaskKeyDown, _global_hotkey
+                )
+                loc = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                    NSEventMaskKeyDown, _global_hotkey
+                )
+                self._hotkeyMonitors = [m for m in (g, loc) if m is not None]
+                print(
+                    "[tray] hotkeys ⌘⌃C (chat) · ⌘⌃S (sleep) · "
+                    "⌘⌃J (listen) armed",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[tray] hotkeys unavailable: {e}", flush=True)
             try:
                 from log_overlay import OVERLAY_HIDE_NOTE, OVERLAY_SHOW_NOTE
 
@@ -292,6 +419,12 @@ def main() -> None:
                     face.destroy()
                 except Exception:
                     pass
+            try:
+                from chat_overlay import stop_chat_app
+
+                stop_chat_app()
+            except Exception:
+                pass
 
         def applicationWillTerminate_(self, _notif) -> None:
             self.teardownOverlay()
@@ -351,6 +484,8 @@ def main() -> None:
                 f"{data.get('send_requested')}|{data.get('cancel_requested')}|"
                 f"{data.get('overlay_hidden')}|"
                 f"{data.get('overlay_enabled')}|{data.get('face_overlay_enabled')}|"
+                f"{data.get('chat_overlay_enabled')}|"
+                f"{data.get('sleep_mode')}|"
                 f"{data.get('tts_playing')}|{data.get('tts_play_depth')}|"
                 f"{data.get('orchestrator_pid')}|"
                 f"{data.get('agent_pid')}"
@@ -377,17 +512,31 @@ def main() -> None:
         def applyStatus(self, data: dict) -> None:
             button = self.statusItem.button()
             if button is not None:
-                glyph = _glyph_for(str(data.get("state") or "idle"))
+                glyph = _glyph_for(str(data.get("state") or "idle"), data)
                 if button.image() is None:
                     button.setTitle_(glyph)
                 button.setToolTip_(format_tooltip(data))
             self.rebuildMenu(data)
-            self.syncOverlay(data)
-            self.syncFace(data)
+            try:
+                self.syncOverlay(data)
+            except Exception as e:
+                print(f"[tray] log overlay sync failed: {e}", flush=True)
+            try:
+                self.syncFace(data)
+            except Exception as e:
+                print(f"[tray] face sync failed: {e}", flush=True)
+            try:
+                self.syncChat(data)
+            except Exception as e:
+                print(f"[tray] chat sync failed: {e}", flush=True)
 
         @objc.python_method
         def syncOverlay(self, data: dict) -> None:
-            from log_overlay import LogOverlay, overlay_enabled
+            try:
+                from log_overlay import LogOverlay, overlay_enabled
+            except Exception as e:
+                print(f"[tray] log overlay import failed: {e}", flush=True)
+                return
 
             want = overlay_enabled(data)
             if want and getattr(self, "overlay", None) is None:
@@ -412,7 +561,11 @@ def main() -> None:
 
         @objc.python_method
         def syncFace(self, data: dict) -> None:
-            from face_overlay import FaceOverlay, face_overlay_enabled
+            try:
+                from face_overlay import FaceOverlay, face_overlay_enabled
+            except Exception as e:
+                print(f"[tray] face overlay import failed: {e}", flush=True)
+                return
 
             want = face_overlay_enabled(data)
             if want and getattr(self, "face", None) is None:
@@ -434,6 +587,12 @@ def main() -> None:
                     face.apply_status(data)
                 except Exception:
                     pass
+
+        @objc.python_method
+        def syncChat(self, data: dict) -> None:
+            from chat_overlay import sync_chat_app
+
+            sync_chat_app(data)
 
         @objc.python_method
         def rebuildMenu(self, data: dict) -> None:
@@ -572,6 +731,7 @@ def main() -> None:
 
             from log_overlay import overlay_enabled as overlay_is_on
             from face_overlay import face_overlay_enabled as face_is_on
+            from chat_overlay import chat_overlay_enabled as chat_is_on
 
             overlay_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Log Overlay",
@@ -590,6 +750,25 @@ def main() -> None:
             face_item.setTarget_(self)
             face_item.setState_(1 if face_is_on(data) else 0)
             self.menu.addItem_(face_item)
+
+            chat_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Chat ⌘⌃C",
+                "toggleChat:",
+                "",
+            )
+            chat_item.setTarget_(self)
+            chat_item.setState_(1 if chat_is_on(data) else 0)
+            self.menu.addItem_(chat_item)
+
+            sleep_on = sleep_mode_enabled(data)
+            sleep_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Sleep (ignore wake) ⌘⌃S",
+                "toggleSleep:",
+                "",
+            )
+            sleep_item.setTarget_(self)
+            sleep_item.setState_(1 if sleep_on else 0)
+            self.menu.addItem_(sleep_item)
 
             if agents:
                 mark_all = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -681,6 +860,35 @@ def main() -> None:
             set_face_overlay_enabled(not face_overlay_enabled(data))
             self.applyStatus(read_status())
 
+        def toggleChat_(self, _sender) -> None:
+            from chat_overlay import chat_overlay_enabled, ensure_chat_bridge_and_app, hide_chat_app
+
+            data = read_status()
+            on = not chat_overlay_enabled(data)
+            set_chat_overlay_enabled(on)
+            status_log("Chat window on" if on else "Chat window off")
+            print("[tray] chat on (Electron)" if on else "[tray] chat off", flush=True)
+            if on:
+                ensure_chat_bridge_and_app(focus=True)
+            else:
+                hide_chat_app()
+            self.applyStatus(read_status())
+
+        def toggleSleep_(self, _sender) -> None:
+            on = toggle_sleep_mode()
+            status_log("Sleep on — wake word ignored" if on else "Sleep off — listening")
+            print(
+                "[tray] sleep on" if on else "[tray] sleep off",
+                flush=True,
+            )
+            self.applyStatus(read_status())
+
+        def listenNow_(self, _sender) -> None:
+            data = read_status()
+            if bool(data.get("stt_active")):
+                return
+            request_listen()
+
         def sendAudio_(self, _sender) -> None:
             data = read_status()
             listening = bool(data.get("stt_active")) or str(
@@ -717,6 +925,10 @@ def main() -> None:
                 pass
             NSApplication.sharedApplication().terminate_(None)
 
+        def quitFromSignal_(self, _sender) -> None:
+            """Main-thread entry for SIGTERM/SIGINT (see _signal_quit)."""
+            self.quitTray_(None)
+
     set_tray_pid(os.getpid())
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
@@ -726,12 +938,27 @@ def main() -> None:
     app.setDelegate_(_TRAY_CONTROLLER)
 
     def _signal_quit(_signum=None, _frame=None) -> None:
-        # Close the panel on the AppKit thread, then terminate.
-        NSApplication.sharedApplication().performSelectorOnMainThread_withObject_waitUntilDone_(
-            "terminate:",
-            None,
-            False,
-        )
+        # Never call AppKit teardown directly from a signal handler — schedule
+        # quitTray on the main run loop so the face panel is destroyed first.
+        ctrl = _TRAY_CONTROLLER
+        if ctrl is not None:
+            try:
+                ctrl.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "quitFromSignal:",
+                    None,
+                    False,
+                )
+                return
+            except Exception:
+                pass
+        try:
+            NSApplication.sharedApplication().performSelectorOnMainThread_withObject_waitUntilDone_(
+                "terminate:",
+                None,
+                False,
+            )
+        except Exception:
+            os._exit(0)
 
     try:
         signal.signal(signal.SIGTERM, _signal_quit)

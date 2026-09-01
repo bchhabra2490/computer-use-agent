@@ -48,14 +48,27 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from llm_client import (
+    fold_orphan_tool_outputs,
+    input_has_image,
+    make_llm_client,
+    merge_tool_followup_input,
+    model_for_request,
+    orchestrator_provider,
+    supports_previous_response_id,
+)
+
 import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
     active_agents,
     clear_phone_photo,
+    consume_cancel,
+    consume_listen,
     consume_utterance,
     is_mark_done_utterance,
     log_llm,
+    listen_pending,
     mark_done_pending,
     phone_photo_jpeg,
     phone_photo_pending,
@@ -64,10 +77,17 @@ from app_status import (
     remove_agent,
     request_mark_done,
     request_quit,
+    reply_sink,
+    reply_to_chat,
+    reply_tts_enabled,
+    chat_text_only,
+    set_chat_stream,
     set_last_spoken,
     set_reply_sink,
+    set_turn_source,
     speak_pending,
     consume_speak,
+    take_turn_chat_screenshot,
     unregister_orchestrator,
     upsert_agent,
     utterance_pending,
@@ -97,7 +117,7 @@ from mcp_client import (
     start_mcp,
     stop_mcp,
 )
-from orchestrator_prompts import build_system_prompt
+from orchestrator_prompts import build_system_prompt, local_datetime_line
 from session import Session, bind_session, get_session
 from session_compact import (
     SessionCompactState,
@@ -181,7 +201,10 @@ def is_fatal_llm_error(exc: BaseException) -> bool:
 
 
 def llm_error_speech(exc: BaseException) -> str:
-    """Short spoken form of an OpenAI error (no URLs)."""
+    """Short spoken form of a reasoning-API error (no URLs)."""
+    if isinstance(exc, LlmUnavailableError):
+        text = str(exc).strip()
+        return text or "The language model could not complete that."
     blob = _exception_blob(exc)
     match = re.search(r"['\"]message['\"]\s*:\s*['\"]([^'\"]+)['\"]", blob)
     if match:
@@ -192,13 +215,15 @@ def llm_error_speech(exc: BaseException) -> str:
     lower = blob.lower()
     if any(m in lower for m in _CREDIT_MARKERS):
         return "You have no credits remaining. Add credits to continue using the API."
+    provider = orchestrator_provider()
+    vendor = "DeepSeek" if provider == "deepseek" else "OpenAI"
     if any(m in lower for m in _AUTH_MARKERS):
-        return "The OpenAI API key is invalid. Check your environment file."
+        return f"The {vendor} API key is invalid. Check your environment file."
     brief = re.sub(r"https?://\S+", "", str(exc))
     brief = re.sub(r"\s+", " ", brief).strip()
     if len(brief) > 180:
         brief = brief[:177].rstrip() + "…"
-    return f"I hit an OpenAI error. {brief}" if brief else "I hit an OpenAI error and could not complete that."
+    return f"I hit a {vendor} error. {brief}" if brief else f"I hit a {vendor} error and could not complete that."
 
 
 _phone_photo_in_session = False
@@ -225,6 +250,7 @@ class AgentJob:
         self.thread: threading.Thread | None = None
         self.redirected_from_barge = False
         self.log_dir: str | None = None
+        self.reply_sink: str = "mac"
         self.feedback_payload: dict[str, Any] | None = None
 
     @property
@@ -291,7 +317,7 @@ def _history_note(
     photo: bool = False,
     desktop_context: str = "",
 ) -> str:
-    prefix = ""
+    prefix = local_datetime_line() + "\n\n"
     if photo:
         prefix = (
             "The user sent a photo from their phone camera (image attached). "
@@ -308,6 +334,13 @@ def _history_note(
         + f"Computer task history so far:\n"
         + _format_task_history(task_history, task_summary=task_summary)
     )
+
+
+_CHAT_SCREENSHOT_CONTEXT = (
+    "The user attached a screenshot from the chat app (only the displays they "
+    "selected). Use the image. No accessibility tree or extra desktop capture "
+    "is included with this message."
+)
 
 
 def _user_turn_input(
@@ -491,6 +524,7 @@ def _create_response(
     client: OpenAI,
     *,
     llm_tts: Any | None = None,
+    prior_response: Any | None = None,
     **kwargs: Any,
 ):
     """
@@ -500,8 +534,32 @@ def _create_response(
     arguments are fed into LowLatencyTTS as they arrive. Falls back to a
     non-streaming create on error, except quota/auth failures which are spoken
     instead of retried.
+
+    DeepSeek is stateless: ``previous_response_id`` is ignored by their API, so
+    tool follow-ups must include the ``function_call`` items next to the outputs
+    (pass ``prior_response``).
     """
-    use_stream = bool(llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
+    kwargs["model"] = model_for_request(
+        kwargs.get("model") or MODEL,
+        has_image=input_has_image(kwargs.get("input")),
+    )
+    if not supports_previous_response_id(
+        kwargs["model"],
+        provider=os.environ.get("ORCHESTRATOR_BACKEND"),
+    ):
+        kwargs.pop("previous_response_id", None)
+        if prior_response is not None:
+            kwargs["input"] = merge_tool_followup_input(
+                prior_response, kwargs.get("input")
+            )
+        kwargs["input"] = fold_orphan_tool_outputs(kwargs.get("input"))
+    if llm_tts is not None and not reply_tts_enabled():
+        llm_tts = None
+    stream_to_chat = reply_to_chat()
+    use_stream = bool(
+        stream_to_chat
+        or (llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
+    )
     if not use_stream:
         return _sync_create_response(client, kwargs)
 
@@ -538,11 +596,15 @@ def _create_response(
             return
         if not _is_give_response(meta):
             return
-        if meta.get("call_id"):
+        if llm_tts is not None and meta.get("call_id"):
             llm_tts.bind_call(response_id, str(meta["call_id"]))
         decoded = decoded_message_prefix(meta.get("arguments") or "")
         if len(decoded) > streamed_msg_len:
-            llm_tts.add_text_chunk(decoded[streamed_msg_len:])
+            chunk = decoded[streamed_msg_len:]
+            if llm_tts is not None:
+                llm_tts.add_text_chunk(chunk)
+            if stream_to_chat:
+                set_chat_stream(decoded)
             streamed_msg_len = len(decoded)
 
     try:
@@ -550,7 +612,8 @@ def _create_response(
             etype = getattr(event, "type", None)
             if etype == "response.created":
                 response_id = event.response.id
-                llm_tts.start_stream(response_id)
+                if llm_tts is not None:
+                    llm_tts.start_stream(response_id)
                 print(f"[orchestrator] streaming response {response_id}", flush=True)
             elif etype == "response.output_item.added":
                 item = event.item
@@ -560,7 +623,12 @@ def _create_response(
                         "call_id": getattr(item, "call_id", "") or "",
                         "arguments": getattr(item, "arguments", None) or "",
                     }
-                    if response_id and items[item.id]["name"] == "give_response_to_user" and items[item.id]["call_id"]:
+                    if (
+                        llm_tts is not None
+                        and response_id
+                        and items[item.id]["name"] == "give_response_to_user"
+                        and items[item.id]["call_id"]
+                    ):
                         llm_tts.bind_call(response_id, items[item.id]["call_id"])
             elif etype == "response.function_call_arguments.delta":
                 meta = items.get(event.item_id)
@@ -604,6 +672,19 @@ def _create_response(
                         _feed_message_growth(meta)
             elif etype == "response.completed":
                 final_response = event.response
+                # DeepSeek/stream often omits call_id on the completed payload;
+                # copy ids gathered from earlier stream events.
+                if final_response is not None and items:
+                    for item in getattr(final_response, "output", None) or []:
+                        if getattr(item, "type", None) != "function_call":
+                            continue
+                        meta = items.get(getattr(item, "id", None)) or {}
+                        cid = meta.get("call_id") or ""
+                        if cid and not getattr(item, "call_id", None):
+                            try:
+                                item.call_id = cid
+                            except Exception:
+                                pass
             elif etype == "response.failed":
                 print(f"[orchestrator] stream failed: {event}", flush=True)
     except Exception as e:
@@ -644,6 +725,8 @@ def _create_response(
             llm_tts.add_text_chunk(give_response_text[streamed_msg_len:])
             streamed_msg_len = len(give_response_text)
         llm_tts.stop_stream()
+    elif stream_to_chat and give_response_text:
+        set_chat_stream(give_response_text, done=False, force=True)
 
     return final_response
 
@@ -746,6 +829,9 @@ def _launch_agent_job(
         match_text=spec.match_text,
         speaker_context=speaker_context,
     )
+    job.reply_sink = reply_sink()
+    if job.reply_sink == "phone":
+        print("[orchestrator] task output → phone", flush=True)
     job.redirected_from_barge = redirected_from_barge
     _start_agent_thread(job, auto=auto, max_steps=max_steps, ask_bridge=ask_bridge)
     _speak_later(client, "Starting that now.")
@@ -860,16 +946,66 @@ def _save_screen_now(client: OpenAI, hint: str) -> str:
         return msg
 
 
-def _speak(client: OpenAI, text: str) -> str | None:
+def _wait_for_chat_reply() -> str:
+    """Block until the user sends the next chat message."""
+    timeout = float(os.environ.get("CHAT_ASK_TIMEOUT_SEC", "600"))
+    deadline = time.monotonic() + max(1.0, timeout)
+    print("[orchestrator] waiting for chat reply…", flush=True)
+    while time.monotonic() < deadline:
+        if quit_requested() or consume_cancel():
+            return "The user cancelled. Do not assume an answer."
+        if utterance_pending():
+            text = consume_utterance()
+            if text:
+                print(f'[orchestrator] chat answer: "{text}"', flush=True)
+                return text
+        time.sleep(0.15)
+    return "No chat reply arrived in time. Ask again if needed."
+
+
+def _prompt_for_answer(client: OpenAI, question: str) -> str:
+    """Speak or post a question, then wait for the user's answer."""
+    question = (question or "").strip()
+    if not question:
+        return "Error: empty question"
+    if chat_text_only():
+        set_last_spoken(question)
+        return _wait_for_chat_reply()
+    print(f"\n[ask_user] {question}")
+    interrupted = _speak(client, question, user_reply=True)
+    if not interrupted:
+        time.sleep(POST_TTS_COOLDOWN)
+    try:
+        return _listen_for_answer(client)
+    except Exception as e:
+        from stt import ListenCancelled
+
+        if isinstance(e, ListenCancelled):
+            return "The user cancelled listening. Do not assume an answer."
+        raise
+
+
+def _speak(
+    client: OpenAI,
+    text: str,
+    *,
+    user_reply: bool = False,
+    publish_to_chat: bool = True,
+) -> str | None:
     """
     Speak `text`. If the user barges in (wake word or keyboard), stop and listen.
 
     Returns the spoken command on barge-in, or None if playback finished normally.
+    When reply TTS is off (chat mute), still records user-facing replies for chat
+    when ``user_reply`` is True (give_response / ask_user).
     """
     if not text:
         return None
     log_llm(text, source="tts")
-    set_last_spoken(text)
+    if user_reply or not chat_text_only():
+        set_last_spoken(text, enqueue_chat=publish_to_chat)
+    if not reply_tts_enabled():
+        return None
     audio = get_audio()
     if audio is not None:
         return audio.speak(text)
@@ -882,12 +1018,15 @@ def _speak(client: OpenAI, text: str) -> str | None:
     return None
 
 
-def _speak_later(client: OpenAI, text: str) -> None:
+def _speak_later(client: OpenAI, text: str, *, user_reply: bool = False) -> None:
     """Start TTS without blocking the agent / tool loop."""
     if not text:
         return
     log_llm(text, source="tts")
-    set_last_spoken(text)
+    if user_reply or not chat_text_only():
+        set_last_spoken(text)
+    if not reply_tts_enabled():
+        return
     audio = get_audio()
     if audio is not None:
         audio.speak_later(text)
@@ -924,7 +1063,7 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
 
     If the user barges in during that line, return their new command (no second confirm).
     """
-    if not utterance or not _confirm_heard_enabled():
+    if not utterance or not _confirm_heard_enabled() or not reply_tts_enabled():
         return utterance
     line = _heard_confirm_line(utterance)
     if not line:
@@ -936,8 +1075,9 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
     return utterance
 
 
-def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | None:
+def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: OpenAI | None = None) -> str | None:
     """Look at a phone photo while a computer task is running (no start_task)."""
+    api = llm if llm is not None else client
     b64 = base64.b64encode(jpeg).decode("ascii")
     prompt = (
         "Look at this photo from the user's phone. "
@@ -946,8 +1086,8 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | 
     )
     get_session().enter("thinking", "Looking at phone photo")
     try:
-        response = client.responses.create(
-            model=MODEL,
+        response = api.responses.create(
+            model=model_for_request(MODEL, has_image=True),
             input=[
                 {
                     "role": "user",
@@ -972,6 +1112,49 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes) -> str | 
     return _speak(client, text)
 
 
+def _reply_to_chat_screenshot(
+    client: OpenAI,
+    utterance: str,
+    png: bytes,
+    *,
+    llm: OpenAI | None = None,
+) -> str | None:
+    """Look at a chat-attached screenshot while a computer task is running."""
+    api = llm if llm is not None else client
+    b64 = base64.b64encode(png).decode("ascii")
+    prompt = (
+        "Look at this screenshot the user attached from chat (selected displays only). "
+        f"They said: {utterance}\n"
+        "Reply in 2-5 spoken sentences. No markdown, no file paths."
+    )
+    get_session().enter("thinking", "Looking at chat screenshot")
+    try:
+        response = api.responses.create(
+            model=model_for_request(MODEL, has_image=True),
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{b64}",
+                            "detail": "high",
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        print(f"[orchestrator] chat screenshot vision failed: {e}", flush=True)
+        return _speak(client, "I could not look at that screenshot.")
+    text = _strip_wait_filler(_assistant_message_text(response))
+    if not text:
+        return _speak(client, "I could not make out that screenshot.")
+    log_llm(text, source="llm")
+    return _speak(client, text)
+
+
 def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     """If the agent is waiting on ask_user, speak/listen and reply. Returns True if handled."""
     req = ask_bridge.poll(timeout=0)
@@ -982,7 +1165,9 @@ def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
     print(f"\n[orchestrator] agent ask_user: {question}")
     audio = get_audio()
     try:
-        if audio is not None:
+        if chat_text_only():
+            answer = _prompt_for_answer(client, question)
+        elif audio is not None:
             answer = audio.ask(question)
         else:
             get_session().enter_and_log("ask", f"Agent asks: {question[:160]}")
@@ -1026,6 +1211,8 @@ def _listen_command(
     get_session().enter("waiting", wake_prompt or f"Waiting for {format_wake_phrases()}")
 
     def _stop() -> bool:
+        if listen_pending():
+            return True
         if utterance_pending():
             return True
         if speak_pending():
@@ -1043,7 +1230,31 @@ def _listen_command(
     if queued:
         _clear_speaker_tag()
         return queued
+    shortcut = consume_listen()
+    if shortcut:
+        get_session().enter_and_log("listening", "Keyboard shortcut heard — listening")
+        try:
+            utterance = listen_for_utterance(client, prompt=listen_prompt or "Listening…")
+        except Exception as e:
+            print(f"[orchestrator] shortcut listen failed: {e}", flush=True)
+            return None
+        set_reply_sink("mac")
+        set_turn_source("voice")
+        return strip_wake_prefix(utterance).strip() or None
     if not wait_for_wake(should_stop=_stop, prompt=wake_prompt):
+        if consume_listen():
+            get_session().enter_and_log("listening", "Keyboard shortcut heard — listening")
+            try:
+                utterance = listen_for_utterance(
+                    client,
+                    prompt=listen_prompt or "Listening…",
+                )
+            except Exception as e:
+                print(f"[orchestrator] shortcut listen failed: {e}", flush=True)
+                return None
+            set_reply_sink("mac")
+            set_turn_source("voice")
+            return strip_wake_prefix(utterance).strip() or None
         return consume_utterance()
     if quit_requested():
         return None
@@ -1054,6 +1265,7 @@ def _listen_command(
     if remainder:
         _clear_speaker_tag()
         set_reply_sink("mac")
+        set_turn_source("voice")
         return strip_wake_prefix(remainder).strip() or remainder
     try:
         utterance = listen_for_utterance(
@@ -1086,6 +1298,7 @@ def _listen_command(
                 print(f"[orchestrator] follow-up listen failed: {e}")
             return None
     set_reply_sink("mac")
+    set_turn_source("voice")
     return command or None
 
 
@@ -1096,6 +1309,7 @@ def _supervise_agent(
     ask_bridge: AskUserBridge,
     *,
     record_speaker: Callable[[], None] | None = None,
+    llm: OpenAI | None = None,
 ) -> str:
     """
     Main-thread loop while the agent thread runs.
@@ -1159,6 +1373,10 @@ def _supervise_agent(
             wake_prompt=f"Waiting for {format_wake_phrases()}… (agent busy)",
             listen_prompt="Listening for mid-task update…",
         )
+        if command:
+            job.reply_sink = reply_sink()
+        else:
+            set_reply_sink(job.reply_sink)
         if quit_requested():
             break
         if mark_done_pending(job.call_id):
@@ -1174,15 +1392,29 @@ def _supervise_agent(
                 print("[orchestrator] phone photo — answering without stopping the computer task")
                 print(f'\n[user] "{command}"')
                 status_log(f'[user] "{command}"')
-                barged = _reply_to_phone_photo(client, command, jpeg)
+                barged = _reply_to_phone_photo(client, command, jpeg, llm=llm)
                 if barged:
                     command = barged
                 else:
                     continue
         else:
-            command = _confirm_heard(client, command)
-            print(f'\n[user] "{command}"')
-            status_log(f'[user] "{command}"')
+            chat_shot = take_turn_chat_screenshot()
+            if chat_shot:
+                print(
+                    "[orchestrator] chat screenshot — answering without stopping the computer task",
+                    flush=True,
+                )
+                print(f'\n[user] "{command}"')
+                status_log(f'[user] "{command}"')
+                barged = _reply_to_chat_screenshot(client, command, chat_shot, llm=llm)
+                if barged:
+                    command = barged
+                else:
+                    continue
+            else:
+                command = _confirm_heard(client, command)
+                print(f'\n[user] "{command}"')
+                status_log(f'[user] "{command}"')
         if record_speaker is not None:
             record_speaker()
         low = command.lower().strip()
@@ -1202,7 +1434,7 @@ def _supervise_agent(
                 else:
                     _forward_to_agent(publisher, pending_cmd)
                     continue
-            result = _save_screen_now(client, command)
+            result = _save_screen_now(llm if llm is not None else client, command)
             ok = result.lower().startswith("saved")
             barged = _speak(client, "Saved." if ok else "Could not save the screen.")
             if barged:
@@ -1347,7 +1579,7 @@ def _handle_tool(
             else:
                 output = f"Spoke to user. end_session={end_session}"
         elif message:
-            barge = _speak(client, message)
+            barge = _speak(client, message, user_reply=True)
             if barge:
                 handled_barge = True
                 end_session = False
@@ -1379,10 +1611,14 @@ def _handle_tool(
         # here anyway, listen without a wake word so the user can answer.
         if not handled_barge and not end_session and message and _looks_like_question(message):
             print(
-                "[orchestrator] give_response asked a question — " "listening without wake word",
+                "[orchestrator] give_response asked a question — "
+                + ("waiting for chat reply" if chat_text_only() else "listening without wake word"),
                 flush=True,
             )
-            answer = _listen_for_answer(client)
+            if chat_text_only():
+                answer = _wait_for_chat_reply()
+            else:
+                answer = _listen_for_answer(client)
             output = (
                 f"Spoke to user, then captured their answer (no wake word): {answer}. "
                 "Continue with that answer. Further questions must use ask_user "
@@ -1396,7 +1632,7 @@ def _handle_tool(
         if not question:
             output = "Error: empty question"
         else:
-            output = ask_user(client, question)
+            output = _prompt_for_answer(client, question)
             print(f"[orchestrator] ask_user answer: {output}")
             if turn is not None:
                 turn.add("ask_user", f"Q: {question}\nA: {output}")
@@ -1479,6 +1715,7 @@ def _process_response(
     user_said: str = "",
     record_speaker: Callable[[], None] | None = None,
     compact_state: SessionCompactState | None = None,
+    llm: OpenAI | None = None,
 ) -> tuple[Any, bool, list[dict]]:
     """
     Drain tool calls on `response` until the model stops calling tools.
@@ -1488,6 +1725,7 @@ def _process_response(
     The third value is function_call_output items that must be sent on the
     next user turn when we already spoke and skipped a recap model call.
     """
+    api = llm if llm is not None else client
     end_session = False
     while True:
         # Only speech from *this* model response should suppress leftover TTS.
@@ -1503,15 +1741,20 @@ def _process_response(
             if leftover and _looks_like_question(leftover) and not spoke_this_response:
                 print(
                     "[orchestrator] model asked in a message instead of ask_user — "
-                    "speaking and listening without wake word",
+                    + (
+                        "posting to chat and waiting for reply"
+                        if chat_text_only()
+                        else "speaking and listening without wake word"
+                    ),
                     flush=True,
                 )
-                answer = ask_user(client, leftover)
+                answer = _prompt_for_answer(client, leftover)
                 if turn is not None:
                     turn.add("ask_user", f"Q: {leftover}\nA: {answer}")
                 response = _create_response(
-                    client,
+                    api,
                     llm_tts=llm_tts,
+                    prior_response=response,
                     model=MODEL,
                     tools=orchestrator_tools(),
                     previous_response_id=response.id,
@@ -1526,12 +1769,19 @@ def _process_response(
                 )
                 continue
             if leftover and not spoke_this_response:
-                print(
-                    "[orchestrator] model replied with a message instead of "
-                    "give_response_to_user — speaking it in the background",
-                    flush=True,
-                )
-                _speak_later(client, leftover)
+                if chat_text_only():
+                    print(
+                        "[orchestrator] model plain message ignored in chat-text mode "
+                        "(use give_response_to_user)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[orchestrator] model replied with a message instead of "
+                        "give_response_to_user — speaking it in the background",
+                        flush=True,
+                    )
+                    _speak_later(client, leftover)
             elif leftover and spoke_this_response:
                 print(
                     "[orchestrator] skipping leftover message " "(already spoke this response)",
@@ -1578,11 +1828,12 @@ def _process_response(
                 publisher,
                 ask_bridge,
                 record_speaker=record_speaker,
+                llm=api,
             )
             task_history.append({"task": deferred_job.task, "result": result})
             if compact_state is not None:
                 cp = run_orchestrator_checkpoint(
-                    client,
+                    api,
                     compact_state,
                     task_history,
                     capture_desktop=False,
@@ -1636,14 +1887,21 @@ def _process_response(
                 "[orchestrator] already spoke — not asking the model to recap",
                 flush=True,
             )
+            # DeepSeek cannot carry orphan tool outputs into the next user turn
+            # (previous_response_id is ignored). OpenAI keeps them for the chain.
+            if not supports_previous_response_id(
+                MODEL, provider=os.environ.get("ORCHESTRATOR_BACKEND")
+            ):
+                return response, end_session, []
             return response, end_session, outputs
 
         if not outputs:
             return response, end_session, []
 
         response = _create_response(
-            client,
+            api,
             llm_tts=llm_tts,
+            prior_response=response,
             model=MODEL,
             tools=orchestrator_tools(),
             previous_response_id=response.id,
@@ -1665,17 +1923,49 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     sess = Session()
     bind_session(sess)
 
+    def _shutdown_side_processes() -> None:
+        # Signal handlers may raise SystemExit without unwinding ``finally``.
+        # Tear down tray/face here so Ctrl+C always clears the menu bar.
+        try:
+            stop_phone_gateway()
+        except Exception:
+            pass
+        try:
+            stop_tray()
+        except Exception:
+            pass
+        try:
+            stop_dictation()
+        except Exception:
+            pass
+
     def _on_term(_signum=None, _frame=None) -> None:
         request_quit()
         print("\n[orchestrator] stop signal — shutting down…", flush=True)
+        _shutdown_side_processes()
         raise SystemExit(0)
 
     try:
         signal.signal(signal.SIGTERM, _on_term)
+        signal.signal(signal.SIGINT, _on_term)
+    except Exception:
+        pass
+    try:
+        import atexit
+
+        atexit.register(_shutdown_side_processes)
     except Exception:
         pass
 
     client = OpenAI()
+    llm = make_llm_client(
+        model=MODEL,
+        provider=os.environ.get("ORCHESTRATOR_BACKEND"),
+    )
+    print(
+        f"[orchestrator] reasoning={orchestrator_provider()} model={MODEL}",
+        flush=True,
+    )
     audio = AudioSession(client, session=sess)
     bind_audio(audio)
     llm_tts = None
@@ -1728,6 +2018,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         pending = _speak(
             client,
             "Ready. Say the wake word, then tell me what you need.",
+            publish_to_chat=False,
         )
         if pending is None:
             audio.cooldown()
@@ -1755,6 +2046,12 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 print("[orchestrator] quit requested from menu bar.")
                 sess.enter_and_log("done", "Quit from menu bar")
                 return
+
+            # Tray owns the menu bar + face; respawn if it died mid-session.
+            try:
+                ensure_tray_running()
+            except Exception:
+                pass
 
             if pending is not None:
                 utterance = pending
@@ -1804,7 +2101,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if barged:
                     pending = barged
                     continue
-                result = _save_screen_now(client, utterance)
+                result = _save_screen_now(llm, utterance)
                 ok = result.lower().startswith("saved")
                 barged = _speak(client, "Saved." if ok else "Could not save the screen.")
                 if barged:
@@ -1827,14 +2124,18 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 if jpeg:
                     _phone_photo_in_session = True
 
+            # Chat-attached shot: use only the displays the user selected — no
+            # live desktop screenshot / accessibility dump for this turn.
+            chat_shot = take_turn_chat_screenshot()
+
             compact_state.begin_turn()
             emit("turn_start", lane="main", utterance=utterance[:160])
             cp = run_orchestrator_checkpoint(
-                client,
+                llm,
                 compact_state,
                 task_history,
                 pending_fn_outputs=pending_fn_outputs or None,
-                capture_desktop=True,
+                capture_desktop=not bool(chat_shot),
             )
             task_history = cp.task_history
             if cp.reset_thread:
@@ -1845,15 +2146,26 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     utterance = f"{utterance} {extras}".strip() if utterance else extras
                     print(f"[orchestrator] applied next_run queue: {extras!r}", flush=True)
 
-            desktop = cp.desktop
+            if chat_shot:
+                desktop_context = _CHAT_SCREENSHOT_CONTEXT
+                desktop_png = chat_shot
+                print(
+                    f"[orchestrator] chat screenshot attached "
+                    f"({len(chat_shot) / 1024.0:.0f} KB); skipped live desktop/AX",
+                    flush=True,
+                )
+            else:
+                desktop = cp.desktop
+                desktop_context = desktop.text
+                desktop_png = desktop.screenshot_png
             turn_input = _user_turn_input(
                 utterance,
                 task_history,
                 task_summary=compact_state.task_summary,
                 pending_fn_outputs=cp.pending_fn_outputs or None,
                 photo_jpeg=jpeg,
-                desktop_context=desktop.text,
-                desktop_screenshot_png=desktop.screenshot_png,
+                desktop_context=desktop_context,
+                desktop_screenshot_png=desktop_png,
             )
             pending_fn_outputs = []
             turn = TurnTrace(utterance)
@@ -1864,7 +2176,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 try:
                     if previous_id is None:
                         response = _create_response(
-                            client,
+                            llm,
                             llm_tts=llm_tts,
                             model=MODEL,
                             tools=orchestrator_tools(),
@@ -1873,7 +2185,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                         )
                     else:
                         response = _create_response(
-                            client,
+                            llm,
                             llm_tts=llm_tts,
                             model=MODEL,
                             tools=orchestrator_tools(),
@@ -1890,25 +2202,31 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     if overflow_attempt == 0 and is_context_overflow_error(e):
                         print(f"[orchestrator] context overflow ({e}); recovering once", flush=True)
                         cp = run_orchestrator_checkpoint(
-                            client,
+                            llm,
                             compact_state,
                             task_history,
-                            capture_desktop=True,
+                            capture_desktop=not bool(chat_shot),
                             overflow=True,
                         )
                         task_history = cp.task_history
-                        desktop = cp.desktop
                         if cp.reset_thread:
                             previous_id = None
                         system = _system_prompt(session_summary=compact_state.session_summary)
+                        if chat_shot:
+                            overflow_context = _CHAT_SCREENSHOT_CONTEXT
+                            overflow_png = chat_shot
+                        else:
+                            desktop = cp.desktop
+                            overflow_context = desktop.text
+                            overflow_png = desktop.screenshot_png
                         turn_input = _user_turn_input(
                             utterance,
                             task_history,
                             task_summary=compact_state.task_summary,
                             pending_fn_outputs=None,
                             photo_jpeg=jpeg,
-                            desktop_context=desktop.text,
-                            desktop_screenshot_png=desktop.screenshot_png,
+                            desktop_context=overflow_context,
+                            desktop_screenshot_png=overflow_png,
                         )
                         continue
                     _announce_llm_failure(client, e)
@@ -1934,6 +2252,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     user_said=utterance,
                     record_speaker=_record_speaker,
                     compact_state=compact_state,
+                    llm=llm,
                 )
             except LlmUnavailableError as e:
                 _announce_llm_failure(client, e)

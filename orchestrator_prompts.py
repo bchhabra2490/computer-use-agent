@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
 You receive transcribed speech from the user, and sometimes a photo from their
@@ -44,6 +46,9 @@ Rules:
   If they ask you to do something on the computer, call start_task first; speak after it finishes.
 - Prefer give_response_to_user for questions you can answer without touching the computer,
   including what is on screen when the desktop snapshot or screenshot is attached.
+- For what day, date, or time it is now, use the "Current local date and time" line on
+  each user message and answer with give_response_to_user. Do not claim tools are
+  unavailable or ask the user to run Terminal unless they want the on-screen clock changed.
 - When a desktop snapshot and/or screenshot is attached, read it. Answer questions about
   visible apps, windows, tabs, text, or UI state with give_response_to_user. Only use
   start_task when they want you to change something on the Mac (click, type, open, play,
@@ -127,6 +132,17 @@ Available desktop skills the computer agent can load:
 
 {not_to_do}
 """
+
+
+def local_datetime_line() -> str:
+    """One-line clock context injected on every orchestrator user turn."""
+    now = datetime.now().astimezone()
+    tz = (now.tzname() or "").strip()
+    tz_suffix = f" ({tz})" if tz else ""
+    return (
+        f"Current local date and time: {now.strftime('%A, %B %d, %Y, %I:%M %p')}"
+        f"{tz_suffix}."
+    )
 
 
 def build_system_prompt(

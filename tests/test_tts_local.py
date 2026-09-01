@@ -82,6 +82,31 @@ class KokoroSynthesizeTests(unittest.TestCase):
         self.assertEqual(kwargs["voice"], "bm_george")
         self.assertEqual(kwargs["lang_code"], "b")
 
+    def test_mlx_installs_oov_fallback_and_normalizes_report_symbols(self) -> None:
+        from tts import kokoro as kokoro_mod
+
+        chunk = SimpleNamespace(audio=np.ones(4, dtype=np.float32), sample_rate=24000)
+        g2p = SimpleNamespace(fallback=None)
+        pipeline = SimpleNamespace(g2p=g2p)
+        model = MagicMock()
+        model._get_pipeline.return_value = pipeline
+        model.generate.return_value = [chunk]
+        with (
+            patch.object(kokoro_mod, "_mlx_available", return_value=True),
+            patch.object(kokoro_mod, "KOKORO_ONNX_MODEL", ""),
+            patch.object(kokoro_mod, "_load_mlx", return_value=model),
+        ):
+            kokoro_mod.synthesize_wav(
+                "**Ather** — ₹1,717.70 · Reddit",
+                voice="af_heart",
+            )
+        sent = model.generate.call_args.kwargs["text"]
+        self.assertEqual(sent, "Ather , rupees 1,717.70 , Reddit")
+        self.assertIs(g2p.fallback, kokoro_mod._spelling_fallback)
+        phonemes, rating = g2p.fallback(SimpleNamespace(text="Reddit"))
+        self.assertTrue(phonemes)
+        self.assertEqual(rating, 1)
+
 
 class LocalVoiceMappingTests(unittest.TestCase):
     @patch.dict("os.environ", {"KOKORO_VOICE": "af_heart"}, clear=False)

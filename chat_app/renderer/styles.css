@@ -1047,6 +1047,95 @@ select,
   justify-content: flex-end;
 }
 
+.latency-summary {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) repeat(2, minmax(110px, 1fr));
+  gap: 10px;
+}
+
+.latency-stat {
+  border: 1px solid var(--line);
+  background: #0f1116;
+  border-radius: 12px;
+  padding: 13px 14px;
+  display: grid;
+  gap: 3px;
+}
+
+.latency-stat-primary {
+  background: color-mix(in srgb, #355dff 13%, #0f1116);
+}
+
+.latency-value {
+  font-size: 1.35rem;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+}
+
+.latency-label,
+.latency-stage span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.latency-breakdown {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.latency-stage {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.latency-recent-wrap {
+  overflow-x: auto;
+}
+
+.latency-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.latency-table th,
+.latency-table td {
+  border-top: 1px solid var(--line);
+  padding: 9px 8px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.latency-table th:first-child,
+.latency-table td:first-child {
+  text-align: left;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.latency-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.latency-empty {
+  color: var(--muted);
+  text-align: center !important;
+  padding: 18px !important;
+}
+
+@media (max-width: 720px) {
+  .latency-summary,
+  .latency-breakdown {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 .section-collapse {
   appearance: none;
   border: 0;

@@ -33,11 +33,18 @@ def _jsonable(value: Any) -> Any:
 class TaskLog:
     """Append-only log for a single agent run."""
 
-    def __init__(self, task: str, logs_dir: Path | None = None):
+    def __init__(
+        self,
+        task: str,
+        logs_dir: Path | None = None,
+        *,
+        latency_trace_id: str | None = None,
+    ):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.task = task
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.status = "running"
+        self.latency_trace_id = latency_trace_id
         self.dir = (logs_dir or LOGS_DIR) / f"{stamp}_{_slugify(task)}"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.steps_path = self.dir / "steps.jsonl"
@@ -74,6 +81,15 @@ class TaskLog:
             "summary": summary,
             "data": _jsonable(data),
         }
+        if kind in {"computer_actions", "desktop_actions"} and self.latency_trace_id:
+            from latency_report import mark
+
+            mark(
+                self.latency_trace_id,
+                "first_computer_action",
+                task=self.task,
+                metadata={"first_action_kind": kind},
+            )
         with self.steps_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

@@ -767,6 +767,8 @@ def run(
     user_said: str | None = None,
     speaker_context: str = "",
     on_log_dir: Callable[[str], None] | None = None,
+    latency_trace_id: str | None = None,
+    execution_route=None,
 ) -> str:
     """Run the computer-use loop. Returns a status string for the orchestrator.
 
@@ -778,6 +780,11 @@ def run(
     the goal (user words or a short leftover step), never a UI screenplay.
     `speaker_context` is optional voice-ID text from the orchestrator (may be empty).
     """
+    if execution_route is None:
+        from execution_router import resolve_execution_route
+
+        execution_route = resolve_execution_route(user_said or task)
+
     audio_client = OpenAI()
     client = audio_client
     standalone = ask_user_bridge is None and message_inbox is None
@@ -794,7 +801,7 @@ def run(
         own_session = True
 
     desktop = DesktopController()
-    log = TaskLog(task)
+    log = TaskLog(task, latency_trace_id=latency_trace_id)
     if on_log_dir is not None:
         try:
             on_log_dir(str(log.dir))
@@ -841,7 +848,20 @@ def run(
     log.record(
         "start",
         task,
-        {"display": display_ctx, "skills": [s.name for s in skills], "voice": voice},
+        {
+            "display": display_ctx,
+            "skills": [s.name for s in skills],
+            "voice": voice,
+            "execution_route": (
+                {
+                    "path": execution_route.path,
+                    "lane": execution_route.lane,
+                    "reason": execution_route.reason,
+                }
+                if execution_route is not None
+                else None
+            ),
+        },
     )
 
     _held_follow_ups: list[str] = []
@@ -956,7 +976,12 @@ def run(
             route = model_for_recipe_handoff(log)
         else:
             route = resolve_agent_model(
-                client, task, log, fallback_max_steps=max_steps
+                client,
+                task,
+                log,
+                fallback_max_steps=max_steps,
+                execution_path=getattr(execution_route, "path", None),
+                specialist_lane=getattr(execution_route, "lane", None),
             )
         model = route.model
         max_steps = route.max_steps
@@ -991,11 +1016,16 @@ def run(
         if audio_block:
             audio_block = audio_block + "\n\n"
 
+        specialist_block = ""
+        if execution_route is not None:
+            specialist_block = execution_route.prompt_block() + "\n\n"
+
         if recipe_handoff:
             skill_block = _handoff_skill_blurb(recipe_result.recipe.name)
             prompt_body = (
                 f"{speaker_block}"
                 f"{audio_block}"
+                f"{specialist_block}"
                 f"{model_task}\n\n"
                 f"Desktop occupancy:\n{display_ctx}\n\n"
                 f"{skill_block}\n\n"
@@ -1008,6 +1038,7 @@ def run(
             prompt_body = (
                 f"{speaker_block}"
                 f"{audio_block}"
+                f"{specialist_block}"
                 f"{model_task}\n\n"
                 f"Desktop display configuration:\n{display_ctx}\n\n"
                 f"{skill_catalog}\n\n"

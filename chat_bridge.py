@@ -908,6 +908,15 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(500, {"ok": False, "error": str(e)})
             return
+        if path == "/v1/latency":
+            try:
+                from latency_report import build_report, report_payload
+
+                build_report()
+                self._send(200, report_payload(limit=30))
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
         if path == "/v1/face":
             try:
                 self._send(200, face_status_payload())

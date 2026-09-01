@@ -50,6 +50,7 @@ class AudioSession:
         self.session = session
         self.mic_owner: MicOwner = "none"
         self.cooldown_s = POST_TTS_COOLDOWN
+        self.latency_trace_id: str | None = None
 
     def _phase(self, phase: str, detail: str = "", *, log: bool = False) -> None:
         sess = self.session if self.session is not None else get_session()
@@ -160,6 +161,9 @@ class AudioSession:
             return None
         hit = get_last_wake()
         heard = hit.label if hit else "Wake word"
+        from latency_report import start_trace
+
+        self.latency_trace_id = start_trace(source="voice", wake_label=heard)
         self._phase("listening", f"{heard} heard — listening", log=True)
         remainder = get_wake_remainder()
         if remainder:
@@ -172,7 +176,12 @@ class AudioSession:
             set_reply_sink("mac")
             set_reply_tts(True)
             set_turn_source("voice")
-            return strip_wake_prefix(remainder).strip() or remainder
+            command = strip_wake_prefix(remainder).strip() or remainder
+            from latency_report import mark
+
+            mark(self.latency_trace_id, "speech_finished")
+            mark(self.latency_trace_id, "transcript_ready", metadata={"transcript_chars": len(command)})
+            return command
         try:
             utterance = self.listen(listen_prompt or "Listening…")
         except Exception as e:
@@ -182,6 +191,10 @@ class AudioSession:
                 print("[audio] listen cancelled", flush=True)
             else:
                 print(f"[audio] listen after wake failed: {e}")
+            from latency_report import abandon_trace
+
+            abandon_trace(self.latency_trace_id, reason="stt_failed")
+            self.latency_trace_id = None
             return None
         command = strip_wake_prefix(utterance).strip()
         if not command:
@@ -196,10 +209,18 @@ class AudioSession:
                     print("[audio] listen cancelled", flush=True)
                 else:
                     print(f"[audio] follow-up listen failed: {e}")
+                from latency_report import abandon_trace
+
+                abandon_trace(self.latency_trace_id, reason="stt_failed")
+                self.latency_trace_id = None
                 return None
         set_reply_sink("mac")
         set_reply_tts(True)
         set_turn_source("voice")
+        from latency_report import mark
+
+        mark(self.latency_trace_id, "speech_finished")
+        mark(self.latency_trace_id, "transcript_ready", metadata={"transcript_chars": len(command)})
         return command or None
 
     def _listen_shortcut(self, listen_prompt: str | None = None) -> str | None:

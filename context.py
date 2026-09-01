@@ -56,6 +56,12 @@ def format_not_to_do(*, path: Path | None = None) -> str:
         text = src.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+    try:
+        from artifact_paths import output_rule
+
+        text = text + "\n\n- " + output_rule()
+    except Exception:
+        pass
     return text
 
 

@@ -27,6 +27,7 @@ const state = {
   faceEnabled: true,
   facePresets: [],
   faceCurrent: null,
+  latency: null,
   avatars: {
     assistant: null,
     user: null,
@@ -748,6 +749,7 @@ function wire() {
   $("face-toggle").addEventListener("change", toggleFace);
   $("face-custom-form").addEventListener("submit", applyCustomFace);
   $("drafts-refresh").addEventListener("click", () => loadSystems());
+  $("latency-refresh").addEventListener("click", () => loadLatency());
   $("drafts-accept-all").addEventListener("click", () => acceptDrafts({ all: true }));
   $("drafts-reject-all").addEventListener("click", () => rejectDrafts({ all: true }));
   $("drafts-collapse").addEventListener("click", toggleDraftsCollapsed);
@@ -829,7 +831,84 @@ async function loadSystems() {
     state.drafts = [];
     renderDrafts();
   }
-  await Promise.all([loadMemories(), loadFace()]);
+  await Promise.all([loadMemories(), loadFace(), loadLatency()]);
+}
+
+function formatLatency(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return "—";
+  const n = Number(ms);
+  return n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${Math.round(n)}ms`;
+}
+
+function renderLatency(data) {
+  state.latency = data;
+  const primary = data.metrics?.voice_to_first_action || {};
+  const summary = $("latency-summary");
+  summary.innerHTML = `
+    <div class="latency-stat latency-stat-primary">
+      <span class="latency-value">${esc(formatLatency(primary.median_ms))}</span>
+      <span class="latency-label">median voice → first action</span>
+    </div>
+    <div class="latency-stat">
+      <span class="latency-value">${esc(formatLatency(primary.p90_ms))}</span>
+      <span class="latency-label">P90</span>
+    </div>
+    <div class="latency-stat">
+      <span class="latency-value">${esc(primary.count || 0)}</span>
+      <span class="latency-label">measured tasks</span>
+    </div>
+  `;
+
+  const stages = [
+    ["Wake → transcript", "wake_to_transcript"],
+    ["Transcript → plan", "transcript_to_plan"],
+    ["Plan → agent", "plan_to_agent_start"],
+    ["Agent → first action", "agent_start_to_first_action"],
+  ];
+  $("latency-breakdown").innerHTML = stages
+    .map(([label, key]) => {
+      const metric = data.metrics?.[key] || {};
+      return `<div class="latency-stage"><span>${esc(label)}</span><strong>${esc(
+        formatLatency(metric.median_ms)
+      )}</strong></div>`;
+    })
+    .join("");
+
+  const tbody = $("latency-recent");
+  const recent = (data.recent || []).filter(
+    (trace) => trace.durations_ms?.voice_to_first_action != null
+  );
+  tbody.innerHTML = recent.length
+    ? recent
+        .slice(0, 12)
+        .map((trace) => {
+          const d = trace.durations_ms || {};
+          return `<tr>
+            <td title="${esc(trace.task || "")}">${esc(trace.task || "Untitled task")}</td>
+            <td>${esc(formatLatency(d.voice_to_first_action))}</td>
+            <td>${esc(formatLatency(d.voice_to_task_complete))}</td>
+            <td>${esc(relativeTime(trace.started_at))}</td>
+          </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="4" class="latency-empty">No voice-driven computer actions recorded yet.</td></tr>`;
+  $("latency-note").textContent = data.report_path
+    ? `Raw traces and Markdown report are stored in ${data.report_path}`
+    : "End-to-end timing from wake detection to the first computer action.";
+}
+
+async function loadLatency() {
+  const note = $("latency-note");
+  try {
+    const data = await window.cuaChat.get("/v1/latency");
+    renderLatency(data);
+  } catch (err) {
+    note.textContent = String(err.message || err);
+    $("latency-summary").innerHTML = "";
+    $("latency-breakdown").innerHTML = "";
+    $("latency-recent").innerHTML =
+      '<tr><td colspan="4" class="latency-empty">Latency report unavailable.</td></tr>';
+  }
 }
 
 function applyFaceStatus(data) {

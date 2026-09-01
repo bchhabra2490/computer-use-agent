@@ -36,6 +36,7 @@ load_dotenv()
 
 import argparse
 import base64
+import difflib
 import json
 import os
 import re
@@ -316,6 +317,7 @@ def _history_note(
     task_summary: str = "",
     photo: bool = False,
     desktop_context: str = "",
+    execution_route: str = "",
 ) -> str:
     prefix = local_datetime_line() + "\n\n"
     if photo:
@@ -328,6 +330,9 @@ def _history_note(
     desktop_block = (desktop_context or "").strip()
     if desktop_block:
         prefix += desktop_block + "\n\n"
+    route_block = (execution_route or "").strip()
+    if route_block:
+        prefix += route_block + "\n\n"
     return (
         prefix
         + f"User said: {utterance}\n\n"
@@ -352,6 +357,7 @@ def _user_turn_input(
     photo_jpeg: bytes | None = None,
     desktop_context: str = "",
     desktop_screenshot_png: bytes | None = None,
+    execution_route: str = "",
 ) -> Any:
     """Build Responses API ``input`` for one user turn (optional phone + desktop images)."""
     note = _history_note(
@@ -360,6 +366,7 @@ def _user_turn_input(
         task_summary=task_summary,
         photo=bool(photo_jpeg),
         desktop_context=desktop_context,
+        execution_route=execution_route,
     )
     extras = list(pending_fn_outputs or [])
     images: list[tuple[str, bytes, str]] = []
@@ -763,11 +770,21 @@ def _start_agent_thread(
                 user_said=job.match_text,
                 speaker_context=job.speaker_context,
                 on_log_dir=_on_log_dir,
+                latency_trace_id=getattr(job, "latency_trace_id", None),
+                execution_route=getattr(job, "execution_route", None),
             )
         except BaseException as e:  # noqa: BLE001 — capture for main thread
             job.error = e
             job.result = f"failed\nError: {e}"
         finally:
+            from latency_report import finish_trace
+
+            finish_trace(
+                getattr(job, "latency_trace_id", None),
+                status="failed" if job.error is not None else "completed",
+                task=job.task,
+                metadata={"result": (job.result or "")[:160]},
+            )
             remove_agent(job.call_id)
             job.done.set()
 
@@ -788,6 +805,66 @@ def _task_context_snippet(task_history: list[dict[str, str]]) -> str:
         if task:
             lines.append(f"- {task[:160]}")
     return "\n".join(lines) if lines else "(none)"
+
+
+def _normalized_task_goal(text: str) -> str:
+    """Stable form for rejecting accidental post-completion relaunches."""
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    drop = {"can", "could", "would", "you", "please", "the", "a", "an"}
+    return " ".join(word for word in words if word not in drop)
+
+
+def _completed_task_match(
+    task: str,
+    task_history: list[dict[str, str]],
+) -> dict[str, str] | None:
+    """Return a completed near-duplicate from this orchestrator session."""
+    wanted = _normalized_task_goal(task)
+    if not wanted:
+        return None
+    for entry in reversed(task_history):
+        result = str(entry.get("result") or "").strip().lower()
+        if not result.startswith("completed"):
+            continue
+        previous = _normalized_task_goal(str(entry.get("task") or ""))
+        if not previous:
+            continue
+        if wanted == previous or difflib.SequenceMatcher(None, wanted, previous).ratio() >= 0.9:
+            return entry
+    return None
+
+
+def _start_task_block_reason(
+    task: str,
+    task_history: list[dict[str, str]],
+    *,
+    sleeping: bool,
+) -> str | None:
+    if sleeping:
+        return "Sleep mode is on, so no new computer task was started."
+    duplicate = _completed_task_match(task, task_history)
+    if duplicate is not None:
+        return (
+            "This computer task already completed in the current session. "
+            "Do not launch it again; use its recorded result and respond to the user."
+        )
+    return None
+
+
+def _completed_tasks_in_turn(turn: TurnTrace | None) -> list[dict[str, str]]:
+    """Pair start_task/result trace steps from only the current user turn."""
+    if turn is None:
+        return []
+    pending: list[str] = []
+    completed: list[dict[str, str]] = []
+    for kind, text in turn.steps:
+        if kind == "start_task":
+            pending.append(text)
+        elif kind == "start_task_result" and pending:
+            task = pending.pop(0)
+            if text.strip().lower().startswith("completed"):
+                completed.append({"task": task, "result": text})
+    return completed
 
 
 def _launch_agent_job(
@@ -829,6 +906,18 @@ def _launch_agent_job(
         match_text=spec.match_text,
         speaker_context=speaker_context,
     )
+    from execution_router import resolve_execution_route
+
+    job.execution_route = resolve_execution_route(spec.match_text or spec.goal)
+    print(
+        f"[orchestrator] route={job.execution_route.path}/"
+        f"{job.execution_route.lane} ({job.execution_route.reason})",
+        flush=True,
+    )
+    from latency_report import current_trace_id, mark
+
+    job.latency_trace_id = current_trace_id()
+    mark(job.latency_trace_id, "agent_started", task=spec.goal)
     job.reply_sink = reply_sink()
     if job.reply_sink == "phone":
         print("[orchestrator] task output → phone", flush=True)
@@ -1642,6 +1731,28 @@ def _handle_tool(
         if not task:
             output = "Error: empty task"
         else:
+            from app_status import sleep_mode_enabled
+
+            block_reason = _start_task_block_reason(
+                task,
+                _completed_tasks_in_turn(turn),
+                sleeping=sleep_mode_enabled(),
+            )
+            if block_reason:
+                print(f"[orchestrator] start_task blocked: {block_reason}", flush=True)
+                output = block_reason
+                if turn is not None:
+                    turn.add("start_task_blocked", f"{task}: {block_reason}")
+                return (
+                    {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": block_reason,
+                    },
+                    False,
+                    None,
+                    None,
+                )
             job = _launch_agent_job(
                 client,
                 goal=task,
@@ -2118,6 +2229,25 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 return
 
             sess.enter("thinking", utterance[:100])
+            from execution_router import resolve_execution_route
+
+            execution_route = resolve_execution_route(utterance)
+            from latency_report import current_trace_id, mark
+
+            mark(
+                current_trace_id(),
+                "route_selected",
+                metadata={
+                    "execution_path": execution_route.path,
+                    "specialist_lane": execution_route.lane,
+                    "route_reason": execution_route.reason,
+                },
+            )
+            print(
+                f"[orchestrator] execution route → {execution_route.path}/"
+                f"{execution_route.lane} ({execution_route.reason})",
+                flush=True,
+            )
             jpeg = None
             if photo_turn or _phone_photo_in_session:
                 jpeg = phone_photo_jpeg(consume_pending=True)
@@ -2166,6 +2296,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 photo_jpeg=jpeg,
                 desktop_context=desktop_context,
                 desktop_screenshot_png=desktop_png,
+                execution_route=execution_route.prompt_block(),
             )
             pending_fn_outputs = []
             turn = TurnTrace(utterance)
@@ -2227,16 +2358,24 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                             photo_jpeg=jpeg,
                             desktop_context=overflow_context,
                             desktop_screenshot_png=overflow_png,
+                            execution_route=execution_route.prompt_block(),
                         )
                         continue
                     _announce_llm_failure(client, e)
                     response = None
                     break
             if response is None:
+                from latency_report import abandon_trace, current_trace_id
+
+                abandon_trace(current_trace_id(), reason="planning_failed")
                 print("[orchestrator] ready for next task.")
                 sess.enter("ready", "Waiting for next request")
                 audio.cooldown()
                 continue
+
+            from latency_report import current_trace_id, mark
+
+            mark(current_trace_id(), "plan_ready")
 
             try:
                 response, end_session, pending_fn_outputs = _process_response(
@@ -2267,6 +2406,15 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             previous_id = response.id
             compact_state.record_turn(utterance, turn.as_text())
             emit("turn_end", lane="main", utterance=utterance[:160])
+            from latency_report import current_trace_id, finish_trace
+
+            # Computer-agent turns finalize in the worker with action timings.
+            # Conversational voice turns still get persisted as no-action traces.
+            finish_trace(
+                current_trace_id(),
+                status="no_computer_action",
+                task=utterance,
+            )
             maybe_extract_run_memories(
                 user_input=utterance,
                 transcript=turn.as_text(),

@@ -335,7 +335,9 @@ RUN_TERMINAL_TOOL = {
         "programs that need a TTY (vim, ssh password prompts, etc.). Do not sleep "
         "to wait out a song or video, and do not use macOS `say` for user-facing "
         "speech (use mark_done / ask_user). Avoid destructive commands (rm -rf, "
-        "diskutil erase, etc.) unless the user explicitly asked."
+        "diskutil erase, etc.) unless the user explicitly asked. User-facing files "
+        "created by commands must go in the default output folder from the always-on "
+        "policy unless the user explicitly chose another path."
     ),
     "parameters": {
         "type": "object",

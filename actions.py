@@ -88,16 +88,6 @@ def release_stuck_modifiers() -> None:
             pass
 
 
-def _dismiss_suggestion_overlay() -> None:
-    """Best-effort dismiss for browser autocomplete/suggestion dropdowns."""
-    try:
-        pyautogui.press("esc")
-    except Exception:
-        pass
-    # Let UI react (avoid immediately typing/pressing Enter/Tab into overlay).
-    time.sleep(0.02)
-
-
 def _mac_type_unicode(text: str, *, interval: float = 0.0) -> None:
     """Type via Unicode events — avoids virtual-key shortcuts (dictation, emoji picker)."""
     import Quartz
@@ -762,9 +752,6 @@ class DesktopController:
             if _is_blocked_chord(keys):
                 print(f"[skip] blocked keypress {keys} — would interrupt this agent")
                 return
-            # Chrome form dropdowns often steal Tab/Enter. ESC usually dismisses them.
-            if ("tab" in keys or "enter" in keys) and "esc" not in keys:
-                _dismiss_suggestion_overlay()
             release_stuck_modifiers()
             if len(keys) > 1:
                 pyautogui.hotkey(*keys)
@@ -772,7 +759,6 @@ class DesktopController:
                 pyautogui.press(keys[0])
 
         elif atype == "type":
-            _dismiss_suggestion_overlay()
             release_stuck_modifiers()
             type_text(action["text"], interval=0.01)
 

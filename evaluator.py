@@ -110,6 +110,51 @@ def _route(model: str, difficulty: str) -> AgentRoute:
     )
 
 
+def _progress_since_last_evaluation(log: TaskLog, *, max_chars: int = 4_000) -> str:
+    """Return authoritative work performed since the previous coach response."""
+    try:
+        entries = [
+            json.loads(line)
+            for line in log.steps_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return "(progress log unavailable)"
+
+    last_eval = -1
+    previous_guidance = "(none)"
+    for index, entry in enumerate(entries):
+        if entry.get("kind") == "evaluator":
+            last_eval = index
+            previous_guidance = json.dumps(entry.get("data") or {}, ensure_ascii=False)
+
+    lines = [f"Previous evaluator guidance: {previous_guidance}"]
+    recent = entries[last_eval + 1 :]
+    if not recent:
+        lines.append("Actions and results since that guidance: (none)")
+    else:
+        lines.append("Actions and results since that guidance (authoritative, chronological):")
+        for entry in recent:
+            kind = str(entry.get("kind") or "unknown")
+            if kind in {"screenshot", "router"}:
+                continue
+            summary = str(entry.get("summary") or "")
+            data = entry.get("data")
+            detail = json.dumps(data, ensure_ascii=False) if data else ""
+            if len(detail) > 1_200:
+                detail = detail[:1_200] + "…"
+            lines.append(
+                f"- step {entry.get('n', '?')} [{kind}] {summary}"
+                + (f" | {detail}" if detail else "")
+            )
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+        text = "(older progress omitted)\n" + text
+    return text
+
+
 def model_for_recipe_handoff(log: TaskLog | None = None) -> AgentRoute:
     """Leftover zoom/click after a recipe — always the cheap CU model (easy budget)."""
     override = (os.environ.get("AGENT_MODEL") or "").strip()
@@ -275,9 +320,16 @@ def coach_agent(
         return None
 
     recent = log.steps_for_prompt(max_chars=6_000)
+    progress_delta = _progress_since_last_evaluation(log)
     instructions = (
         "You are a concise coach for a desktop computer-use agent. "
         "Given the goal, recent steps, and current screenshot, guide the next actions. "
+        "The action/result log is authoritative: an action recorded there was already "
+        "attempted. Never recommend an already successful or visibly completed action. "
+        "Before giving guidance, compare the previous evaluator guidance with the actions "
+        "and results performed since then. Treat fulfilled guidance as completed. Only "
+        "recommend retrying an action when the log or screenshot provides concrete evidence "
+        "that it failed; state that evidence and propose a materially different retry. "
         "Do not invent UI that is not visible. Prefer concrete, short guidance. "
         "If the goal appears satisfied, say so. If the agent is looping or lost, say so. "
         "Starting media playback is done — do not tell the agent to sleep for duration, "
@@ -290,9 +342,11 @@ def coach_agent(
                 f"Goal:\n{task}\n\n"
                 f"Computer turns so far: {step_n}\n\n"
                 f"Recent steps:\n{recent}\n\n"
+                f"Progress checkpoint:\n{progress_delta}\n\n"
                 "Reply JSON only:\n"
                 "{\n"
                 '  "status": "on_track" | "drifting" | "stuck" | "likely_done",\n'
+                '  "completed_since_last_review": ["completed outcome", "..."],\n'
                 '  "guidance": ["short bullet", "..."],\n'
                 '  "next_focus": "one sentence priority"\n'
                 "}"
@@ -325,6 +379,10 @@ def coach_agent(
     status = str(data.get("status") or "on_track").strip().lower()
     if status not in {"on_track", "drifting", "stuck", "likely_done"}:
         status = "on_track"
+    completed = data.get("completed_since_last_review") or []
+    if isinstance(completed, str):
+        completed = [completed]
+    completed = [str(item).strip() for item in completed if str(item).strip()][:10]
     guidance = data.get("guidance") or []
     if isinstance(guidance, str):
         guidance = [guidance]
@@ -335,7 +393,13 @@ def coach_agent(
     log.record(
         "evaluator",
         f"{status}: {next_focus or (guidance[0] if guidance else '')}",
-        {"status": status, "guidance": guidance, "next_focus": next_focus, "step": step_n},
+        {
+            "status": status,
+            "completed_since_last_review": completed,
+            "guidance": guidance,
+            "next_focus": next_focus,
+            "step": step_n,
+        },
     )
 
     lines = [

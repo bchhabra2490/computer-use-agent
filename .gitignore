@@ -22,3 +22,5 @@ models/piper/
 docs/
 node_modules/
 chat_app/node_modules/
+graphify-out/
+graphify-out/cache

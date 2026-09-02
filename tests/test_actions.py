@@ -89,32 +89,38 @@ class KeypressBlockTests(unittest.TestCase):
         press.assert_not_called()
 
 
-class BrowserOverlayDismissTests(unittest.TestCase):
-    def test_type_sends_esc_before_typing(self) -> None:
+class FocusPreservationTests(unittest.TestCase):
+    def test_type_does_not_press_escape_before_typing(self) -> None:
         ctrl = act.DesktopController()
         with (
             patch.object(act.pyautogui, "press") as press,
             patch.object(act, "release_stuck_modifiers"),
             patch.object(act, "type_text") as type_text,
-            patch.object(act.time, "sleep"),
         ):
             ctrl._run_one({"type": "type", "text": "hello"})
 
-        press.assert_called_once_with("esc")
+        press.assert_not_called()
         type_text.assert_called_once()
 
-    def test_keypress_tab_dismisses_overlay_then_presses_tab(self) -> None:
+    def test_keypress_tab_does_not_dismiss_current_surface(self) -> None:
         ctrl = act.DesktopController()
         with (
             patch.object(act.pyautogui, "press") as press,
             patch.object(act, "release_stuck_modifiers"),
-            patch.object(act.time, "sleep"),
         ):
             ctrl._run_one({"type": "keypress", "keys": ["TAB"]})
 
-        self.assertGreaterEqual(press.call_count, 2)
-        self.assertEqual(press.call_args_list[0].args[0], "esc")
-        self.assertEqual(press.call_args_list[1].args[0], "tab")
+        press.assert_called_once_with("tab")
+
+    def test_explicit_escape_still_works(self) -> None:
+        ctrl = act.DesktopController()
+        with (
+            patch.object(act.pyautogui, "press") as press,
+            patch.object(act, "release_stuck_modifiers"),
+        ):
+            ctrl._run_one({"type": "keypress", "keys": ["ESC"]})
+
+        press.assert_called_once_with("esc")
 
 
 class ScreenshotPublishTests(unittest.TestCase):

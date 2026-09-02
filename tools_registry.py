@@ -480,6 +480,8 @@ DESKTOP_ACTIONS_TOOL = {
     "description": (
         "Click, type, scroll, and press keys on the real Mac desktop. "
         "x/y are pixels in the latest screenshot (origin top-left). "
+        "Typing and Tab/Enter preserve the focused modal or surface; send an "
+        "explicit ESC keypress only when the visible UI must be dismissed. "
         "After the batch you get a new screenshot. Prefer this for all GUI work."
     ),
     "parameters": {

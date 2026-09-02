@@ -2024,6 +2024,11 @@ def _process_response(
             return response, True, []
 
 
+def _exit_on_signal(_signum=None, _frame=None) -> None:
+    """Leave signal context immediately; normal ``finally`` cleanup does the work."""
+    raise SystemExit(0)
+
+
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     global _phone_photo_in_session
     _phone_photo_in_session = False
@@ -2035,8 +2040,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     bind_session(sess)
 
     def _shutdown_side_processes() -> None:
-        # Signal handlers may raise SystemExit without unwinding ``finally``.
-        # Tear down tray/face here so Ctrl+C always clears the menu bar.
+        # Idempotent atexit fallback for failures outside the main cleanup scope.
         try:
             stop_phone_gateway()
         except Exception:
@@ -2050,15 +2054,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         except Exception:
             pass
 
-    def _on_term(_signum=None, _frame=None) -> None:
-        request_quit()
-        print("\n[orchestrator] stop signal — shutting down…", flush=True)
-        _shutdown_side_processes()
-        raise SystemExit(0)
-
     try:
-        signal.signal(signal.SIGTERM, _on_term)
-        signal.signal(signal.SIGINT, _on_term)
+        # Never acquire locks, log, or wait for child processes in this handler.
+        # SystemExit unwinds active context managers before the cleanup below.
+        signal.signal(signal.SIGTERM, _exit_on_signal)
+        signal.signal(signal.SIGINT, _exit_on_signal)
     except Exception:
         pass
     try:
@@ -2090,7 +2090,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
 
     try:
         start_mcp()
-    except BaseException as e:
+    except Exception as e:
         print(f"[orchestrator] MCP start error: {e}", flush=True)
     mcp_rule = ""
     if mcp_openai_tools(for_agent=False):
@@ -2445,7 +2445,7 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             pass
         try:
             stop_mcp()
-        except BaseException as e:
+        except Exception as e:
             print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
         publisher.close()
         unregister_orchestrator()

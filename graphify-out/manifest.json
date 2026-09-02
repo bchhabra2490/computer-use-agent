@@ -24,10 +24,10 @@
     "semantic_hash": "8303dde09a804cf9c79b308030cf4d1a"
   },
   "app_status.py": {
-    "mtime": 1788229921.966144,
-    "seen": 1788328255.0151749,
-    "ast_hash": "11e53328502701593219f66ebcf8fadb",
-    "semantic_hash": "11e53328502701593219f66ebcf8fadb"
+    "mtime": 1788368452.5870435,
+    "seen": 1788368500.551069,
+    "ast_hash": "b3778c34462ac394f9b3b4af4a4a0a44",
+    "semantic_hash": ""
   },
   "artifact_paths.py": {
     "mtime": 1788253882.1277475,
@@ -168,10 +168,10 @@
     "semantic_hash": "9ee5e29c62eeacf332e620cb1fc5b7b7"
   },
   "face_overlay.py": {
-    "mtime": 1788229921.9780788,
-    "seen": 1788328255.015193,
-    "ast_hash": "6e94f3236c6a1dad3be61551952b6269",
-    "semantic_hash": "6e94f3236c6a1dad3be61551952b6269"
+    "mtime": 1788368478.79283,
+    "seen": 1788368500.551084,
+    "ast_hash": "32e3674195bbbf8b444667df4f891c19",
+    "semantic_hash": ""
   },
   "input_queues.py": {
     "mtime": 1787496828.1695218,
@@ -228,10 +228,10 @@
     "semantic_hash": "7fa80b6522c71f3221a6b7944ba2c2d1"
   },
   "orchestrator.py": {
-    "mtime": 1788253882.1329694,
-    "seen": 1788328255.015197,
-    "ast_hash": "98534eddb0aaeebd9c82e6338792dd2f",
-    "semantic_hash": "98534eddb0aaeebd9c82e6338792dd2f"
+    "mtime": 1788369428.3063266,
+    "seen": 1788369439.397504,
+    "ast_hash": "76aff86f28f10cec43c2bfb6acd5b40f",
+    "semantic_hash": ""
   },
   "orchestrator_prompts.py": {
     "mtime": 1788253882.1332762,
@@ -336,10 +336,10 @@
     "semantic_hash": "e8f62906681c4e333aa2a2573a7bad7e"
   },
   "status_tray.py": {
-    "mtime": 1788229921.985716,
-    "seen": 1788328255.0152051,
-    "ast_hash": "c5f0f0cefbc982196dd11c3727b0a77e",
-    "semantic_hash": "c5f0f0cefbc982196dd11c3727b0a77e"
+    "mtime": 1788369091.4290857,
+    "seen": 1788369106.210838,
+    "ast_hash": "b397856103a578330607608d16054f31",
+    "semantic_hash": ""
   },
   "stt/__init__.py": {
     "mtime": 1788229921.9865916,
@@ -1281,6 +1281,42 @@
     "mtime": 1788342414.6854641,
     "seen": 1788360906.66721,
     "ast_hash": "ea29f31f8fc828785d723bc174af607c",
+    "semantic_hash": ""
+  },
+  "face_overlay_window.py": {
+    "mtime": 1788368439.2681813,
+    "seen": 1788368500.551085,
+    "ast_hash": "2e8109d477f50c0514d6ace90e8cde63",
+    "semantic_hash": ""
+  },
+  "status_control.py": {
+    "mtime": 1788368478.7298489,
+    "seen": 1788368500.551102,
+    "ast_hash": "cdd101b07d4d51afc4f3a03795b6fd88",
+    "semantic_hash": ""
+  },
+  "skills/upwork-evaluate-and-apply/SKILL.md": {
+    "mtime": 1788366463.4762335,
+    "seen": 1788368500.55119,
+    "ast_hash": "b209abd4151b1212302a5f83404bea1f",
+    "semantic_hash": ""
+  },
+  "skills/upwork-update-profile-from-resume/SKILL.md": {
+    "mtime": 1788363246.4341128,
+    "seen": 1788368500.551191,
+    "ast_hash": "d0cd3012e599a1cc38ac4705cf1eb4c7",
+    "semantic_hash": ""
+  },
+  "tests/test_status_tray_hotkeys.py": {
+    "mtime": 1788369091.4973197,
+    "seen": 1788369106.210869,
+    "ast_hash": "e65c36ad5b6ba9b3e2291a4340104eaf",
+    "semantic_hash": ""
+  },
+  "tests/test_orchestrator_shutdown.py": {
+    "mtime": 1788369403.793287,
+    "seen": 1788369439.3975449,
+    "ast_hash": "56c775ecb1c06d629ed4bb676b2b434d",
     "semantic_hash": ""
   }
 }

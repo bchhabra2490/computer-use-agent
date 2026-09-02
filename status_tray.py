@@ -3,7 +3,7 @@ macOS menu-bar status icon for the computer-use agent.
 
 Hover the icon to see live status + recent log lines (tooltip).
 Click for a menu with Send (while listening), Add Memory, Log Overlay, Face Overlay,
-Chat (⌘⌃C), Sleep (⌘⌃S), Mark Task Done, logs, and quit.
+Chat (⌘⌃C), Sleep (⌘⌃S), Listen/Cancel (⌘⌃J), Mark Task Done, logs, and quit.
 
 Usage:
     python status_tray.py
@@ -257,6 +257,20 @@ def _latest_log_dir(explicit: str | None = None) -> Path | None:
     return max(dirs, key=lambda p: p.stat().st_mtime)
 
 
+def trigger_listen_shortcut(data: dict | None = None) -> str:
+    """Toggle global listening: start when idle, cancel and discard when active."""
+    snap = data if data is not None else read_status()
+    listening = bool(snap.get("stt_active")) or str(snap.get("state") or "") in {
+        "listening",
+        "ask",
+    }
+    if listening:
+        request_cancel()
+        return "cancel"
+    request_listen()
+    return "listen"
+
+
 def main() -> None:
     if sys.platform != "darwin":
         print("status_tray is macOS-only.", file=sys.stderr)
@@ -340,7 +354,7 @@ def main() -> None:
 
                 def _global_hotkey(event):
                     # ⌘⌃C = chat toggle (avoids Chrome Inspect ⌘⌥C)
-                    # ⌘⌃S = sleep toggle; ⌘⌃J = listen without wake word.
+                    # ⌘⌃S = sleep toggle; ⌘⌃J = listen/cancel without wake word.
                     try:
                         flags = int(event.modifierFlags())
                         # Ignore Caps Lock / Fn bits; only care about cmd/opt/ctrl/shift.
@@ -376,7 +390,7 @@ def main() -> None:
                 self._hotkeyMonitors = [m for m in (g, loc) if m is not None]
                 print(
                     "[tray] hotkeys ⌘⌃C (chat) · ⌘⌃S (sleep) · "
-                    "⌘⌃J (listen) armed",
+                    "⌘⌃J (listen/cancel) armed",
                     flush=True,
                 )
             except Exception as e:
@@ -884,10 +898,7 @@ def main() -> None:
             self.applyStatus(read_status())
 
         def listenNow_(self, _sender) -> None:
-            data = read_status()
-            if bool(data.get("stt_active")):
-                return
-            request_listen()
+            trigger_listen_shortcut()
 
         def sendAudio_(self, _sender) -> None:
             data = read_status()

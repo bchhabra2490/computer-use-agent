@@ -8,11 +8,12 @@ Full command reference::
 
     cua help
 
-Passive desktop observer (separate process, drafts only)::
+Passive desktop observer (automatic memory; skill drafts only)::
 
     cua observe start
     cua observe list
-    cua observe accept 20260818T134913Z_google-chrome m1 s2
+    cua observe accept 20260818T134913Z_google-chrome s2
+    cua observe compact
 
 MCP apps (Linear, GitHub, …) connect with browser login::
 
@@ -717,13 +718,14 @@ def main(argv: list[str] | None = None) -> int:
 
     obs_p = sub.add_parser(
         "observe",
-        help="Passive desktop observer (draft memories/skills from your own clicks)",
+        help="Passive desktop observer (automatic memory and skill drafts)",
     )
     obs_sub = obs_p.add_subparsers(dest="observe_command", required=True)
     obs_sub.add_parser("start", help="Start the observer daemon (does not start with cua start)")
     obs_sub.add_parser("stop", help="Stop the observer daemon")
     obs_sub.add_parser("status", help="Show observer pid and pending draft count")
     obs_sub.add_parser("list", help="List proposed drafts")
+    obs_sub.add_parser("compact", help="Compact old graph evidence and rebuild its export")
 
     dict_p = sub.add_parser(
         "dictation",
@@ -937,6 +939,8 @@ def main(argv: list[str] | None = None) -> int:
             return observe_mod.cmd_status()
         if args.observe_command == "list":
             return observe_mod.cmd_list()
+        if args.observe_command == "compact":
+            return observe_mod.cmd_compact()
         if args.observe_command == "accept":
             return observe_mod.cmd_accept(
                 name=args.id,

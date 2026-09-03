@@ -135,20 +135,25 @@ messages, credentials, deletion, or other consequential actions.
 ### Workflow observer
 
 `cua observe` is a separate, opt-in process. It records inexpensive app/window/
-URL context and interaction samples, then proposes memories and reusable skills.
-Nothing enters durable memory until accepted.
+URL context and interaction samples, then extracts memories, evidence-backed
+knowledge-graph claims, and reusable skills. Memories and validated graph claims
+are saved automatically; generated executable skills remain reviewable drafts.
 
 ```bash
 cua observe start
 cua observe list
-cua observe accept <draft-id> m1 s1
+cua observe compact
+cua observe accept <draft-id> s1
 cua observe accept --all
 cua observe reject --all
 cua observe stop
 ```
 
-Password managers are skipped, and the observer pauses while the agent controls
-the pointer. Drafts live under `.runtime/observe/proposed/`.
+Password managers are skipped, secret-like content is rejected, and the observer
+pauses while the agent controls the pointer. Skill drafts live under
+`.runtime/observe/proposed/`. The authoritative graph is stored in
+`memory/graph/memory.sqlite3`; a rebuildable Graphify projection is written to
+`memory/graph/graphify-out/graph.json`.
 
 ## Voice and models
 
@@ -245,6 +250,15 @@ cua skills merge
 Durable memories are organized under `memory/personal/`, `memory/apps/`, and
 `memory/screens/`. Disable automatic extraction or condensation with
 `MEMORY_EXTRACT=0` or `MEMORY_CONDENSE=0`.
+Accepted relationships are stored in the temporal SQLite memory graph and are
+included in relevant memory context alongside Markdown results.
+The graph compacts automatically: raw observation payloads become summaries
+after 30 days, repeated evidence is capped at 20 observations per claim, and
+old unreferenced observations expire after 7 days. These defaults are
+configurable with the `MEMORY_GRAPH_*` settings in `.env.example`; accepted
+entities and claims are not removed merely because they are old.
+Archived observation screenshots expire after 7 days and their session folders
+after 30 days; pending skill drafts are never removed by compaction.
 The Markdown remains directly editable and is searched section-by-section for
 each request. Both agent loops receive the best matching excerpts automatically
 and can call `search_memories` when they need broader recall without knowing a
@@ -273,7 +287,8 @@ their project-managed locations.
 - Treat terminal access as full local shell access.
 - Browser-data and WebMCP backends use isolated profiles, not personal cookies.
 - Keep `.env`, `mcp.json`, `.runtime/`, recordings, and logs out of source control.
-- Review observer drafts before accepting them into memory or skills.
+- Review observer drafts before accepting generated executable skills. Memories
+  and validated graph claims are saved automatically.
 
 ## Project map
 

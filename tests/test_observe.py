@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import time
@@ -108,6 +109,30 @@ class ParseExtractTests(unittest.TestCase):
         self.assertEqual(memories, [])
         self.assertEqual(skills, [])
 
+    def test_parses_validated_graph_changes(self) -> None:
+        changes = observe.parse_observe_graph_changes(
+            {
+                "graph_changes": {
+                    "entities": [
+                        {"id": "person:self", "type": "person", "label": "User"},
+                        {"id": "project:agent", "type": "project", "label": "Agent"},
+                    ],
+                    "claims": [
+                        {
+                            "subject_id": "person:self",
+                            "predicate": "WORKS_ON",
+                            "object_id": "project:agent",
+                            "epistemic_status": "observed",
+                            "confidence": 0.8,
+                            "evidence": "Code window",
+                        }
+                    ],
+                }
+            }
+        )
+        self.assertEqual(len(changes["entities"]), 2)
+        self.assertEqual(changes["claims"][0]["predicate"], "WORKS_ON")
+
 
 class ObserverFlushTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -209,6 +234,76 @@ class ObserverFlushTests(unittest.TestCase):
             self.obs.stop()
         self.assertEqual(self.flushed, [])
         self.assertEqual(self.obs._window.segments[0]["reason"], "shutdown")
+
+
+class ObserverAutoMemoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.folder = self.root / "proposed" / "obs-auto"
+        self.folder.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_extract_auto_saves_memory_and_graph_without_draft(self) -> None:
+        import memory
+        import memory_graph
+
+        extracted = (
+            [{"kind": "app", "name": "code", "text": "Works on Agent"}],
+            [],
+            {
+                "entities": [
+                    {"id": "person:self", "type": "person", "label": "User", "sensitivity": "normal"},
+                    {"id": "project:agent", "type": "project", "label": "Agent", "sensitivity": "normal"},
+                ],
+                "claims": [
+                    {
+                        "subject_id": "person:self", "predicate": "WORKS_ON",
+                        "object_id": "project:agent", "epistemic_status": "observed",
+                        "confidence": 0.9, "valid_from": None, "valid_to": None,
+                        "evidence": "Code window",
+                    }
+                ],
+            },
+        )
+        payload = {
+            "focus": {"app": "Code", "title": "Agent", "url": ""},
+            "events": [{"t": "2026-09-03T10:00:00+00:00", "kind": "click"}],
+            "segments": [{"events": [{"t": "2026-09-03T10:00:00+00:00", "kind": "click"}]}],
+        }
+        with (
+            patch.object(observe, "_run_extract", return_value=extracted),
+            patch.object(observe, "ACCEPTED_DIR", self.root / "accepted"),
+            patch.object(memory, "MEMORY_DIR", self.root / "memory"),
+            patch.object(memory_graph, "DEFAULT_MEMORY_DIR", self.root / "memory"),
+            patch.dict("os.environ", {"MEMORY_CONDENSE": "0"}),
+        ):
+            Observer()._extract(self.folder, payload, None)
+        self.assertFalse(self.folder.exists())
+        self.assertTrue((self.root / "accepted" / "obs-auto" / "draft.json").is_file())
+        self.assertTrue((self.root / "memory" / "apps" / "code.md").is_file())
+        hits = memory_graph.search_graph("Agent", memory_dir=self.root / "memory")
+        self.assertEqual(hits[0]["predicate"], "WORKS_ON")
+
+    def test_artifact_compaction_never_touches_pending_drafts(self) -> None:
+        archived = self.root / "accepted" / "old"
+        pending = self.root / "proposed" / "old"
+        archived.mkdir(parents=True)
+        pending.mkdir(parents=True)
+        (archived / "screen.png").write_bytes(b"png")
+        (archived / "draft.json").write_text("{}", encoding="utf-8")
+        (pending / "screen.png").write_bytes(b"png")
+        old = time.time() - 40 * 86400
+        os.utime(archived, (old, old))
+        os.utime(archived / "screen.png", (old, old))
+        stats = observe.compact_observe_artifacts(
+            roots=[self.root / "accepted"], screenshot_days=7, archive_days=30
+        )
+        self.assertEqual(stats["archives_deleted"], 1)
+        self.assertFalse(archived.exists())
+        self.assertTrue(pending.exists())
 
 
 class DraftAcceptTests(unittest.TestCase):

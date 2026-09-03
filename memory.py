@@ -437,13 +437,21 @@ def format_relevant_memories(
 ) -> str:
     """Prompt-ready memory excerpts selected for the current task."""
     hits = search_memories(query, limit=limit, memory_dir=memory_dir)
+    try:
+        from memory_graph import format_graph_memories
+
+        graph_text = format_graph_memories(query, limit=limit, memory_dir=memory_dir)
+    except Exception:
+        graph_text = ""
     if not hits:
-        return format_memory_catalog(memory_dir=memory_dir)
+        return graph_text or format_memory_catalog(memory_dir=memory_dir)
     lines = ["Relevant saved memory excerpts (selected for this request):"]
     for hit in hits:
         excerpt = " ".join(line.strip() for line in hit.text.splitlines() if line.strip())
         lines.append(f"  - {hit.note.rel}: {excerpt[:500]}")
     lines.append("Use search_memories for broader recall and read_memory for the complete note.")
+    if graph_text:
+        lines.extend(["", graph_text])
     return "\n".join(lines)
 
 

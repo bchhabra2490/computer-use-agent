@@ -829,6 +829,7 @@ def run(
         monitors=monitors,
         screenshot_size=(shot_w, shot_h),
         include_geometry=True,
+        memory_query=task,
     )
     display_ctx = bundle.desktop_block()
     skills = discover_skills()

@@ -41,3 +41,15 @@ def test_listen_shortcut_cancels_ask_user_capture():
     assert result == "cancel"
     cancel.assert_called_once_with()
     listen.assert_not_called()
+
+
+def test_listen_shortcut_cancels_turn_while_thinking():
+    with (
+        patch("status_tray.request_listen") as listen,
+        patch("status_tray.request_cancel") as cancel,
+    ):
+        result = trigger_listen_shortcut({"state": "thinking", "stt_active": False})
+
+    assert result == "cancel"
+    cancel.assert_called_once_with()
+    listen.assert_not_called()

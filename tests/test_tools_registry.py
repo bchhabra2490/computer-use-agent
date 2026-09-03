@@ -19,11 +19,13 @@ class ToolRegistryTests(unittest.TestCase):
             names = [t.get("name") or t.get("type") for t in tr.orchestrator_tools()]
         self.assertIn("start_task", names)
         self.assertIn("give_response_to_user", names)
+        self.assertIn("send_chat_message", names)
         self.assertIn("who_am_i", names)
         self.assertIn("ask_user", names)
         self.assertIn("list_open_apps", names)
         self.assertIn("read_screen", names)
         self.assertIn("set_timer", names)
+        self.assertIn("send_chat_message", names)
         self.assertNotIn("computer", names)
         self.assertNotIn("mark_done", names)
 
@@ -62,6 +64,20 @@ class ToolRegistryTests(unittest.TestCase):
         desc = tr.RUN_TERMINAL_TOOL["description"].lower()
         self.assertIn("sleep", desc)
         self.assertIn("say", desc)
+
+    def test_send_chat_message_dispatches(self) -> None:
+        with patch(
+            "chat_bridge.post_assistant_message",
+            return_value={"chat_id": "abc", "message_id": "m1", "opened": False},
+        ) as post:
+            outcome = tr.run_tool(
+                "send_chat_message",
+                {"message": "Put this in chat", "open_window": False},
+                brain="agent",
+            )
+        self.assertFalse(outcome.is_error)
+        self.assertIn("abc", outcome.output)
+        post.assert_called_once_with("Put this in chat", open_window=False)
 
     def test_unknown_shared_raises(self) -> None:
         with self.assertRaises(KeyError):

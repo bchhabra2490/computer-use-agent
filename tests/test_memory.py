@@ -152,6 +152,43 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertIn("Hi", body)
 
+    def test_search_memories_ranks_relevant_sections(self) -> None:
+        mem.save_memory(
+            "personal", "hardware", "My multimeter is a Fluke 117.",
+            memory_dir=self.root, condense=False,
+        )
+        mem.save_memory(
+            "app", "youtube", "Prefer ambient music playlists.",
+            memory_dir=self.root, condense=False,
+        )
+        hits = mem.search_memories("which multimeter do I own", memory_dir=self.root)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].note.rel, "personal/profile.md")
+        self.assertIn("Fluke 117", hits[0].text)
+
+    def test_search_tool_does_not_require_filename(self) -> None:
+        mem.save_memory(
+            "app", "github", "Repository owner is bchhabra2490.",
+            memory_dir=self.root, condense=False,
+        )
+        with patch.object(mem, "MEMORY_DIR", self.root):
+            out = mem.run_memory_tool(
+                "search_memories",
+                {"query": "repository owner", "kind": "all", "limit": 3},
+            )
+        self.assertIn("app/github.md", out)
+        self.assertIn("bchhabra2490", out)
+
+    def test_relevant_memory_context_falls_back_to_catalog(self) -> None:
+        mem.save_memory(
+            "app", "maps", "Home is Wentworth Avenue.",
+            memory_dir=self.root, condense=False,
+        )
+        relevant = mem.format_relevant_memories("navigate home", memory_dir=self.root)
+        self.assertIn("app/maps.md", relevant)
+        fallback = mem.format_relevant_memories("quantum zebras", memory_dir=self.root)
+        self.assertIn("Saved memories", fallback)
+
 
 class TurnTraceTests(unittest.TestCase):
     def test_as_text_includes_user_and_steps(self) -> None:

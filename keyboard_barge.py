@@ -201,6 +201,14 @@ def acquire_tts_interrupt(
 
     def bridge() -> None:
         while not stop.is_set():
+            try:
+                from app_status import cancel_pending
+
+                if cancel_pending():
+                    merged.set()
+                    return
+            except Exception:
+                pass
             if use_keyboard and _kb_event.is_set():
                 merged.set()
                 return
@@ -208,8 +216,6 @@ def acquire_tts_interrupt(
                 if src.is_set():
                     merged.set()
                     return
-            if not active_sources and not use_keyboard:
-                return
             time.sleep(0.04)
 
     bridge_thread = threading.Thread(target=bridge, name="tts-interrupt-bridge", daemon=True)

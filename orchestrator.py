@@ -230,6 +230,10 @@ def llm_error_speech(exc: BaseException) -> str:
 _phone_photo_in_session = False
 
 
+class VoiceTurnCancelled(Exception):
+    """The user discarded the current voice turn with the global shortcut."""
+
+
 class AgentJob:
     """Background computer-agent run + ZeroMQ inbox handle."""
 
@@ -1839,6 +1843,8 @@ def _process_response(
     api = llm if llm is not None else client
     end_session = False
     while True:
+        if consume_cancel():
+            raise VoiceTurnCancelled("voice turn cancelled before response processing")
         # Only speech from *this* model response should suppress leftover TTS.
         # Earlier give_response_to_user in the same turn (e.g. a mid-turn question)
         # must not silence a later plain-message answer (stream often has chars=0).
@@ -1847,6 +1853,8 @@ def _process_response(
         _record_llm_step(turn, response)
         function_calls = [i for i in response.output if i.type == "function_call"]
         if not function_calls:
+            if consume_cancel():
+                raise VoiceTurnCancelled("voice turn cancelled before reply")
             leftover = _assistant_message_text(response)
             spoke_this_response = _turn_spoke_since(turn, steps_at_response_start)
             if leftover and _looks_like_question(leftover) and not spoke_this_response:
@@ -1905,6 +1913,8 @@ def _process_response(
         close_after_speech = False
 
         for call in function_calls:
+            if consume_cancel():
+                raise VoiceTurnCancelled("voice turn cancelled before tool execution")
             out, stop, job, screen_png = _handle_tool(
                 client,
                 call,
@@ -2100,8 +2110,8 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             "the request.\n"
         )
 
-    def _system_prompt(*, session_summary: str = "") -> str:
-        bundle = assemble_context()
+    def _system_prompt(*, session_summary: str = "", memory_query: str | None = None) -> str:
+        bundle = assemble_context(memory_query=memory_query)
         return build_system_prompt(
             skills=bundle.skills,
             memories=bundle.memories,
@@ -2194,6 +2204,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             photo_turn = phone_photo_pending()
             if not photo_turn:
                 utterance = _confirm_heard(client, utterance)
+            if consume_cancel():
+                print("[orchestrator] voice turn discarded before processing", flush=True)
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
             print(f'\n[user] "{utterance}"')
             status_log(f'[user] "{utterance}"')
             _record_speaker()
@@ -2267,6 +2282,11 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 pending_fn_outputs=pending_fn_outputs or None,
                 capture_desktop=not bool(chat_shot),
             )
+            if consume_cancel():
+                print("[orchestrator] voice turn discarded during context capture", flush=True)
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
             task_history = cp.task_history
             if cp.reset_thread:
                 previous_id = None
@@ -2300,7 +2320,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             )
             pending_fn_outputs = []
             turn = TurnTrace(utterance)
-            system = _system_prompt(session_summary=compact_state.session_summary)
+            system = _system_prompt(
+                session_summary=compact_state.session_summary,
+                memory_query=utterance,
+            )
 
             response = None
             for overflow_attempt in range(2):
@@ -2342,7 +2365,10 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                         task_history = cp.task_history
                         if cp.reset_thread:
                             previous_id = None
-                        system = _system_prompt(session_summary=compact_state.session_summary)
+                        system = _system_prompt(
+                            session_summary=compact_state.session_summary,
+                            memory_query=utterance,
+                        )
                         if chat_shot:
                             overflow_context = _CHAT_SCREENSHOT_CONTEXT
                             overflow_png = chat_shot
@@ -2373,6 +2399,15 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                 audio.cooldown()
                 continue
 
+            if consume_cancel():
+                from latency_report import abandon_trace, current_trace_id
+
+                abandon_trace(current_trace_id(), reason="user_cancelled")
+                print("[orchestrator] voice turn discarded during planning", flush=True)
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
+
             from latency_report import current_trace_id, mark
 
             mark(current_trace_id(), "plan_ready")
@@ -2393,6 +2428,15 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
                     compact_state=compact_state,
                     llm=llm,
                 )
+            except VoiceTurnCancelled:
+                from latency_report import abandon_trace, current_trace_id
+
+                abandon_trace(current_trace_id(), reason="user_cancelled")
+                pending_fn_outputs = []
+                print("[orchestrator] voice turn cancelled — returning to idle", flush=True)
+                sess.enter("ready", "Waiting for next request")
+                audio.cooldown()
+                continue
             except LlmUnavailableError as e:
                 _announce_llm_failure(client, e)
                 sess.enter("ready", "Waiting for next request")

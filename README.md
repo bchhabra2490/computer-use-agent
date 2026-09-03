@@ -169,10 +169,18 @@ Say the configured wake phrase, speak a request, and say **over and out** to end
 capture. Say the wake phrase during speech to interrupt. Agent questions can be
 answered directly without repeating the wake phrase.
 
+Press **Command-Control-J** at any point in a voice turn to cancel it. Active
+audio is discarded, queued speech is cleared, planning/tool execution is
+suppressed, and Jarvis returns to idle. The same shortcut starts listening when
+Jarvis is already idle. Escape also cancels capture when the terminal is focused.
+
 ## Chat and phone access
 
 The menu-bar app exposes live state, logs, sleep mode, chat, face/log overlays,
 screen-memory capture, and task cancellation.
+The orchestrator and computer-use agent can also call `send_chat_message` when
+you ask them to put results or other text in the chat window. Messages are
+stored in the active conversation even if the window is closed.
 
 Install the chat UI once:
 
@@ -237,6 +245,10 @@ cua skills merge
 Durable memories are organized under `memory/personal/`, `memory/apps/`, and
 `memory/screens/`. Disable automatic extraction or condensation with
 `MEMORY_EXTRACT=0` or `MEMORY_CONDENSE=0`.
+The Markdown remains directly editable and is searched section-by-section for
+each request. Both agent loops receive the best matching excerpts automatically
+and can call `search_memories` when they need broader recall without knowing a
+memory filename.
 
 Each task writes a trace under `logs/<timestamp>_<task>/`, including tool calls,
 results, routing decisions, and available user feedback.

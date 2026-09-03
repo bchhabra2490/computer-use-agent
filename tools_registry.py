@@ -116,6 +116,32 @@ GIVE_RESPONSE_TOOL = {
     "strict": True,
 }
 
+SEND_CHAT_MESSAGE_TOOL = {
+    "type": "function",
+    "name": "send_chat_message",
+    "description": (
+        "Post text directly into the desktop chat window without speaking it. "
+        "Use when the user asks to put, push, send, or show information in chat. "
+        "The message is persisted in the active chat; a new chat is created if needed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "The complete text to place in chat. Markdown is allowed.",
+            },
+            "open_window": {
+                "type": "boolean",
+                "description": "Whether to open and focus the desktop chat window.",
+            },
+        },
+        "required": ["message", "open_window"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 SET_TIMER_TOOL = {
     "type": "function",
     "name": "set_timer",
@@ -521,9 +547,11 @@ SHARED_TOOL_NAMES = frozenset(
     {
         "who_am_i",
         "list_memories",
+        "search_memories",
         "read_memory",
         "save_memory",
         "save_screen_memory",
+        "send_chat_message",
         "mcp_call",
         "list_open_apps",
         "read_screen",
@@ -579,6 +607,7 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(START_TASK_TOOL, ORCHESTRATOR),
     _entry(ASK_USER_TOOL, ORCHESTRATOR, AGENT),
     _entry(GIVE_RESPONSE_TOOL, ORCHESTRATOR),
+    _entry(SEND_CHAT_MESSAGE_TOOL, ORCHESTRATOR, AGENT),
     *(_entry(tool, ORCHESTRATOR, AGENT) for tool in MEMORY_TOOLS),
     _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT),
     _entry(READ_SCREEN_TOOL, ORCHESTRATOR, AGENT),
@@ -674,7 +703,25 @@ def execute_prepared_tool(
             return _execute_read_screen(args, client=client)
         if name == "who_am_i":
             return ToolOutcome(output=run_whoami_tool(name, args))
-        if name in {"list_memories", "read_memory", "save_memory", "save_screen_memory"}:
+        if name == "send_chat_message":
+            from chat_bridge import post_assistant_message
+
+            message = str(args.get("message") or "").strip()
+            open_window = bool(args.get("open_window"))
+            result = post_assistant_message(message, open_window=open_window)
+            return ToolOutcome(
+                output=(
+                    f"Posted message to chat {result['chat_id']}"
+                    + (" and opened the chat window." if result["opened"] else ".")
+                )
+            )
+        if name in {
+            "list_memories",
+            "search_memories",
+            "read_memory",
+            "save_memory",
+            "save_screen_memory",
+        }:
             return ToolOutcome(output=run_memory_tool(name, args, client=client))
         if name == "mcp_call":
             from mcp_client import run_mcp_tool

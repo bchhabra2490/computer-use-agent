@@ -94,12 +94,13 @@ def assemble_context(
     runtime_dir: Path | None = None,
     occupancy: list[dict[str, Any]] | None = None,
     frontmost: str | None = None,
+    memory_query: str | None = None,
 ) -> ContextBundle:
     """Build the catalogs injected into orchestrator / agent prompts."""
     from actions import format_display_context
     from displays import format_monitor_occupancy
     from mcp_client import format_mcp_catalog
-    from memory import format_memory_catalog
+    from memory import format_memory_catalog, format_relevant_memories
     from skills import format_skill_catalog
 
     geometry = ""
@@ -116,7 +117,10 @@ def assemble_context(
     bundle = ContextBundle(
         displays=_clip(displays, BUDGET_DISPLAYS),
         skills=_clip(format_skill_catalog(), BUDGET_SKILLS),
-        memories=_clip(format_memory_catalog(), BUDGET_MEMORIES),
+        memories=_clip(
+            format_relevant_memories(memory_query) if memory_query else format_memory_catalog(),
+            BUDGET_MEMORIES,
+        ),
         mcp=_clip(format_mcp_catalog(), BUDGET_MCP),
         geometry=_clip(geometry, BUDGET_DISPLAYS) if geometry else "",
         not_to_do=_clip(format_not_to_do(), BUDGET_NOT_TO_DO),

@@ -61,6 +61,24 @@ class PersistInboxTests(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0].content, "orphan reply")
 
+    def test_agent_message_posts_to_active_chat(self) -> None:
+        chat = self.store.create_chat(title="Mine")
+        self.store.set_active_chat_id(chat.id)
+
+        out = cb.post_assistant_message("Results: **done**", store=self.store)
+
+        self.assertEqual(out["chat_id"], chat.id)
+        self.assertFalse(out["opened"])
+        msgs = self.store.list_messages(chat.id)
+        self.assertEqual([(m.role, m.content) for m in msgs], [("assistant", "Results: **done**")])
+
+    def test_agent_message_creates_chat_when_none(self) -> None:
+        out = cb.post_assistant_message("A standalone update", store=self.store)
+
+        self.assertTrue(out["chat_id"])
+        self.assertEqual(self.store.active_chat_id(), out["chat_id"])
+        self.assertEqual(self.store.list_messages(out["chat_id"])[0].content, "A standalone update")
+
 
 if __name__ == "__main__":
     unittest.main()

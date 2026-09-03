@@ -142,6 +142,12 @@ class FlagTests(unittest.TestCase):
         self.assertTrue(st.consume_listen())
         self.assertFalse(st.consume_listen())
 
+    def test_stt_teardown_preserves_late_cancel_for_orchestrator(self) -> None:
+        st.set_stt_listening(True)
+        st.request_cancel()
+        st.set_stt_listening(False)
+        self.assertTrue(st.consume_cancel())
+
     def test_utterance_queue_is_fifo(self) -> None:
         st.enqueue_utterance("one")
         st.enqueue_utterance("two")

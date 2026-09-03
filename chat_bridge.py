@@ -741,6 +741,38 @@ def resolve_active_chat_id(store=None) -> str | None:
     return st.active_chat_id()
 
 
+def post_assistant_message(
+    text: str,
+    *,
+    chat_id: str | None = None,
+    open_window: bool = False,
+    store=None,
+) -> dict[str, Any]:
+    """Persist an agent-authored line in chat, optionally opening the window."""
+    body = (text or "").strip()
+    if not body:
+        raise ValueError("Chat message is empty.")
+    st = store or get_store()
+    target = (chat_id or "").strip() or resolve_active_chat_id(st)
+    if target and st.get_chat(target) is None:
+        raise ValueError(f"Chat {target!r} does not exist.")
+    if not target:
+        chat = st.create_chat(title=title_from_text(body, fallback="Agent message"))
+        target = chat.id
+    st.set_active_chat_id(target)
+    row = st.add_message(target, "assistant", body)
+    if open_window:
+        from chat_overlay import ensure_chat_bridge_and_app
+
+        ensure_chat_bridge_and_app(focus=True)
+    return {
+        "ok": True,
+        "chat_id": target,
+        "message_id": row.id,
+        "opened": bool(open_window),
+    }
+
+
 def persist_chat_inbox() -> dict[str, Any]:
     """Drain spoken inbox into SQLite so replies survive a closed chat window.
 

@@ -225,7 +225,9 @@ def set_stt_listening(active: bool) -> None:
             data["send_requested"] = False
         else:
             data["send_requested"] = False
-            data["cancel_requested"] = False
+            # A global shortcut can land after STT's final cancel check but
+            # before teardown. Preserve it so the orchestrator can still
+            # discard the completed transcript instead of processing it.
         _write(data)
 
 

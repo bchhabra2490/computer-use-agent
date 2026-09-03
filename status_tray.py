@@ -258,13 +258,11 @@ def _latest_log_dir(explicit: str | None = None) -> Path | None:
 
 
 def trigger_listen_shortcut(data: dict | None = None) -> str:
-    """Toggle global listening: start when idle, cancel and discard when active."""
+    """Start from idle; otherwise cancel and discard the current voice turn."""
     snap = data if data is not None else read_status()
-    listening = bool(snap.get("stt_active")) or str(snap.get("state") or "") in {
-        "listening",
-        "ask",
-    }
-    if listening:
+    state = str(snap.get("state") or "").strip().lower()
+    idle = not bool(snap.get("stt_active")) and state in {"idle", "ready", "waiting"}
+    if not idle:
         request_cancel()
         return "cancel"
     request_listen()

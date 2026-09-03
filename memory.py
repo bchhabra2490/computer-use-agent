@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import threading
@@ -73,6 +74,15 @@ class MemoryNote:
     @property
     def rel(self) -> str:
         return f"{self.kind}/{self.name}.md"
+
+
+@dataclass(frozen=True)
+class MemoryHit:
+    """A relevant section from a memory note."""
+
+    note: MemoryNote
+    text: str
+    score: float
 
 
 def _root(memory_dir: Path | None) -> Path:
@@ -331,6 +341,109 @@ def format_memory_catalog(*, memory_dir: Path | None = None) -> str:
     ]
     for note in notes:
         lines.append(f"  - {note.rel}: {_preview(note.text)}")
+    return "\n".join(lines)
+
+
+_SEARCH_WORD_RE = re.compile(r"[a-z0-9][a-z0-9._@+-]*", re.IGNORECASE)
+_SEARCH_STOP_WORDS = frozenset(
+    {
+        "a", "an", "and", "are", "do", "for", "from", "how", "i", "in", "is",
+        "it", "me", "my", "of", "on", "please", "the", "this", "to", "was",
+        "what", "when", "where", "which", "with", "you",
+    }
+)
+
+
+def _search_terms(text: str) -> list[str]:
+    return [
+        word.lower()
+        for word in _SEARCH_WORD_RE.findall(text or "")
+        if len(word) > 1 and word.lower() not in _SEARCH_STOP_WORDS
+    ]
+
+
+def _memory_sections(note: MemoryNote) -> list[str]:
+    """Split a note into independently retrievable heading sections."""
+    sections: list[str] = []
+    current: list[str] = []
+    for line in note.text.splitlines():
+        if line.startswith("## ") and current:
+            body = "\n".join(current).strip()
+            if body:
+                sections.append(body)
+            current = [line]
+        else:
+            current.append(line)
+    body = "\n".join(current).strip()
+    if body:
+        sections.append(body)
+    return sections
+
+
+def search_memories(
+    query: str,
+    *,
+    kind: str = "all",
+    limit: int = 5,
+    memory_dir: Path | None = None,
+) -> list[MemoryHit]:
+    """Rank relevant memory sections with a small, dependency-free BM25 search."""
+    terms = _search_terms(query)
+    if not terms or limit <= 0:
+        return []
+    documents: list[tuple[MemoryNote, str, list[str]]] = []
+    for note in list_memories(kind, memory_dir=memory_dir):
+        if _is_live_layout_memory(note.kind, note.name):
+            continue
+        for section in _memory_sections(note):
+            searchable = f"{note.kind} {note.name} {section}"
+            documents.append((note, section, _search_terms(searchable)))
+    if not documents:
+        return []
+
+    doc_count = len(documents)
+    avg_len = sum(len(words) for _, _, words in documents) / doc_count or 1.0
+    document_frequency = {
+        term: sum(1 for _, _, words in documents if term in set(words)) for term in set(terms)
+    }
+    query_phrase = " ".join(terms)
+    hits: list[MemoryHit] = []
+    for note, section, words in documents:
+        if not words:
+            continue
+        score = 0.0
+        for term in terms:
+            frequency = words.count(term)
+            if not frequency:
+                continue
+            df = document_frequency[term]
+            inverse_frequency = math.log(1.0 + (doc_count - df + 0.5) / (df + 0.5))
+            denominator = frequency + 1.2 * (0.25 + 0.75 * len(words) / avg_len)
+            score += inverse_frequency * (frequency * 2.2 / denominator)
+        haystack = " ".join(words)
+        if query_phrase and query_phrase in haystack:
+            score += 1.5
+        if score > 0:
+            hits.append(MemoryHit(note=note, text=section, score=score))
+    hits.sort(key=lambda hit: (-hit.score, hit.note.rel, hit.text))
+    return hits[: min(limit, 20)]
+
+
+def format_relevant_memories(
+    query: str,
+    *,
+    limit: int = 5,
+    memory_dir: Path | None = None,
+) -> str:
+    """Prompt-ready memory excerpts selected for the current task."""
+    hits = search_memories(query, limit=limit, memory_dir=memory_dir)
+    if not hits:
+        return format_memory_catalog(memory_dir=memory_dir)
+    lines = ["Relevant saved memory excerpts (selected for this request):"]
+    for hit in hits:
+        excerpt = " ".join(line.strip() for line in hit.text.splitlines() if line.strip())
+        lines.append(f"  - {hit.note.rel}: {excerpt[:500]}")
+    lines.append("Use search_memories for broader recall and read_memory for the complete note.")
     return "\n".join(lines)
 
 
@@ -1119,6 +1232,36 @@ READ_MEMORY_TOOL = {
     "strict": True,
 }
 
+SEARCH_MEMORIES_TOOL = {
+    "type": "function",
+    "name": "search_memories",
+    "description": (
+        "Search all stored memory by meaning-bearing keywords and return the most "
+        "relevant note sections. Prefer this when you know the fact but not its "
+        "kind or filename; use read_memory afterward when the full note is needed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to recall, in plain language."},
+            "kind": {
+                "type": "string",
+                "enum": ["all", "personal", "app", "screen"],
+                "description": "Optional memory category filter.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "description": "Maximum matching sections to return.",
+            },
+        },
+        "required": ["query", "kind", "limit"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 SAVE_MEMORY_TOOL = {
     "type": "function",
     "name": "save_memory",
@@ -1191,6 +1334,7 @@ SAVE_SCREEN_MEMORY_TOOL = {
 
 MEMORY_TOOLS = [
     LIST_MEMORIES_TOOL,
+    SEARCH_MEMORIES_TOOL,
     READ_MEMORY_TOOL,
     SAVE_MEMORY_TOOL,
     SAVE_SCREEN_MEMORY_TOOL,
@@ -1212,6 +1356,20 @@ def run_memory_tool(name: str, args: dict, *, client: Any | None = None) -> str:
             if not notes:
                 return "No memories saved yet."
             return "\n".join(f"{n.rel}: {_preview(n.text)}" for n in notes)
+
+        if name == "search_memories":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "Error: search_memories requires a query."
+            limit = max(1, min(int(args.get("limit") or 5), 10))
+            hits = search_memories(query, kind=str(kind or "all"), limit=limit)
+            if not hits:
+                return "No relevant memories found."
+            rows = []
+            for hit in hits:
+                excerpt = " ".join(line.strip() for line in hit.text.splitlines() if line.strip())
+                rows.append(f"{hit.note.rel} (score {hit.score:.2f}): {excerpt[:700]}")
+            return "\n".join(rows)
 
         if name == "read_memory":
             return read_memory(str(kind or "personal"), mem_name)

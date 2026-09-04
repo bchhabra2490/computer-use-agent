@@ -66,9 +66,12 @@ flowchart LR
 ```mermaid
 flowchart LR
     Q[Web request] --> H[HTTP extraction]
-    H -->|JS shell / insufficient data| L[Lightpanda]
-    L -->|Unsupported / incomplete| C[Isolated Chromium]
-    C -->|Authentication or visual interaction needed| D[Visible desktop browser]
+    H -->|JS shell| L[Lightpanda]
+    H -->|Insufficient data| E[Endpoint discovery]
+    L -->|Incomplete| E
+    E -->|Observe JSON/XHR| C[Isolated Chromium]
+    C -->|Replay public endpoint| R
+    C -->|No relevant endpoint, auth, or interaction| D[Visible desktop browser]
     H --> R[Structured result]
     L --> R
     C --> R
@@ -170,6 +173,13 @@ The defaults and all supported options are documented in `.env.example`.
 Useful settings include `STT_PROVIDER`, `TTS_PROVIDER`, `WAKE_PHRASE`,
 `WAKE_THRESHOLD`, `ORCHESTRATOR_MODEL`, `AGENT_MODEL`, and `EVAL_EVERY`.
 
+Free-form OpenAI voice turns can optionally use the local Smart Turn v3.2
+audio classifier: set `STT_SMART_TURN=1`. It evaluates each speech-ending pause
+locally and sends early when the turn appears complete; `STT_IDLE_SECONDS`
+remains active as the fallback if the model says incomplete or cannot run. The
+small CPU ONNX model is downloaded on first use. Confirmation prompts, Fn
+dictation, explicit Send/Enter, and “over and out” retain their existing rules.
+
 Say the configured wake phrase, speak a request, and say **over and out** to end
 capture. Say the wake phrase during speech to interrupt. Agent questions can be
 answered directly without repeating the wake phrase.
@@ -211,7 +221,7 @@ for the intended mobile experience.
 
 ### Browser tools
 
-- `browser_data`: safe public-page Markdown, focused extraction, and links.
+- `browser_data`: safe public-page extraction, links, and public JSON/XHR endpoint discovery.
 - `browser_webmcp`: structured tools exposed by HTTPS pages.
 - Browser automation: isolated headless Chromium with visible-browser fallback.
 

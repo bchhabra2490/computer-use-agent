@@ -187,6 +187,95 @@ class BrowserDataTests(unittest.TestCase):
             )
         self.assertEqual(payload["fallback_required"], "desktop")
 
+    def test_endpoint_discovery_ranks_and_replays_relevant_json(self) -> None:
+        observed = {
+            "supported": True,
+            "endpoints": [
+                {
+                    "url": "https://example.com/api/navigation",
+                    "status": 200,
+                    "content_type": "application/json",
+                    "resource_type": "Fetch",
+                    "body": '{"items":["home","about"]}',
+                },
+                {
+                    "url": "https://example.com/api/forecast?city=mohali",
+                    "status": 200,
+                    "content_type": "application/json",
+                    "resource_type": "XHR",
+                    "body": '{"location":"Mohali","hourly":[{"rain_probability":25}]}',
+                },
+            ],
+        }
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(observed), stderr="")
+        replay = bd.PageResult(
+            "https://example.com/api/forecast?city=mohali",
+            "https://example.com/api/forecast?city=mohali",
+            content_type="application/json",
+            markdown='{"location":"Mohali","hourly":[{"rain_probability":25}]}',
+        )
+        with (
+            patch.object(bd, "_validate_public_url"),
+            patch.object(bd, "_chromium_binary", return_value="/opt/chromium"),
+            patch.object(bd.shutil, "which", return_value="/opt/node"),
+            patch.object(bd.subprocess, "run", return_value=completed),
+            patch.object(bd, "fetch_page", return_value=replay),
+        ):
+            payload = bd.discover_endpoints(
+                "https://example.com/weather", query="Mohali hourly rain forecast"
+            )
+        self.assertEqual(
+            payload["selected_endpoint"],
+            "https://example.com/api/forecast?city=mohali",
+        )
+        self.assertEqual(payload["selected_source"], "safe_http_replay")
+        self.assertIn("rain_probability", json.dumps(payload["data"]))
+        self.assertIsNone(payload["fallback_required"])
+
+    def test_endpoint_discovery_falls_back_when_no_json_is_observed(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"supported": True, "endpoints": []}),
+            stderr="",
+        )
+        with (
+            patch.object(bd, "_validate_public_url"),
+            patch.object(bd, "_chromium_binary", return_value="/opt/chromium"),
+            patch.object(bd.shutil, "which", return_value="/opt/node"),
+            patch.object(bd.subprocess, "run", return_value=completed),
+        ):
+            payload = bd.discover_endpoints("https://example.com", query="weather")
+        self.assertEqual(payload["fallback_required"], "desktop")
+        self.assertIsNone(payload["selected_endpoint"])
+
+    def test_endpoint_discovery_rejects_irrelevant_json(self) -> None:
+        observed = {
+            "supported": True,
+            "endpoints": [{
+                "url": "https://example.com/api/navigation",
+                "status": 200,
+                "content_type": "application/json",
+                "resource_type": "Fetch",
+                "body": '{"items":["home","about"]}',
+            }],
+        }
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(observed), stderr="")
+        with (
+            patch.object(bd, "_validate_public_url"),
+            patch.object(bd, "_chromium_binary", return_value="/opt/chromium"),
+            patch.object(bd.shutil, "which", return_value="/opt/node"),
+            patch.object(bd.subprocess, "run", return_value=completed),
+        ):
+            payload = bd.discover_endpoints(
+                "https://example.com/weather", query="Mohali rain forecast"
+            )
+        self.assertIsNone(payload["selected_endpoint"])
+        self.assertEqual(payload["fallback_required"], "desktop")
+
+    def test_tool_schema_exposes_endpoint_discovery(self) -> None:
+        operations = tr.BROWSER_DATA_TOOL["parameters"]["properties"]["operation"]["enum"]
+        self.assertIn("discover_endpoints", operations)
+
 
 if __name__ == "__main__":
     unittest.main()

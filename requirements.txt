@@ -18,6 +18,8 @@ numpy>=1.26.0
 pyzmq>=26.0.0
 openwakeword>=0.6.0
 onnxruntime>=1.17.0
+# Optional STT_SMART_TURN local audio endpointing (no torch required).
+transformers>=4.48.2
 speakeronnx>=0.1.0
 mcp>=1.28,<2
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

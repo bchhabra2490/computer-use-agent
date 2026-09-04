@@ -26,9 +26,10 @@ class ChatStreamTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_turn_source_from_chat_utterance(self) -> None:
-        st.enqueue_utterance("hello", source="chat")
+        st.enqueue_utterance("hello", source="chat", chat_id="chat-123")
         self.assertEqual(st.consume_utterance(), "hello")
         self.assertTrue(st.reply_to_chat())
+        self.assertEqual(st.turn_chat_id(), "chat-123")
         st.set_chat_stream("Hel", force=True)
         st.set_chat_stream("Hello", force=True)
         payload = st.chat_stream_payload()
@@ -38,6 +39,17 @@ class ChatStreamTests(unittest.TestCase):
         payload = st.chat_stream_payload()
         self.assertEqual(payload["text"], "Hello there")
         self.assertTrue(payload["done"])
+        self.assertEqual(payload["chat_id"], "chat-123")
+
+    def test_long_chat_response_is_not_truncated(self) -> None:
+        text = "long response " * 2000
+        st.enqueue_utterance("hello", source="chat", chat_id="long-chat")
+        st.consume_utterance()
+        st.set_chat_stream(text, force=True)
+        self.assertEqual(st.chat_stream_payload()["text"], text)
+        st.set_chat_overlay_enabled(True)
+        st.set_last_spoken(text)
+        self.assertEqual(st.consume_chat_inbox(), [text.strip()])
 
     def test_voice_turn_clears_stream(self) -> None:
         st.set_chat_stream("partial", force=True)

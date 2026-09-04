@@ -22,6 +22,7 @@ from orchestrator import (  # noqa: E402
     _listen_for_answer,
     _looks_like_question,
     _strip_wait_filler,
+    _tts_word_count,
     _turn_already_spoke,
     _turn_spoke_since,
     _user_turn_input,
@@ -219,6 +220,40 @@ class ListenForAnswerTests(unittest.TestCase):
 
 
 class ChatTextOnlySpeakTests(unittest.TestCase):
+    def test_word_count_handles_punctuation(self) -> None:
+        self.assertEqual(_tts_word_count("One, two — don't stop."), 4)
+
+    def test_long_reply_opens_chat_without_tts(self) -> None:
+        message = "word " * 81
+        with (
+            patch("orchestrator.set_chat_overlay_enabled") as enable,
+            patch("orchestrator.set_last_spoken") as last,
+            patch("chat_overlay.ensure_chat_bridge_and_app") as ensure,
+            patch("orchestrator.get_audio") as audio,
+            patch("orchestrator.log_llm"),
+        ):
+            out = orchestrator._speak(SimpleNamespace(), message, user_reply=True)
+        self.assertIsNone(out)
+        enable.assert_called_once_with(True)
+        last.assert_called_once_with(message, enqueue_chat=True)
+        ensure.assert_called_once_with(focus=True)
+        audio.assert_not_called()
+
+    def test_eighty_word_reply_still_uses_tts(self) -> None:
+        message = "word " * 80
+        audio = SimpleNamespace(speak=lambda text: "spoken")
+        with (
+            patch("orchestrator.chat_text_only", return_value=False),
+            patch("orchestrator.reply_tts_enabled", return_value=True),
+            patch("orchestrator.set_last_spoken"),
+            patch("orchestrator.get_audio", return_value=audio),
+            patch("orchestrator.log_llm"),
+            patch("chat_overlay.ensure_chat_bridge_and_app") as ensure,
+        ):
+            out = orchestrator._speak(SimpleNamespace(), message, user_reply=True)
+        self.assertEqual(out, "spoken")
+        ensure.assert_not_called()
+
     def test_speak_skips_chat_for_status_blurbs(self) -> None:
         with (
             patch("orchestrator.chat_text_only", return_value=True),

@@ -83,6 +83,7 @@ from app_status import (
     reply_tts_enabled,
     chat_text_only,
     set_chat_stream,
+    set_chat_overlay_enabled,
     set_last_spoken,
     set_reply_sink,
     set_turn_source,
@@ -151,6 +152,12 @@ TTS_STREAM = os.environ.get("TTS_STREAM", "1").strip().lower() not in {
     "no",
     "off",
 }
+TTS_MAX_RESPONSE_WORDS = max(1, int(os.environ.get("TTS_MAX_RESPONSE_WORDS", "80")))
+
+
+def _tts_word_count(text: str) -> int:
+    """Count spoken words for the reply delivery cutoff."""
+    return len(re.findall(r"\b[\w'-]+\b", text or "", flags=re.UNICODE))
 
 _CREDIT_MARKERS = (
     "no credits remaining",
@@ -607,13 +614,8 @@ def _create_response(
             return
         if not _is_give_response(meta):
             return
-        if llm_tts is not None and meta.get("call_id"):
-            llm_tts.bind_call(response_id, str(meta["call_id"]))
         decoded = decoded_message_prefix(meta.get("arguments") or "")
         if len(decoded) > streamed_msg_len:
-            chunk = decoded[streamed_msg_len:]
-            if llm_tts is not None:
-                llm_tts.add_text_chunk(chunk)
             if stream_to_chat:
                 set_chat_stream(decoded)
             streamed_msg_len = len(decoded)
@@ -623,8 +625,6 @@ def _create_response(
             etype = getattr(event, "type", None)
             if etype == "response.created":
                 response_id = event.response.id
-                if llm_tts is not None:
-                    llm_tts.start_stream(response_id)
                 print(f"[orchestrator] streaming response {response_id}", flush=True)
             elif etype == "response.output_item.added":
                 item = event.item
@@ -729,13 +729,16 @@ def _create_response(
             for item in final_response.output or []:
                 if getattr(item, "type", None) == "function_call" and item.name == "give_response_to_user":
                     give_response_text = extract_message_field(item.arguments or "")
-                    if getattr(item, "call_id", None):
-                        llm_tts.bind_call(response_id, item.call_id)
                     break
-        if give_response_text and len(give_response_text) > streamed_msg_len:
-            llm_tts.add_text_chunk(give_response_text[streamed_msg_len:])
-            streamed_msg_len = len(give_response_text)
-        llm_tts.stop_stream()
+        if give_response_text and _tts_word_count(give_response_text) <= TTS_MAX_RESPONSE_WORDS:
+            llm_tts.start_stream(response_id)
+            for meta in items.values():
+                if _is_give_response(meta) and meta.get("call_id"):
+                    llm_tts.bind_call(response_id, str(meta["call_id"]))
+            llm_tts.add_text_chunk(give_response_text)
+            llm_tts.stop_stream()
+        elif stream_to_chat and give_response_text:
+            set_chat_stream(give_response_text, done=False, force=True)
     elif stream_to_chat and give_response_text:
         set_chat_stream(give_response_text, done=False, force=True)
 
@@ -1095,6 +1098,20 @@ def _speak(
     if not text:
         return None
     log_llm(text, source="tts")
+    if user_reply and _tts_word_count(text) > TTS_MAX_RESPONSE_WORDS:
+        set_chat_overlay_enabled(True)
+        set_last_spoken(text, enqueue_chat=True)
+        try:
+            from chat_overlay import ensure_chat_bridge_and_app
+
+            ensure_chat_bridge_and_app(focus=True)
+        except Exception as exc:
+            print(f"[orchestrator] could not open chat for long reply ({exc})", flush=True)
+        print(
+            f"[orchestrator] long reply ({_tts_word_count(text)} words) sent to chat; TTS skipped",
+            flush=True,
+        )
+        return None
     if user_reply or not chat_text_only():
         set_last_spoken(text, enqueue_chat=publish_to_chat)
     if not reply_tts_enabled():
@@ -1116,6 +1133,16 @@ def _speak_later(client: OpenAI, text: str, *, user_reply: bool = False) -> None
     if not text:
         return
     log_llm(text, source="tts")
+    if user_reply and _tts_word_count(text) > TTS_MAX_RESPONSE_WORDS:
+        set_chat_overlay_enabled(True)
+        set_last_spoken(text, enqueue_chat=True)
+        try:
+            from chat_overlay import ensure_chat_bridge_and_app
+
+            ensure_chat_bridge_and_app(focus=True)
+        except Exception as exc:
+            print(f"[orchestrator] could not open chat for long reply ({exc})", flush=True)
+        return
     if user_reply or not chat_text_only():
         set_last_spoken(text)
     if not reply_tts_enabled():
@@ -1900,7 +1927,7 @@ def _process_response(
                         "give_response_to_user — speaking it in the background",
                         flush=True,
                     )
-                    _speak_later(client, leftover)
+                    _speak_later(client, leftover, user_reply=True)
             elif leftover and spoke_this_response:
                 print(
                     "[orchestrator] skipping leftover message " "(already spoke this response)",

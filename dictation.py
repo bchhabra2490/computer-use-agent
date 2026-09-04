@@ -20,6 +20,7 @@ not also open. Start with the orchestrator when DICTATION=1, or:
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -44,6 +45,12 @@ DICTATION_REQUIRE_EDITABLE = (
 DICTATION_COOLDOWN = float(os.environ.get("DICTATION_COOLDOWN", "0.45"))
 # Batch rapid STT deltas before paste (seconds).
 DICTATION_PASTE_DEBOUNCE = float(os.environ.get("DICTATION_PASTE_DEBOUNCE", "0.05"))
+# Rewriting rolling Whisper snapshots in arbitrary editors is not transactional:
+# controlled web inputs may reject AX changes or reorder synthetic deletes/pastes.
+# Final-only paste is the reliable default; live field mutation remains opt-in.
+DICTATION_LIVE_PASTE = (
+    os.environ.get("DICTATION_LIVE_PASTE", "0").strip().lower() not in _OFF
+)
 # kVK_Function — Globe / Fn on Apple keyboards (emoji & character viewer).
 FN_KEYCODE = 63
 
@@ -233,6 +240,32 @@ def _backspace_n(n: int) -> None:
             stderr=subprocess.DEVNULL,
         )
         n -= k
+    # System Events returns after posting the key events, not necessarily after
+    # the target application has consumed them.  Without a small settle window,
+    # the following paste can overtake a long delete in browser text fields.
+    time.sleep(0.03)
+
+
+_DICTATION_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _stable_prefix_boundary(old: str, new: str) -> tuple[int, int]:
+    """Return matching word-prefix boundaries in two transcript snapshots.
+
+    Rolling speech recognition routinely changes case and punctuation in text it
+    already emitted. Preserve the shared words and revise only the unstable tail
+    instead of deleting and repasting the entire transcript.
+    """
+    old_words = list(_DICTATION_WORD_RE.finditer(old))
+    new_words = list(_DICTATION_WORD_RE.finditer(new))
+    matched = 0
+    for old_word, new_word in zip(old_words, new_words):
+        if old_word.group(0).casefold() != new_word.group(0).casefold():
+            break
+        matched += 1
+    if matched == 0:
+        return 0, 0
+    return old_words[matched - 1].end(), new_words[matched - 1].end()
 
 
 def paste_dictation(text: str) -> None:
@@ -261,6 +294,7 @@ class LiveDictationPaster:
 
     def __init__(self, *, debounce_s: float | None = None) -> None:
         self._lock = threading.Lock()
+        self._apply_lock = threading.Lock()
         self._inserted = ""
         self._pending: str | None = None
         self._timer: threading.Timer | None = None
@@ -307,17 +341,18 @@ class LiveDictationPaster:
 
     def discard(self) -> None:
         """Remove anything we inserted (cancel) and restore the clipboard."""
-        with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-            self._pending = None
-            self._closed = True
-            prev = self._inserted
-            self._inserted = ""
-        if prev:
-            if not self._ax_replace(prev, ""):
-                _backspace_n(len(prev))
+        with self._apply_lock:
+            with self._lock:
+                if self._timer is not None:
+                    self._timer.cancel()
+                    self._timer = None
+                self._pending = None
+                self._closed = True
+                prev = self._inserted
+                self._inserted = ""
+            if prev:
+                if not self._ax_replace(prev, ""):
+                    _backspace_n(len(prev))
         self._restore_clip()
 
     def _ensure_clip(self) -> None:
@@ -357,24 +392,30 @@ class LiveDictationPaster:
             return False
 
     def _apply(self, live: str) -> None:
-        with self._lock:
-            if self._closed and live:
-                return
-            prev = self._inserted
+        # A debounce timer and finalize() can overlap. Keep the state transition
+        # and UI operation ordered so _inserted always describes what was last
+        # applied, rather than what merely started applying.
+        with self._apply_lock:
+            with self._lock:
+                if self._closed and live:
+                    return
+                prev = self._inserted
             if live == prev:
                 return
-            self._inserted = live
-        if live.startswith(prev):
-            delta = live[len(prev) :]
-            if delta:
-                self._paste_chunk(delta)
-            return
-        if self._ax_replace(prev, live):
-            return
-        if prev:
-            _backspace_n(len(prev))
-        if live:
-            self._paste_chunk(live)
+            if live.startswith(prev):
+                delta = live[len(prev) :]
+                if delta:
+                    self._paste_chunk(delta)
+            elif not self._ax_replace(prev, live):
+                old_boundary, new_boundary = _stable_prefix_boundary(prev, live)
+                old_tail = prev[old_boundary:]
+                new_tail = live[new_boundary:]
+                if old_tail:
+                    _backspace_n(len(old_tail))
+                if new_tail:
+                    self._paste_chunk(new_tail)
+            with self._lock:
+                self._inserted = live
 
 
 class DictationDaemon:
@@ -426,7 +467,7 @@ class DictationDaemon:
             return
         self._session.set()
         self._hold_send.clear()
-        paster = LiveDictationPaster()
+        paster = LiveDictationPaster() if DICTATION_LIVE_PASTE else None
         prev_status: dict | None = None
         try:
             ok, why = self._can_start()
@@ -485,19 +526,22 @@ class DictationDaemon:
                     client,
                     prompt="Dictation… (hold Fn; release to send; Esc cancels)",
                     max_wait_for_speech=12.0,
-                    on_partial=paster.on_partial,
+                    on_partial=paster.on_partial if paster is not None else None,
                 )
             except ListenCancelled:
                 print("[dictation] cancelled", flush=True)
-                paster.discard()
+                if paster is not None:
+                    paster.discard()
                 return
             except NoSpeechError as e:
                 print(f"[dictation] no speech ({e})", flush=True)
-                paster.discard()
+                if paster is not None:
+                    paster.discard()
                 return
             except Exception as e:
                 print(f"[dictation] STT failed: {e}", flush=True)
-                paster.discard()
+                if paster is not None:
+                    paster.discard()
                 return
             finally:
                 if prev_idle is None:
@@ -514,14 +558,18 @@ class DictationDaemon:
             text = (text or "").strip()
             if not text:
                 print("[dictation] empty transcript", flush=True)
-                paster.discard()
+                if paster is not None:
+                    paster.discard()
                 return
+            if paster is None:
+                paste_dictation(text)
+            else:
+                paster.finalize(text)
             print(
-                f'[dictation] live paste done: '
+                f'[dictation] paste done: '
                 f'"{text[:120]}{"…" if len(text) > 120 else ""}"',
                 flush=True,
             )
-            paster.finalize(text)
             try:
                 from wake import play_listen_end_chime
 

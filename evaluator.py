@@ -333,7 +333,10 @@ def coach_agent(
         "Do not invent UI that is not visible. Prefer concrete, short guidance. "
         "If the goal appears satisfied, say so. If the agent is looping or lost, say so. "
         "Starting media playback is done — do not tell the agent to sleep for duration, "
-        "use macOS say, or wait in Terminal until a song or video finishes."
+        "use macOS say, or wait in Terminal until a song or video finishes. "
+        "For public information retrieval, do not recommend visible browser UI after "
+        "a failed browser_data fetch unless the log also shows a browser_data "
+        "discover_endpoints attempt (or the task requires authentication/interaction)."
     )
     content: list[dict[str, Any]] = [
         {

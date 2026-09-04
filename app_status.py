@@ -374,6 +374,7 @@ def enqueue_utterance(
     sink: str | None = None,
     tts: bool | None = None,
     screenshot_file: str | None = None,
+    chat_id: str | None = None,
 ) -> None:
     """Queue a text command (chat, phone, or API). Orchestrator consumes it like STT.
 
@@ -399,6 +400,9 @@ def enqueue_utterance(
     shot = (screenshot_file or "").strip()
     if shot:
         item["screenshot_file"] = Path(shot).name
+    cid = (chat_id or "").strip()
+    if cid:
+        item["chat_id"] = cid
     with _lock:
         data = _read()
         pending = list(data.get("pending_utterances") or [])
@@ -519,12 +523,14 @@ def consume_utterance() -> str | None:
                 data["reply_sink"] = "mac"
             data["reply_tts"] = bool(item.get("tts", True))
             data["turn_source"] = str(item.get("source") or "phone").strip() or "phone"
+            data["turn_chat_id"] = str(item.get("chat_id") or "").strip() or None
             shot = str(item.get("screenshot_file") or "").strip()
             if shot:
                 data["turn_chat_screenshot"] = Path(shot).name
         else:
             data["reply_tts"] = True
             data["turn_source"] = "stt"
+            data["turn_chat_id"] = None
         if str(data.get("turn_source") or "").lower() == "chat":
             data["chat_stream"] = None
         _write(data)
@@ -610,6 +616,13 @@ def reply_to_chat() -> bool:
     return turn_source().lower() == "chat"
 
 
+def turn_chat_id() -> str | None:
+    """Chat that owns the currently executing queued turn."""
+    with _lock:
+        value = str(_read().get("turn_chat_id") or "").strip()
+    return value or None
+
+
 def chat_text_only() -> bool:
     """Chat turn with speaker off — reply in the UI, not via TTS or status blurbs."""
     return reply_to_chat() and not reply_tts_enabled()
@@ -628,7 +641,7 @@ def set_chat_stream(text: str | None, *, done: bool = False, force: bool = False
             data["chat_stream"] = None
             _write(data)
         return
-    clipped = str(text)[:8000]
+    full_text = str(text)
     now = time.monotonic()
     if (
         not force
@@ -637,12 +650,14 @@ def set_chat_stream(text: str | None, *, done: bool = False, force: bool = False
     ):
         return
     _chat_stream_last_write = now
+    chat_id = turn_chat_id()
     with _lock:
         data = _read()
         data["chat_stream"] = {
-            "text": clipped,
+            "text": full_text,
             "done": bool(done),
             "ts": time.time(),
+            "chat_id": chat_id,
         }
         _write(data)
 
@@ -659,6 +674,7 @@ def chat_stream_payload() -> dict[str, Any] | None:
         "text": text,
         "done": bool(raw.get("done")),
         "ts": raw.get("ts"),
+        "chat_id": raw.get("chat_id"),
     }
 
 
@@ -666,42 +682,55 @@ def set_last_spoken(text: str, *, enqueue_chat: bool = True) -> None:
     text = (text or "").strip()
     if not text:
         return
-    clipped = text[:2000]
     with _lock:
         data = _read()
-        data["last_spoken"] = clipped
+        data["last_spoken"] = text
         if enqueue_chat and data.get("chat_overlay_enabled"):
             inbox = list(data.get("chat_inbox") or [])
             prev = inbox[-1].get("text") if inbox and isinstance(inbox[-1], dict) else None
-            if prev != clipped:
-                inbox.append({"text": clipped, "ts": time.time()})
+            if prev != text:
+                inbox.append(
+                    {
+                        "text": text,
+                        "ts": time.time(),
+                        "chat_id": data.get("turn_chat_id"),
+                    }
+                )
                 data["chat_inbox"] = inbox[-50:]
         # Final line replaces the live stream so the UI can settle on history.
         if str(data.get("turn_source") or "").lower() == "chat":
             data["chat_stream"] = {
-                "text": clipped,
+                "text": text,
                 "done": True,
                 "ts": time.time(),
+                "chat_id": data.get("turn_chat_id"),
             }
         _write(data)
 
 
-def consume_chat_inbox() -> list[str]:
-    """Pop spoken lines queued for the chat window (orchestrator / TTS)."""
+def consume_chat_inbox_items() -> list[dict[str, Any]]:
+    """Pop assistant replies while preserving their originating chat IDs."""
     with _lock:
         data = _read()
         items = list(data.get("chat_inbox") or [])
         data["chat_inbox"] = []
         _write(data)
-    out: list[str] = []
+    out: list[dict[str, Any]] = []
     for item in items:
         if isinstance(item, str):
             line = item.strip()
+            chat_id = None
         else:
             line = str((item or {}).get("text") or "").strip()
+            chat_id = str((item or {}).get("chat_id") or "").strip() or None
         if line:
-            out.append(line)
+            out.append({"text": line, "chat_id": chat_id})
     return out
+
+
+def consume_chat_inbox() -> list[str]:
+    """Backward-compatible text-only view of queued assistant replies."""
+    return [item["text"] for item in consume_chat_inbox_items()]
 
 
 def write_phone_speech(wav_bytes: bytes) -> None:

@@ -10,6 +10,7 @@ const state = {
   displays: [],
   shotMenuOpen: false,
   busy: false,
+  pendingChatId: null,
   thinking: false,
   streamText: null,
   streamDone: false,
@@ -384,6 +385,7 @@ async function send() {
   if (!text.trim() && !state.screenshotOn) return;
   if (!state.chatId) await newChat();
   state.busy = true;
+  state.pendingChatId = state.chatId;
   state.thinking = true;
   state.streamText = null;
   state.streamDone = false;
@@ -414,8 +416,13 @@ async function send() {
     state.messages.push({ role: "error", content: String(err.message || err) });
     state.thinking = false;
   } finally {
-    state.busy = false;
-    $("btn-send").disabled = false;
+    // A successful POST only queues the turn. pollStatus unlocks sending after
+    // the assistant reply is persisted, preserving user/assistant ordering.
+    if (!state.thinking) {
+      state.busy = false;
+      state.pendingChatId = null;
+      $("btn-send").disabled = false;
+    }
     renderTranscript();
   }
 }
@@ -469,10 +476,11 @@ async function pollStatus() {
     const appended = Number(st.assistant_appended || 0);
     const inbox = st.inbox || [];
     const stream = st.chat_stream;
+    const streamChatId = stream && stream.chat_id ? String(stream.chat_id) : null;
     const streamText = stream && stream.text ? String(stream.text) : "";
     const streamDone = !!(stream && stream.done);
     let needRender = false;
-    if (streamText) {
+    if (streamText && (!streamChatId || streamChatId === state.chatId)) {
       if (state.streamText !== streamText || state.streamDone !== streamDone) {
         state.streamText = streamText;
         state.streamDone = streamDone;
@@ -493,21 +501,29 @@ async function pollStatus() {
         });
       }
     }
+    const appendedChatIds = (st.appended_chat_ids || []).map(String);
+    const completedPending = appendedChatIds.length
+      ? appendedChatIds.includes(String(state.pendingChatId || ""))
+      : appended > 0;
     if (appended > 0 || inbox.length) {
-      state.thinking = false;
-      state.streamText = null;
-      state.streamDone = false;
-      const target = state.chatId || st.active_chat_id;
-      if (target) {
-        if (target !== state.chatId) await selectChat(target);
-        else {
-          const data = await window.cuaChat.get(`/v1/chats/${state.chatId}/messages`);
-          state.messages = data.messages || [];
-          renderTranscript();
-          needRender = false;
-        }
+      const visibleUpdated = appendedChatIds.length
+        ? appendedChatIds.includes(String(state.chatId || ""))
+        : true;
+      if (visibleUpdated && state.chatId) {
+        state.thinking = false;
+        state.streamText = null;
+        state.streamDone = false;
+        const data = await window.cuaChat.get(`/v1/chats/${state.chatId}/messages`);
+        state.messages = data.messages || [];
+        renderTranscript();
+        needRender = false;
       }
       await refreshChats();
+      if (completedPending) {
+        state.busy = false;
+        state.pendingChatId = null;
+        $("btn-send").disabled = false;
+      }
     } else if (needRender) {
       renderTranscript();
     }

@@ -12,6 +12,7 @@ const deadlineMs = Math.max(2000, Math.min(Number(startup.timeout_ms || 15000), 
 const profile = await mkdtemp(join(tmpdir(), "cua-webmcp-"));
 let child, ws, nextId = 1;
 const pending = new Map();
+let networkResponses = [];
 
 function serializableTool(tool, pageOrigin) {
   let schema = tool.inputSchema ?? {};
@@ -80,17 +81,56 @@ async function start() {
   });
   ws.addEventListener("message", event => {
     const message = JSON.parse(String(event.data));
-    if (!message.id || !pending.has(message.id)) return;
+    if (!message.id) {
+      if (message.method === "Network.responseReceived") {
+        const response = message.params?.response || {};
+        networkResponses.push({
+          requestId: message.params?.requestId,
+          resourceType: String(message.params?.type || ""),
+          url: String(response.url || ""),
+          status: Number(response.status || 0),
+          mimeType: String(response.mimeType || ""),
+        });
+      }
+      return;
+    }
+    if (!pending.has(message.id)) return;
     const handlers = pending.get(message.id); pending.delete(message.id);
     message.error ? handlers.reject(new Error(message.error.message)) : handlers.resolve(message.result);
   });
   await command("Runtime.enable");
   await command("Page.enable");
+  await command("Network.enable", { maxTotalBufferSize: 5000000, maxResourceBufferSize: 1000000 });
 }
 
 async function execute(input) {
   const operation = input.operation || "list";
   const waitMs = Math.max(0, Math.min(Number(input.wait_ms || 0), 30000));
+  if (operation === "discover") {
+    networkResponses = [];
+    await command("Page.reload", { ignoreCache: false });
+    await new Promise(resolve => setTimeout(resolve, waitMs || 3000));
+    const seen = new Set();
+    const endpoints = [];
+    for (const item of networkResponses.slice().reverse()) {
+      if (!item.requestId || seen.has(item.url) || endpoints.length >= 30) continue;
+      const mime = item.mimeType.toLowerCase();
+      if (!(item.resourceType === "XHR" || item.resourceType === "Fetch" || mime.includes("json"))) continue;
+      seen.add(item.url);
+      let body = "";
+      try {
+        const result = await command("Network.getResponseBody", { requestId: item.requestId });
+        body = result.base64Encoded
+          ? Buffer.from(String(result.body || ""), "base64").toString("utf8")
+          : String(result.body || "");
+      } catch {}
+      endpoints.push({
+        url: item.url, status: item.status, content_type: item.mimeType,
+        resource_type: item.resourceType, body: body.slice(0, 200000),
+      });
+    }
+    return { supported: true, url: startup.url, endpoints: endpoints.reverse() };
+  }
   if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
   const expression = operation === "call"
     ? `(async () => {

@@ -31,6 +31,7 @@ from app_status import (  # noqa: E402
     RUNTIME_DIR,
     chat_stream_payload,
     consume_chat_inbox,
+    consume_chat_inbox_items,
     enqueue_utterance,
     pid_alive,
     read_status,
@@ -779,23 +780,32 @@ def persist_chat_inbox() -> dict[str, Any]:
     The Electron UI used to be the only consumer of ``chat_inbox``; if the
     window was closed mid-reply, lines were lost or never written to history.
     """
-    lines = consume_chat_inbox()
-    if not lines:
+    items = consume_chat_inbox_items()
+    if not items:
         return {"ok": True, "appended": 0, "chat_id": resolve_active_chat_id()}
     store = get_store()
-    chat_id = resolve_active_chat_id(store)
-    if not chat_id:
-        chat = store.create_chat(title="Chat")
-        chat_id = chat.id
-        store.set_active_chat_id(chat_id)
-    for text in lines:
-        store.add_message(chat_id, "assistant", text)
+    fallback_chat_id = resolve_active_chat_id(store)
+    appended_chat_ids: list[str] = []
+    for item in items:
+        chat_id = str(item.get("chat_id") or "").strip() or fallback_chat_id
+        if not chat_id or store.get_chat(chat_id) is None:
+            chat = store.create_chat(title="Chat")
+            chat_id = chat.id
+            fallback_chat_id = chat_id
+            store.set_active_chat_id(chat_id)
+        store.add_message(chat_id, "assistant", str(item["text"]))
+        appended_chat_ids.append(chat_id)
     # History now has the final line — drop the live stream cursor.
     try:
         set_chat_stream(None)
     except Exception:
         pass
-    return {"ok": True, "appended": len(lines), "chat_id": chat_id}
+    return {
+        "ok": True,
+        "appended": len(items),
+        "chat_id": appended_chat_ids[-1],
+        "chat_ids": list(dict.fromkeys(appended_chat_ids)),
+    }
 
 
 def ensure_inbox_worker() -> None:
@@ -905,6 +915,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                     "inbox": [],
                     "assistant_appended": int(persisted.get("appended") or 0),
                     "active_chat_id": persisted.get("chat_id") or resolve_active_chat_id(store),
+                    "appended_chat_ids": persisted.get("chat_ids") or [],
                     "chat_stream": stream,
                 },
             )
@@ -1195,7 +1206,13 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 store.touch_chat(chat_id, model_id="orchestrator")
             cmd = command_for_orchestrator(text, look_at_screen=look)
             tts_on = store.get_pref(PREF_CHAT_TTS, "1") != "0"
-            enqueue_utterance(cmd, source="chat", tts=tts_on, screenshot_file=shot_file)
+            enqueue_utterance(
+                cmd,
+                source="chat",
+                tts=tts_on,
+                screenshot_file=shot_file,
+                chat_id=chat_id,
+            )
             orch_ok = pid_alive(read_status().get("orchestrator_pid"))
             self._send(
                 200,

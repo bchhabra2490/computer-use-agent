@@ -233,7 +233,8 @@ BROWSER_DATA_TOOL = {
     "name": "browser_data",
     "description": (
         "Read a public webpage without driving the visible browser. Prefer this for "
-        "research, article extraction, and link discovery. It blocks private/local "
+        "research, article extraction, link discovery, and discovering public JSON "
+        "endpoints used by a page. It blocks private/local "
         "network addresses. Auto mode escalates JavaScript-heavy pages from static "
         "HTTP to isolated Lightpanda and then isolated headless Chromium. "
         "Do not use it for signed-in pages or actions in the user's browser session."
@@ -244,8 +245,11 @@ BROWSER_DATA_TOOL = {
             "url": {"type": "string", "description": "Absolute public http(s) URL."},
             "operation": {
                 "type": "string",
-                "enum": ["fetch", "extract", "links"],
-                "description": "Fetch all text, extract matching blocks, or list links.",
+                "enum": ["fetch", "extract", "links", "discover_endpoints"],
+                "description": (
+                    "Fetch text, extract matching blocks, list links, or inspect isolated "
+                    "Chromium network traffic and safely replay the best read-only JSON endpoint."
+                ),
             },
             "query": {
                 "type": ["string", "null"],

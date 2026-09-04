@@ -19,6 +19,7 @@ mcp.json
 mqtt.log
 models/speakers/
 models/piper/
+models/smart-turn-*.onnx
 docs/
 node_modules/
 chat_app/node_modules/

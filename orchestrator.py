@@ -77,7 +77,6 @@ from app_status import (
     register_orchestrator,
     remove_agent,
     request_mark_done,
-    request_quit,
     reply_sink,
     reply_to_chat,
     reply_tts_enabled,
@@ -126,6 +125,7 @@ from session_compact import (
     format_task_history_block,
     is_context_overflow_error,
 )
+from scheduled_tasks import claim_due_task, mark_task_finished, recover_pending_tasks
 from phone_gateway import ensure_phone_gateway, stop_phone_gateway
 from status_tray import ensure_tray_running, stop_tray
 from dictation import ensure_dictation_running, stop_dictation
@@ -460,6 +460,41 @@ def _looks_like_question(text: str) -> bool:
     return bool(text and _QUESTION_HINT.search(text.strip()))
 
 
+_ACTION_VERB_RE = re.compile(
+    r"\b(play|open|launch|start|click|type|search|navigate|go to|pause|resume|stop)\b",
+    re.IGNORECASE,
+)
+_ACTION_CLAIM_RE = re.compile(
+    r"\b("
+    r"okay|ok|sure|playing|opening|launching|starting|clicking|typing|"
+    r"searching|navigating|going to|done|on it|doing that now"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _must_use_real_action_tool(text: str) -> bool:
+    """True when the request is an effectful desktop/browser/media action."""
+    body = (text or "").strip()
+    if not body or not _ACTION_VERB_RE.search(body):
+        return False
+    try:
+        from execution_router import resolve_execution_route
+
+        route = resolve_execution_route(body)
+    except Exception:
+        return True
+    return route.lane in {"browser", "desktop", "visual"}
+
+
+def _looks_like_claimed_action(text: str) -> bool:
+    """True when plain assistant text sounds like claimed completion / execution."""
+    body = (text or "").strip()
+    if not body:
+        return False
+    return bool(_ACTION_CLAIM_RE.search(body))
+
+
 _WAIT_FILLER_RE = re.compile(
     r"(?is)"
     r"(?:\s*(?:"
@@ -578,6 +613,211 @@ def _create_response(
         stream_to_chat
         or (llm_tts is not None and TTS_STREAM and LowLatencyTTS is not None)
     )
+    from llm_trace import traced_call
+
+    with traced_call(lane="main", request=kwargs) as rec:
+        rec["response"] = _execute_create_response(
+            client,
+            kwargs,
+            llm_tts=llm_tts,
+            use_stream=use_stream,
+            stream_to_chat=stream_to_chat,
+        )
+        return rec["response"]
+
+
+class _StreamSession:
+    def __init__(self, *, llm_tts, stream_to_chat: bool) -> None:
+        self.llm_tts = llm_tts
+        self.stream_to_chat = stream_to_chat
+        self.response_id: str | None = None
+        self.items: dict[str, dict[str, Any]] = {}
+        self.final_response = None
+        self.give_response_text = ""
+        self.streamed_msg_len = 0
+
+    def _is_give_response(self, meta: dict[str, Any]) -> bool:
+        name = (meta.get("name") or "").strip()
+        if name == "give_response_to_user":
+            return True
+        if name:
+            return False
+        if decoded_message_prefix is None:
+            return False
+        return bool(decoded_message_prefix(meta.get("arguments") or ""))
+
+    def _feed_message_growth(self, meta: dict[str, Any]) -> None:
+        if self.response_id is None or decoded_message_prefix is None:
+            return
+        if not self._is_give_response(meta):
+            return
+        decoded = decoded_message_prefix(meta.get("arguments") or "")
+        if len(decoded) <= self.streamed_msg_len:
+            return
+        if self.stream_to_chat:
+            set_chat_stream(decoded)
+        self.streamed_msg_len = len(decoded)
+
+    def _on_created(self, event) -> None:
+        self.response_id = event.response.id
+        print(f"[orchestrator] streaming response {self.response_id}", flush=True)
+
+    def _on_output_item_added(self, event) -> None:
+        item = event.item
+        if getattr(item, "type", None) != "function_call":
+            return
+        self.items[item.id] = {
+            "name": getattr(item, "name", "") or "",
+            "call_id": getattr(item, "call_id", "") or "",
+            "arguments": getattr(item, "arguments", None) or "",
+        }
+        meta = self.items[item.id]
+        if (
+            self.llm_tts is not None
+            and self.response_id
+            and meta["name"] == "give_response_to_user"
+            and meta["call_id"]
+        ):
+            self.llm_tts.bind_call(self.response_id, meta["call_id"])
+
+    def _on_args_delta(self, event) -> None:
+        meta = self.items.get(event.item_id)
+        if meta is None:
+            meta = {"name": "", "call_id": "", "arguments": ""}
+            self.items[event.item_id] = meta
+        meta["arguments"] = (meta.get("arguments") or "") + (event.delta or "")
+        for attr in ("name", "call_id"):
+            val = getattr(event, attr, None)
+            if val and not meta.get(attr):
+                meta[attr] = val
+        self._feed_message_growth(meta)
+
+    def _merge_call_meta(self, item_id, *, name=None, call_id=None, arguments=None) -> dict[str, Any]:
+        meta = self.items.get(item_id) or {"name": "", "call_id": "", "arguments": ""}
+        if arguments is not None:
+            meta["arguments"] = arguments or meta.get("arguments") or ""
+        if name:
+            meta["name"] = name
+        if call_id and not meta.get("call_id"):
+            meta["call_id"] = call_id
+        self.items[item_id] = meta
+        return meta
+
+    def _capture_give_text(self, meta: dict[str, Any]) -> None:
+        if not self._is_give_response(meta):
+            return
+        if extract_message_field is not None:
+            self.give_response_text = extract_message_field(meta.get("arguments") or "")
+        self._feed_message_growth(meta)
+
+    def _on_args_done(self, event) -> None:
+        meta = self._merge_call_meta(
+            event.item_id,
+            name=getattr(event, "name", None),
+            call_id=getattr(event, "call_id", None),
+            arguments=event.arguments,
+        )
+        self._capture_give_text(meta)
+
+    def _on_output_item_done(self, event) -> None:
+        item = getattr(event, "item", None)
+        if item is None or getattr(item, "type", None) != "function_call":
+            return
+        meta = self._merge_call_meta(
+            item.id,
+            name=getattr(item, "name", None),
+            call_id=getattr(item, "call_id", None),
+            arguments=getattr(item, "arguments", None),
+        )
+        self._capture_give_text(meta)
+
+    def _on_completed(self, event) -> None:
+        self.final_response = event.response
+        if self.final_response is None or not self.items:
+            return
+        for item in getattr(self.final_response, "output", None) or []:
+            if getattr(item, "type", None) != "function_call":
+                continue
+            meta = self.items.get(getattr(item, "id", None)) or {}
+            cid = meta.get("call_id") or ""
+            if cid and not getattr(item, "call_id", None):
+                try:
+                    item.call_id = cid
+                except Exception:
+                    pass
+
+    def _on_failed(self, event) -> None:
+        print(f"[orchestrator] stream failed: {event}", flush=True)
+
+    def handle(self, event) -> None:
+        handler = {
+            "response.created": self._on_created,
+            "response.output_item.added": self._on_output_item_added,
+            "response.function_call_arguments.delta": self._on_args_delta,
+            "response.function_call_arguments.done": self._on_args_done,
+            "response.output_item.done": self._on_output_item_done,
+            "response.completed": self._on_completed,
+            "response.failed": self._on_failed,
+        }.get(getattr(event, "type", None))
+        if handler is not None:
+            handler(event)
+
+    def _abandon_tts(self) -> None:
+        if self.response_id and self.llm_tts is not None:
+            try:
+                self.llm_tts.abandon(self.response_id)
+            except Exception:
+                pass
+
+    def on_error(self, err: Exception, client: OpenAI, kwargs: dict[str, Any]):
+        print(f"[orchestrator] stream error ({err})", flush=True)
+        self._abandon_tts()
+        if is_fatal_llm_error(err):
+            raise LlmUnavailableError(llm_error_speech(err)) from err
+        print("[orchestrator] falling back to non-streaming", flush=True)
+        return _sync_create_response(client, kwargs)
+
+    def _fill_give_text_from_final(self) -> None:
+        if self.give_response_text or extract_message_field is None:
+            return
+        for item in self.final_response.output or []:
+            if getattr(item, "type", None) == "function_call" and item.name == "give_response_to_user":
+                self.give_response_text = extract_message_field(item.arguments or "")
+                return
+
+    def _flush_tts_or_chat(self) -> None:
+        text = self.give_response_text
+        if self.response_id and self.llm_tts is not None:
+            self._fill_give_text_from_final()
+            text = self.give_response_text
+            if text and _tts_word_count(text) <= TTS_MAX_RESPONSE_WORDS:
+                self.llm_tts.start_stream(self.response_id)
+                for meta in self.items.values():
+                    if self._is_give_response(meta) and meta.get("call_id"):
+                        self.llm_tts.bind_call(self.response_id, str(meta["call_id"]))
+                self.llm_tts.add_text_chunk(text)
+                self.llm_tts.stop_stream()
+                return
+        if self.stream_to_chat and text:
+            set_chat_stream(text, done=False, force=True)
+
+    def finish(self, client: OpenAI, kwargs: dict[str, Any]):
+        if self.final_response is None:
+            print("[orchestrator] stream ended without response.completed; falling back", flush=True)
+            self._abandon_tts()
+            return _sync_create_response(client, kwargs)
+        self._flush_tts_or_chat()
+        return self.final_response
+
+
+def _execute_create_response(
+    client: OpenAI,
+    kwargs: dict[str, Any],
+    *,
+    llm_tts: Any | None,
+    use_stream: bool,
+    stream_to_chat: bool,
+):
     if not use_stream:
         return _sync_create_response(client, kwargs)
 
@@ -590,159 +830,14 @@ def _create_response(
         print(f"[orchestrator] stream create failed ({e}); falling back", flush=True)
         return _sync_create_response(client, kwargs)
 
-    response_id: str | None = None
-    # item_id -> {name, call_id, arguments}
-    items: dict[str, dict[str, Any]] = {}
-    final_response = None
-    give_response_text = ""
-    streamed_msg_len = 0
-
-    def _is_give_response(meta: dict[str, Any]) -> bool:
-        name = (meta.get("name") or "").strip()
-        if name == "give_response_to_user":
-            return True
-        if name:
-            return False
-        # Name sometimes arrives after the first argument deltas — detect via JSON.
-        if decoded_message_prefix is None:
-            return False
-        return bool(decoded_message_prefix(meta.get("arguments") or ""))
-
-    def _feed_message_growth(meta: dict[str, Any]) -> None:
-        nonlocal streamed_msg_len
-        if response_id is None or decoded_message_prefix is None:
-            return
-        if not _is_give_response(meta):
-            return
-        decoded = decoded_message_prefix(meta.get("arguments") or "")
-        if len(decoded) > streamed_msg_len:
-            if stream_to_chat:
-                set_chat_stream(decoded)
-            streamed_msg_len = len(decoded)
-
+    session = _StreamSession(llm_tts=llm_tts, stream_to_chat=stream_to_chat)
     try:
         for event in stream:
-            etype = getattr(event, "type", None)
-            if etype == "response.created":
-                response_id = event.response.id
-                print(f"[orchestrator] streaming response {response_id}", flush=True)
-            elif etype == "response.output_item.added":
-                item = event.item
-                if getattr(item, "type", None) == "function_call":
-                    items[item.id] = {
-                        "name": getattr(item, "name", "") or "",
-                        "call_id": getattr(item, "call_id", "") or "",
-                        "arguments": getattr(item, "arguments", None) or "",
-                    }
-                    if (
-                        llm_tts is not None
-                        and response_id
-                        and items[item.id]["name"] == "give_response_to_user"
-                        and items[item.id]["call_id"]
-                    ):
-                        llm_tts.bind_call(response_id, items[item.id]["call_id"])
-            elif etype == "response.function_call_arguments.delta":
-                meta = items.get(event.item_id)
-                if meta is None:
-                    # Some SDK builds emit deltas before output_item.added — seed a stub.
-                    meta = {"name": "", "call_id": "", "arguments": ""}
-                    items[event.item_id] = meta
-                meta["arguments"] = (meta.get("arguments") or "") + (event.delta or "")
-                # Name / call_id may appear on the delta event itself.
-                for attr in ("name", "call_id"):
-                    val = getattr(event, attr, None)
-                    if val and not meta.get(attr):
-                        meta[attr] = val
-                _feed_message_growth(meta)
-            elif etype == "response.function_call_arguments.done":
-                meta = items.get(event.item_id) or {"name": "", "call_id": "", "arguments": ""}
-                meta["arguments"] = event.arguments or meta.get("arguments") or ""
-                if getattr(event, "name", None):
-                    meta["name"] = event.name
-                if getattr(event, "call_id", None) and not meta.get("call_id"):
-                    meta["call_id"] = event.call_id
-                items[event.item_id] = meta
-                if _is_give_response(meta):
-                    if extract_message_field is not None:
-                        give_response_text = extract_message_field(meta["arguments"])
-                    _feed_message_growth(meta)
-            elif etype == "response.output_item.done":
-                item = getattr(event, "item", None)
-                if item is not None and getattr(item, "type", None) == "function_call":
-                    meta = items.get(item.id) or {"name": "", "call_id": "", "arguments": ""}
-                    if getattr(item, "name", None):
-                        meta["name"] = item.name
-                    if getattr(item, "call_id", None):
-                        meta["call_id"] = item.call_id
-                    if getattr(item, "arguments", None):
-                        meta["arguments"] = item.arguments
-                    items[item.id] = meta
-                    if _is_give_response(meta):
-                        if extract_message_field is not None:
-                            give_response_text = extract_message_field(meta.get("arguments") or "")
-                        _feed_message_growth(meta)
-            elif etype == "response.completed":
-                final_response = event.response
-                # DeepSeek/stream often omits call_id on the completed payload;
-                # copy ids gathered from earlier stream events.
-                if final_response is not None and items:
-                    for item in getattr(final_response, "output", None) or []:
-                        if getattr(item, "type", None) != "function_call":
-                            continue
-                        meta = items.get(getattr(item, "id", None)) or {}
-                        cid = meta.get("call_id") or ""
-                        if cid and not getattr(item, "call_id", None):
-                            try:
-                                item.call_id = cid
-                            except Exception:
-                                pass
-            elif etype == "response.failed":
-                print(f"[orchestrator] stream failed: {event}", flush=True)
+            session.handle(event)
     except Exception as e:
-        print(f"[orchestrator] stream error ({e})", flush=True)
-        if response_id and llm_tts is not None:
-            try:
-                # Do not flush partial speech — sync path will speak once.
-                llm_tts.abandon(response_id)
-            except Exception:
-                pass
-        if is_fatal_llm_error(e):
-            raise LlmUnavailableError(llm_error_speech(e)) from e
-        print("[orchestrator] falling back to non-streaming", flush=True)
-        return _sync_create_response(client, kwargs)
+        return session.on_error(e, client, kwargs)
+    return session.finish(client, kwargs)
 
-    if final_response is None:
-        print("[orchestrator] stream ended without response.completed; falling back", flush=True)
-        if response_id and llm_tts is not None:
-            try:
-                llm_tts.abandon(response_id)
-            except Exception:
-                pass
-        try:
-            return _sync_create_response(client, kwargs)
-        except LlmUnavailableError:
-            raise
-
-    if response_id and llm_tts is not None:
-        # Prefer message extracted during stream; else scan final output.
-        if not give_response_text and extract_message_field is not None:
-            for item in final_response.output or []:
-                if getattr(item, "type", None) == "function_call" and item.name == "give_response_to_user":
-                    give_response_text = extract_message_field(item.arguments or "")
-                    break
-        if give_response_text and _tts_word_count(give_response_text) <= TTS_MAX_RESPONSE_WORDS:
-            llm_tts.start_stream(response_id)
-            for meta in items.values():
-                if _is_give_response(meta) and meta.get("call_id"):
-                    llm_tts.bind_call(response_id, str(meta["call_id"]))
-            llm_tts.add_text_chunk(give_response_text)
-            llm_tts.stop_stream()
-        elif stream_to_chat and give_response_text:
-            set_chat_stream(give_response_text, done=False, force=True)
-    elif stream_to_chat and give_response_text:
-        set_chat_stream(give_response_text, done=False, force=True)
-
-    return final_response
 
 
 def _start_agent_thread(
@@ -1195,18 +1290,34 @@ def _confirm_heard(client: OpenAI, utterance: str) -> str:
     return utterance
 
 
-def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: OpenAI | None = None) -> str | None:
-    """Look at a phone photo while a computer task is running (no start_task)."""
+def _reply_to_attached_image(
+    client: OpenAI,
+    utterance: str,
+    image: bytes,
+    *,
+    llm: OpenAI | None = None,
+    mime: str,
+    intro: str,
+    thinking: str,
+    label: str,
+    fail_look: str,
+    fail_make_out: str,
+) -> str | None:
+    """Describe an attached image in spoken sentences (no start_task)."""
     api = llm if llm is not None else client
-    b64 = base64.b64encode(jpeg).decode("ascii")
+    b64 = base64.b64encode(image).decode("ascii")
     prompt = (
-        "Look at this photo from the user's phone. "
-        f"They said: {utterance}\n"
+        intro
+        + f"They said: {utterance}\n"
         "Reply in 2-5 spoken sentences. No markdown, no file paths."
     )
-    get_session().enter("thinking", "Looking at phone photo")
+    get_session().enter("thinking", thinking)
     try:
-        response = api.responses.create(
+        from llm_trace import traced_responses_create
+
+        response = traced_responses_create(
+            api,
+            lane="main",
             model=model_for_request(MODEL, has_image=True),
             input=[
                 {
@@ -1215,7 +1326,7 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: O
                         {"type": "input_text", "text": prompt},
                         {
                             "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{b64}",
+                            "image_url": f"data:{mime};base64,{b64}",
                             "detail": "high",
                         },
                     ],
@@ -1223,13 +1334,29 @@ def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: O
             ],
         )
     except Exception as e:
-        print(f"[orchestrator] phone photo vision failed: {e}", flush=True)
-        return _speak(client, "I could not look at that photo.")
+        print(f"[orchestrator] {label} vision failed: {e}", flush=True)
+        return _speak(client, fail_look)
     text = _strip_wait_filler(_assistant_message_text(response))
     if not text:
-        return _speak(client, "I could not make out that photo.")
+        return _speak(client, fail_make_out)
     log_llm(text, source="llm")
     return _speak(client, text)
+
+
+def _reply_to_phone_photo(client: OpenAI, utterance: str, jpeg: bytes, *, llm: OpenAI | None = None) -> str | None:
+    """Look at a phone photo while a computer task is running (no start_task)."""
+    return _reply_to_attached_image(
+        client,
+        utterance,
+        jpeg,
+        llm=llm,
+        mime="image/jpeg",
+        intro="Look at this photo from the user's phone. ",
+        thinking="Looking at phone photo",
+        label="phone photo",
+        fail_look="I could not look at that photo.",
+        fail_make_out="I could not make out that photo.",
+    )
 
 
 def _reply_to_chat_screenshot(
@@ -1240,39 +1367,18 @@ def _reply_to_chat_screenshot(
     llm: OpenAI | None = None,
 ) -> str | None:
     """Look at a chat-attached screenshot while a computer task is running."""
-    api = llm if llm is not None else client
-    b64 = base64.b64encode(png).decode("ascii")
-    prompt = (
-        "Look at this screenshot the user attached from chat (selected displays only). "
-        f"They said: {utterance}\n"
-        "Reply in 2-5 spoken sentences. No markdown, no file paths."
+    return _reply_to_attached_image(
+        client,
+        utterance,
+        png,
+        llm=llm,
+        mime="image/png",
+        intro="Look at this screenshot the user attached from chat (selected displays only). ",
+        thinking="Looking at chat screenshot",
+        label="chat screenshot",
+        fail_look="I could not look at that screenshot.",
+        fail_make_out="I could not make out that screenshot.",
     )
-    get_session().enter("thinking", "Looking at chat screenshot")
-    try:
-        response = api.responses.create(
-            model=model_for_request(MODEL, has_image=True),
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/png;base64,{b64}",
-                            "detail": "high",
-                        },
-                    ],
-                }
-            ],
-        )
-    except Exception as e:
-        print(f"[orchestrator] chat screenshot vision failed: {e}", flush=True)
-        return _speak(client, "I could not look at that screenshot.")
-    text = _strip_wait_filler(_assistant_message_text(response))
-    if not text:
-        return _speak(client, "I could not make out that screenshot.")
-    log_llm(text, source="llm")
-    return _speak(client, text)
 
 
 def _service_agent_ask(client: OpenAI, ask_bridge: AskUserBridge) -> bool:
@@ -1307,6 +1413,29 @@ def _service_timer_speech(client: OpenAI) -> str | None:
         return None
     print(f"[orchestrator] timer reminder: {text}", flush=True)
     return _speak(client, text)
+
+
+def _claim_due_scheduled_utterance() -> tuple[str | None, str | None]:
+    """Promote one due scheduled task into the normal utterance path."""
+    row = claim_due_task()
+    if row is None:
+        return None, None
+    utterance = row.task.strip()
+    if not utterance:
+        mark_task_finished(row.id, status="failed", error="Scheduled task was empty.")
+        return None, None
+    print(f"[orchestrator] scheduled task due {row.id}: {utterance!r}", flush=True)
+    return utterance, row.id
+
+
+def _finish_scheduled_turn(task_id: str | None, *, ok: bool, error: str | None = None) -> None:
+    if not task_id:
+        return
+    status = "done" if ok else "failed"
+    try:
+        mark_task_finished(task_id, status=status, error=error)
+    except Exception as e:
+        print(f"[orchestrator] scheduled task finalize failed: {e}", flush=True)
 
 
 def _listen_command(
@@ -1621,6 +1750,38 @@ def _forward_to_agent(publisher: AgentMessagePublisher, text: str) -> None:
         print(f"[orchestrator] bus send failed: {e}")
 
 
+def _traced_orchestrator_tool(
+    client: OpenAI,
+    call,
+    **kwargs: Any,
+):
+    """Run _handle_tool, capturing non-registry tools (give_response, ask_user, start_task)."""
+    from llm_trace import registry_traces_tool, traced_tool
+
+    name = getattr(call, "name", "") or "tool"
+    try:
+        args = json.loads(call.arguments or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    if registry_traces_tool(name):
+        return _handle_tool(client, call, **kwargs)
+    with traced_tool(
+        name,
+        args=args,
+        call_id=getattr(call, "call_id", "") or "",
+        lane="main",
+    ) as rec:
+        result = _handle_tool(client, call, **kwargs)
+        out, _stop, job, _png = result
+        if job is not None:
+            rec.output = f"started agent: {job.task}"
+        elif out is not None:
+            rec.output = out.get("output")
+        else:
+            rec.output = None
+        return result
+
+
 def _handle_tool(
     client: OpenAI,
     call,
@@ -1807,6 +1968,9 @@ def _handle_tool(
         "set_timer",
         "list_timers",
         "cancel_timer",
+        "schedule_task",
+        "list_scheduled_tasks",
+        "cancel_scheduled_task",
     }:
         outcome = run_tool(
             call.name,
@@ -1869,6 +2033,7 @@ def _process_response(
     """
     api = llm if llm is not None else client
     end_session = False
+    forced_action_retry = False
     while True:
         if consume_cancel():
             raise VoiceTurnCancelled("voice turn cancelled before response processing")
@@ -1914,6 +2079,44 @@ def _process_response(
                     ),
                 )
                 continue
+            if (
+                leftover
+                and not spoke_this_response
+                and _must_use_real_action_tool(user_said)
+                and _looks_like_claimed_action(leftover)
+            ):
+                if not forced_action_retry:
+                    forced_action_retry = True
+                    print(
+                        "[orchestrator] blocking plain-text action claim; forcing tool retry",
+                        flush=True,
+                    )
+                    response = _create_response(
+                        api,
+                        llm_tts=llm_tts,
+                        prior_response=response,
+                        model=MODEL,
+                        tools=orchestrator_tools(),
+                        previous_response_id=response.id,
+                        input=(
+                            f"The user asked for a real action: {user_said}\n\n"
+                            "You must not claim the action happened in a plain assistant "
+                            "message. Call start_task for desktop/browser/media work, or "
+                            "another concrete tool that truly performs the action. "
+                            "Do not say you are doing it unless you have called the tool."
+                        ),
+                    )
+                    continue
+                print(
+                    "[orchestrator] planner still refused a real action tool after retry",
+                    flush=True,
+                )
+                _speak_later(
+                    client,
+                    "I need to use a real tool for that, but the planner did not start it.",
+                    user_reply=True,
+                )
+                return response, end_session, []
             if leftover and not spoke_this_response:
                 if chat_text_only():
                     print(
@@ -1942,7 +2145,7 @@ def _process_response(
         for call in function_calls:
             if consume_cancel():
                 raise VoiceTurnCancelled("voice turn cancelled before tool execution")
-            out, stop, job, screen_png = _handle_tool(
+            out, stop, job, screen_png = _traced_orchestrator_tool(
                 client,
                 call,
                 auto=auto,
@@ -2066,6 +2269,578 @@ def _exit_on_signal(_signum=None, _frame=None) -> None:
     raise SystemExit(0)
 
 
+def _shutdown_side_processes() -> None:
+    # Idempotent atexit fallback for failures outside the main cleanup scope.
+    for fn in (stop_phone_gateway, stop_tray, stop_dictation):
+        try:
+            fn()
+        except Exception:
+            pass
+
+
+def _orchestrator_system_prompt(
+    mcp_rule: str, *, session_summary: str = "", memory_query: str | None = None
+) -> str:
+    bundle = assemble_context(memory_query=memory_query)
+    return build_system_prompt(
+        skills=bundle.skills,
+        memories=bundle.memories,
+        displays=bundle.displays,
+        mcp=bundle.mcp,
+        not_to_do=bundle.not_to_do,
+        mcp_rule=mcp_rule,
+        session_summary=session_summary,
+    )
+
+
+class _SpeakerRound:
+    def __init__(self) -> None:
+        self.current: Any = None
+
+    def __call__(self) -> None:
+        self.current = _log_speaker_round(self.current)
+
+
+def _collect_next_utterance(pending, client, sess):
+    """Return (action, utterance, scheduled_id, pending).
+
+    action is quit, continue, or ready.
+    """
+    if pending is not None:
+        return "ready", pending, None, None
+    scheduled_utterance, scheduled_task_id = _claim_due_scheduled_utterance()
+    if scheduled_utterance:
+        print(f'\n[user] "{scheduled_utterance}" (scheduled)')
+        status_log(f'[user] "{scheduled_utterance}" (scheduled)')
+        return "ready", scheduled_utterance, scheduled_task_id, None
+    next_batch = get_next_run_queue().drain()
+    if next_batch:
+        utterance = " ".join(m.text for m in next_batch if m.text).strip()
+        print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
+        return "ready", utterance, None, None
+    if speak_pending():
+        return "continue", None, None, _service_timer_speech(client)
+    utterance = _listen_command(
+        client,
+        should_stop=quit_requested,
+        wake_prompt=f"Waiting for {format_wake_phrases()}…",
+        listen_prompt="Listening…",
+    )
+    if quit_requested():
+        print("[orchestrator] quit requested from menu bar.")
+        sess.enter_and_log("done", "Quit from menu bar")
+        return "quit", None, None, None
+    if utterance is None:
+        return "continue", None, None, None
+    return "ready", utterance, None, None
+
+
+def _handle_voice_shortcut(utterance: str, *, client, llm, sess, scheduled_id):
+    """Return (action, pending). action is continue, quit, or proceed."""
+    global _phone_photo_in_session
+    low = utterance.lower().strip()
+    if is_mark_done_utterance(utterance):
+        _finish_scheduled_turn(
+            scheduled_id,
+            ok=False,
+            error="Rejected because it resolved to a mark-done command.",
+        )
+        if active_agents():
+            request_mark_done()
+            barged = _speak(client, "Marking it done.")
+        else:
+            barged = _speak(client, "Nothing is running.")
+        return "continue", barged
+    if is_save_screen_utterance(utterance):
+        _finish_scheduled_turn(scheduled_id, ok=True)
+        barged = _speak(client, "Saving the screen.")
+        if barged:
+            return "continue", barged
+        result = _save_screen_now(llm, utterance)
+        ok = result.lower().startswith("saved")
+        return "continue", _speak(client, "Saved." if ok else "Could not save the screen.")
+    if low not in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
+        return "proceed", None
+    _finish_scheduled_turn(
+        scheduled_id,
+        ok=False,
+        error="Rejected because it resolved to a quit command.",
+    )
+    barged = _speak(client, "Goodbye.")
+    if barged:
+        return "continue", barged
+    clear_phone_photo()
+    _phone_photo_in_session = False
+    sess.enter_and_log("done", "Session ended")
+    return "quit", None
+
+
+def _prepare_heard_turn(
+    utterance: str,
+    *,
+    client,
+    llm,
+    sess,
+    audio,
+    scheduled_id: str | None,
+    record_speaker,
+):
+    """Confirm, cancel, log, and apply voice shortcuts. Returns (action, utterance, pending)."""
+    if consume_cancel():
+        _finish_scheduled_turn(
+            scheduled_id,
+            ok=False,
+            error="Cancelled before processing.",
+        )
+        print("[orchestrator] voice turn discarded before processing", flush=True)
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", utterance, None
+    if scheduled_id is None:
+        print(f'\n[user] "{utterance}"')
+        status_log(f'[user] "{utterance}"')
+    record_speaker()
+    shortcut, barged = _handle_voice_shortcut(
+        utterance,
+        client=client,
+        llm=llm,
+        sess=sess,
+        scheduled_id=scheduled_id,
+    )
+    return shortcut, utterance, barged
+
+
+def _run_one_voice_turn(
+    *,
+    utterance: str,
+    photo_turn: bool,
+    scheduled_id: str | None,
+    client,
+    llm,
+    audio,
+    llm_tts,
+    mcp_rule: str,
+    publisher,
+    ask_bridge,
+    sess,
+    auto: bool,
+    max_steps: int,
+    record_speaker,
+    compact_state,
+    previous_id,
+    task_history,
+    pending_fn_outputs,
+):
+    """Returns (action, previous_id, task_history, pending_fn_outputs). action is continue or quit."""
+    global _phone_photo_in_session
+    sess.enter("thinking", utterance[:100])
+    from execution_router import resolve_execution_route
+
+    execution_route = resolve_execution_route(utterance)
+    from latency_report import current_trace_id, mark
+
+    mark(
+        current_trace_id(),
+        "route_selected",
+        metadata={
+            "execution_path": execution_route.path,
+            "specialist_lane": execution_route.lane,
+            "route_reason": execution_route.reason,
+        },
+    )
+    print(
+        f"[orchestrator] execution route → {execution_route.path}/"
+        f"{execution_route.lane} ({execution_route.reason})",
+        flush=True,
+    )
+    jpeg = None
+    if photo_turn or _phone_photo_in_session:
+        jpeg = phone_photo_jpeg(consume_pending=True)
+        if jpeg:
+            _phone_photo_in_session = True
+
+    # Chat-attached shot: use only the displays the user selected — no
+    # live desktop screenshot / accessibility dump for this turn.
+    chat_shot = take_turn_chat_screenshot()
+
+    compact_state.begin_turn()
+    emit("turn_start", lane="main", utterance=utterance[:160])
+    try:
+        from llm_trace import start_run
+        from latency_report import current_trace_id as _lat_id
+
+        start_run(
+            lane="main",
+            name="turn",
+            trace_id=_lat_id(),
+            utterance=utterance[:160],
+        )
+    except Exception:
+        pass
+    cp = run_orchestrator_checkpoint(
+        llm,
+        compact_state,
+        task_history,
+        pending_fn_outputs=pending_fn_outputs or None,
+        capture_desktop=not bool(chat_shot),
+    )
+    if consume_cancel():
+        print("[orchestrator] voice turn discarded during context capture", flush=True)
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", previous_id, task_history, pending_fn_outputs
+    task_history = cp.task_history
+    if cp.reset_thread:
+        previous_id = None
+    if cp.next_run_messages:
+        extras = " ".join(m.text for m in cp.next_run_messages if m.text)
+        if extras:
+            utterance = f"{utterance} {extras}".strip() if utterance else extras
+            print(f"[orchestrator] applied next_run queue: {extras!r}", flush=True)
+
+    if chat_shot:
+        desktop_context = _CHAT_SCREENSHOT_CONTEXT
+        desktop_png = chat_shot
+        print(
+            f"[orchestrator] chat screenshot attached "
+            f"({len(chat_shot) / 1024.0:.0f} KB); skipped live desktop/AX",
+            flush=True,
+        )
+    else:
+        desktop = cp.desktop
+        desktop_context = desktop.text
+        desktop_png = desktop.screenshot_png
+    turn_input = _user_turn_input(
+        utterance,
+        task_history,
+        task_summary=compact_state.task_summary,
+        pending_fn_outputs=cp.pending_fn_outputs or None,
+        photo_jpeg=jpeg,
+        desktop_context=desktop_context,
+        desktop_screenshot_png=desktop_png,
+        execution_route=execution_route.prompt_block(),
+    )
+    pending_fn_outputs = []
+    turn = TurnTrace(utterance)
+    system = _orchestrator_system_prompt(
+        mcp_rule,
+        session_summary=compact_state.session_summary,
+        memory_query=utterance,
+    )
+
+    response = None
+    for overflow_attempt in range(2):
+        try:
+            if previous_id is None:
+                response = _create_response(
+                    llm,
+                    llm_tts=llm_tts,
+                    model=MODEL,
+                    tools=orchestrator_tools(),
+                    instructions=system,
+                    input=turn_input,
+                )
+            else:
+                response = _create_response(
+                    llm,
+                    llm_tts=llm_tts,
+                    model=MODEL,
+                    tools=orchestrator_tools(),
+                    instructions=system,
+                    previous_response_id=previous_id,
+                    input=turn_input,
+                )
+            break
+        except LlmUnavailableError as e:
+            _announce_llm_failure(client, e)
+            response = None
+            break
+        except Exception as e:
+            if overflow_attempt == 0 and is_context_overflow_error(e):
+                print(f"[orchestrator] context overflow ({e}); recovering once", flush=True)
+                cp = run_orchestrator_checkpoint(
+                    llm,
+                    compact_state,
+                    task_history,
+                    capture_desktop=not bool(chat_shot),
+                    overflow=True,
+                )
+                task_history = cp.task_history
+                if cp.reset_thread:
+                    previous_id = None
+                system = _orchestrator_system_prompt(
+        mcp_rule,
+                    session_summary=compact_state.session_summary,
+                    memory_query=utterance,
+                )
+                if chat_shot:
+                    overflow_context = _CHAT_SCREENSHOT_CONTEXT
+                    overflow_png = chat_shot
+                else:
+                    desktop = cp.desktop
+                    overflow_context = desktop.text
+                    overflow_png = desktop.screenshot_png
+                turn_input = _user_turn_input(
+                    utterance,
+                    task_history,
+                    task_summary=compact_state.task_summary,
+                    pending_fn_outputs=None,
+                    photo_jpeg=jpeg,
+                    desktop_context=overflow_context,
+                    desktop_screenshot_png=overflow_png,
+                    execution_route=execution_route.prompt_block(),
+                )
+                return "continue", previous_id, task_history, pending_fn_outputs
+            _announce_llm_failure(client, e)
+            response = None
+            break
+    if response is None:
+        _finish_scheduled_turn(
+            scheduled_id,
+            ok=False,
+            error="Planning failed before a response was created.",
+        )
+        from latency_report import abandon_trace, current_trace_id
+
+        abandon_trace(current_trace_id(), reason="planning_failed")
+        print("[orchestrator] ready for next task.")
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", previous_id, task_history, pending_fn_outputs
+
+    if consume_cancel():
+        _finish_scheduled_turn(
+            scheduled_id,
+            ok=False,
+            error="Cancelled during planning.",
+        )
+        from latency_report import abandon_trace, current_trace_id
+
+        abandon_trace(current_trace_id(), reason="user_cancelled")
+        print("[orchestrator] voice turn discarded during planning", flush=True)
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", previous_id, task_history, pending_fn_outputs
+
+    from latency_report import current_trace_id, mark
+
+    mark(current_trace_id(), "plan_ready")
+
+    try:
+        response, end_session, pending_fn_outputs = _process_response(
+            client,
+            response,
+            auto=auto,
+            max_steps=max_steps,
+            task_history=task_history,
+            publisher=publisher,
+            ask_bridge=ask_bridge,
+            llm_tts=llm_tts,
+            turn=turn,
+            user_said=utterance,
+            record_speaker=record_speaker,
+            compact_state=compact_state,
+            llm=llm,
+        )
+    except VoiceTurnCancelled:
+        _finish_scheduled_turn(
+            scheduled_id,
+            ok=False,
+            error="Cancelled during response processing.",
+        )
+        from latency_report import abandon_trace, current_trace_id
+
+        abandon_trace(current_trace_id(), reason="user_cancelled")
+        pending_fn_outputs = []
+        print("[orchestrator] voice turn cancelled — returning to idle", flush=True)
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", previous_id, task_history, pending_fn_outputs
+    except LlmUnavailableError as e:
+        _finish_scheduled_turn(scheduled_id, ok=False, error=str(e))
+        _announce_llm_failure(client, e)
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", previous_id, task_history, pending_fn_outputs
+    except Exception as e:
+        _finish_scheduled_turn(scheduled_id, ok=False, error=str(e))
+        _announce_llm_failure(client, e)
+        sess.enter("ready", "Waiting for next request")
+        audio.cooldown()
+        return "continue", previous_id, task_history, pending_fn_outputs
+    _finish_scheduled_turn(scheduled_id, ok=True)
+    previous_id = response.id
+    compact_state.record_turn(utterance, turn.as_text())
+    emit("turn_end", lane="main", utterance=utterance[:160])
+    try:
+        from llm_trace import end_run
+
+        end_run(lane="main", name="turn", utterance=utterance[:160])
+    except Exception:
+        pass
+    from latency_report import current_trace_id, finish_trace
+
+    # Computer-agent turns finalize in the worker with action timings.
+    # Conversational voice turns still get persisted as no-action traces.
+    finish_trace(
+        current_trace_id(),
+        status="no_computer_action",
+        task=utterance,
+    )
+    maybe_extract_run_memories(
+        user_input=utterance,
+        transcript=turn.as_text(),
+    )
+
+    if quit_requested():
+        print("[orchestrator] quit requested from menu bar.")
+        sess.enter_and_log("done", "Quit from menu bar")
+        return "quit", previous_id, task_history, pending_fn_outputs
+
+    if end_session:
+        print("[orchestrator] session ended.")
+        sess.enter_and_log("done", "Session ended")
+        return "quit", previous_id, task_history, pending_fn_outputs
+
+    print("[orchestrator] ready for next task.")
+    sess.enter("ready", "Waiting for next request")
+    audio.cooldown()
+    return "continue", previous_id, task_history, pending_fn_outputs
+
+
+def _run_orchestrator_loop(
+    *,
+    client,
+    llm,
+    audio,
+    llm_tts,
+    mcp_rule: str,
+    publisher,
+    ask_bridge,
+    sess,
+    auto: bool,
+    max_steps: int,
+) -> None:
+    try:
+        sess.enter_and_log("ready", "Orchestrator starting")
+        print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
+        print(
+            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} " "(TTS_CONFIRM_HEARD)",
+            flush=True,
+        )
+        # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
+        if audio.arm_wake() is not None:
+            print("[orchestrator] persistent wake barge-in armed", flush=True)
+        # Do not speak the literal wake phrase — speaker echo false-triggers openWakeWord.
+        pending = _speak(
+            client,
+            "Ready. Say the wake word, then tell me what you need.",
+            publish_to_chat=False,
+        )
+        if pending is None:
+            audio.cooldown()
+
+        previous_id: str | None = None
+        task_history: list[dict[str, str]] = []
+        pending_fn_outputs: list[dict] = []
+        compact_state = SessionCompactState()
+        _record_speaker = _SpeakerRound()
+
+        try:
+            from speaker_id import enabled as speaker_id_enabled
+
+            if speaker_id_enabled():
+                print("[orchestrator] speaker ID enabled — logging voice each round", flush=True)
+        except Exception:
+            pass
+
+        while True:
+            if quit_requested():
+                print("[orchestrator] quit requested from menu bar.")
+                sess.enter_and_log("done", "Quit from menu bar")
+                return
+            active_scheduled_task_id: str | None = None
+
+            # Tray owns the menu bar + face; respawn if it died mid-session.
+            try:
+                ensure_tray_running()
+            except Exception:
+                pass
+
+            action, utterance, active_scheduled_task_id, pending = _collect_next_utterance(
+                pending, client, sess
+            )
+            if action == "quit":
+                return
+            if action == "continue":
+                continue
+
+            photo_turn = phone_photo_pending()
+            if not photo_turn and active_scheduled_task_id is None:
+                utterance = _confirm_heard(client, utterance)
+            prepared, utterance, barged = _prepare_heard_turn(
+                utterance,
+                client=client,
+                llm=llm,
+                sess=sess,
+                audio=audio,
+                scheduled_id=active_scheduled_task_id,
+                record_speaker=_record_speaker,
+            )
+            if barged:
+                pending = barged
+            if prepared == "quit":
+                return
+            if prepared == "continue":
+                continue
+
+            action, previous_id, task_history, pending_fn_outputs = _run_one_voice_turn(
+                utterance=utterance,
+                photo_turn=photo_turn,
+                scheduled_id=active_scheduled_task_id,
+                client=client,
+                llm=llm,
+                audio=audio,
+                llm_tts=llm_tts,
+                mcp_rule=mcp_rule,
+                publisher=publisher,
+                ask_bridge=ask_bridge,
+                sess=sess,
+                auto=auto,
+                max_steps=max_steps,
+                record_speaker=_record_speaker,
+                compact_state=compact_state,
+                previous_id=previous_id,
+                task_history=task_history,
+                pending_fn_outputs=pending_fn_outputs,
+            )
+            if action == "quit":
+                return
+
+    finally:
+        if llm_tts is not None:
+            try:
+                llm_tts.close()
+            except Exception as e:
+                print(f"[orchestrator] TTS shutdown error: {e}", flush=True)
+        try:
+            audio.stop()
+        except Exception:
+            pass
+        try:
+            stop_mcp()
+        except Exception as e:
+            print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
+        publisher.close()
+        unregister_orchestrator()
+        stop_phone_gateway()
+        stop_tray()
+        stop_dictation()
+        sess.enter("idle", "Orchestrator stopped")
+        bind_audio(None)
+        bind_session(None)
+
+
 def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     global _phone_photo_in_session
     _phone_photo_in_session = False
@@ -2075,21 +2850,16 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     ensure_dictation_running()
     sess = Session()
     bind_session(sess)
-
-    def _shutdown_side_processes() -> None:
-        # Idempotent atexit fallback for failures outside the main cleanup scope.
-        try:
-            stop_phone_gateway()
-        except Exception:
-            pass
-        try:
-            stop_tray()
-        except Exception:
-            pass
-        try:
-            stop_dictation()
-        except Exception:
-            pass
+    recovered_scheduled = 0
+    try:
+        recovered_scheduled = recover_pending_tasks()
+    except Exception as e:
+        print(f"[orchestrator] scheduled-task recovery failed: {e}", flush=True)
+    if recovered_scheduled:
+        print(
+            f"[orchestrator] re-queued {recovered_scheduled} interrupted scheduled task(s)",
+            flush=True,
+        )
 
     try:
         # Never acquire locks, log, or wait for child processes in this handler.
@@ -2137,395 +2907,20 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
             "the request.\n"
         )
 
-    def _system_prompt(*, session_summary: str = "", memory_query: str | None = None) -> str:
-        bundle = assemble_context(memory_query=memory_query)
-        return build_system_prompt(
-            skills=bundle.skills,
-            memories=bundle.memories,
-            displays=bundle.displays,
-            mcp=bundle.mcp,
-            not_to_do=bundle.not_to_do,
-            mcp_rule=mcp_rule,
-            session_summary=session_summary,
-        )
-
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
-
-    try:
-        sess.enter_and_log("ready", "Orchestrator starting")
-        print(f"[orchestrator] Wake phrases: {format_wake_phrases()} (mode from env / defaults)")
-        print(
-            f"[orchestrator] I-heard TTS={'on' if _confirm_heard_enabled() else 'off'} " "(TTS_CONFIRM_HEARD)",
-            flush=True,
-        )
-        # Arm wake BEFORE any TTS so barge-in covers synthesis + the ready line.
-        if audio.arm_wake() is not None:
-            print("[orchestrator] persistent wake barge-in armed", flush=True)
-        # Do not speak the literal wake phrase — speaker echo false-triggers openWakeWord.
-        pending = _speak(
-            client,
-            "Ready. Say the wake word, then tell me what you need.",
-            publish_to_chat=False,
-        )
-        if pending is None:
-            audio.cooldown()
-
-        previous_id: str | None = None
-        task_history: list[dict[str, str]] = []
-        pending_fn_outputs: list[dict] = []
-        session_speaker: Any = None
-        compact_state = SessionCompactState()
-
-        def _record_speaker() -> None:
-            nonlocal session_speaker
-            session_speaker = _log_speaker_round(session_speaker)
-
-        try:
-            from speaker_id import enabled as speaker_id_enabled
-
-            if speaker_id_enabled():
-                print("[orchestrator] speaker ID enabled — logging voice each round", flush=True)
-        except Exception:
-            pass
-
-        while True:
-            if quit_requested():
-                print("[orchestrator] quit requested from menu bar.")
-                sess.enter_and_log("done", "Quit from menu bar")
-                return
-
-            # Tray owns the menu bar + face; respawn if it died mid-session.
-            try:
-                ensure_tray_running()
-            except Exception:
-                pass
-
-            if pending is not None:
-                utterance = pending
-                pending = None
-            else:
-                next_batch = get_next_run_queue().drain()
-                if next_batch:
-                    utterance = " ".join(m.text for m in next_batch if m.text).strip()
-                    print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
-                elif speak_pending():
-                    barged = _service_timer_speech(client)
-                    if barged:
-                        pending = barged
-                    continue
-                else:
-                    utterance = _listen_command(
-                        client,
-                        should_stop=quit_requested,
-                        wake_prompt=f"Waiting for {format_wake_phrases()}…",
-                        listen_prompt="Listening…",
-                    )
-                    if quit_requested():
-                        print("[orchestrator] quit requested from menu bar.")
-                        sess.enter_and_log("done", "Quit from menu bar")
-                        return
-                    if utterance is None:
-                        continue
-
-            photo_turn = phone_photo_pending()
-            if not photo_turn:
-                utterance = _confirm_heard(client, utterance)
-            if consume_cancel():
-                print("[orchestrator] voice turn discarded before processing", flush=True)
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-            print(f'\n[user] "{utterance}"')
-            status_log(f'[user] "{utterance}"')
-            _record_speaker()
-            low = utterance.lower().strip()
-            if is_mark_done_utterance(utterance):
-                if active_agents():
-                    request_mark_done()
-                    barged = _speak(client, "Marking it done.")
-                else:
-                    barged = _speak(client, "Nothing is running.")
-                if barged:
-                    pending = barged
-                continue
-            if is_save_screen_utterance(utterance):
-                barged = _speak(client, "Saving the screen.")
-                if barged:
-                    pending = barged
-                    continue
-                result = _save_screen_now(llm, utterance)
-                ok = result.lower().startswith("saved")
-                barged = _speak(client, "Saved." if ok else "Could not save the screen.")
-                if barged:
-                    pending = barged
-                continue
-            if low in {"quit", "exit", "goodbye", "good bye", "stop listening"}:
-                barged = _speak(client, "Goodbye.")
-                if barged:
-                    pending = barged
-                    continue
-                clear_phone_photo()
-                _phone_photo_in_session = False
-                sess.enter_and_log("done", "Session ended")
-                return
-
-            sess.enter("thinking", utterance[:100])
-            from execution_router import resolve_execution_route
-
-            execution_route = resolve_execution_route(utterance)
-            from latency_report import current_trace_id, mark
-
-            mark(
-                current_trace_id(),
-                "route_selected",
-                metadata={
-                    "execution_path": execution_route.path,
-                    "specialist_lane": execution_route.lane,
-                    "route_reason": execution_route.reason,
-                },
-            )
-            print(
-                f"[orchestrator] execution route → {execution_route.path}/"
-                f"{execution_route.lane} ({execution_route.reason})",
-                flush=True,
-            )
-            jpeg = None
-            if photo_turn or _phone_photo_in_session:
-                jpeg = phone_photo_jpeg(consume_pending=True)
-                if jpeg:
-                    _phone_photo_in_session = True
-
-            # Chat-attached shot: use only the displays the user selected — no
-            # live desktop screenshot / accessibility dump for this turn.
-            chat_shot = take_turn_chat_screenshot()
-
-            compact_state.begin_turn()
-            emit("turn_start", lane="main", utterance=utterance[:160])
-            cp = run_orchestrator_checkpoint(
-                llm,
-                compact_state,
-                task_history,
-                pending_fn_outputs=pending_fn_outputs or None,
-                capture_desktop=not bool(chat_shot),
-            )
-            if consume_cancel():
-                print("[orchestrator] voice turn discarded during context capture", flush=True)
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-            task_history = cp.task_history
-            if cp.reset_thread:
-                previous_id = None
-            if cp.next_run_messages:
-                extras = " ".join(m.text for m in cp.next_run_messages if m.text)
-                if extras:
-                    utterance = f"{utterance} {extras}".strip() if utterance else extras
-                    print(f"[orchestrator] applied next_run queue: {extras!r}", flush=True)
-
-            if chat_shot:
-                desktop_context = _CHAT_SCREENSHOT_CONTEXT
-                desktop_png = chat_shot
-                print(
-                    f"[orchestrator] chat screenshot attached "
-                    f"({len(chat_shot) / 1024.0:.0f} KB); skipped live desktop/AX",
-                    flush=True,
-                )
-            else:
-                desktop = cp.desktop
-                desktop_context = desktop.text
-                desktop_png = desktop.screenshot_png
-            turn_input = _user_turn_input(
-                utterance,
-                task_history,
-                task_summary=compact_state.task_summary,
-                pending_fn_outputs=cp.pending_fn_outputs or None,
-                photo_jpeg=jpeg,
-                desktop_context=desktop_context,
-                desktop_screenshot_png=desktop_png,
-                execution_route=execution_route.prompt_block(),
-            )
-            pending_fn_outputs = []
-            turn = TurnTrace(utterance)
-            system = _system_prompt(
-                session_summary=compact_state.session_summary,
-                memory_query=utterance,
-            )
-
-            response = None
-            for overflow_attempt in range(2):
-                try:
-                    if previous_id is None:
-                        response = _create_response(
-                            llm,
-                            llm_tts=llm_tts,
-                            model=MODEL,
-                            tools=orchestrator_tools(),
-                            instructions=system,
-                            input=turn_input,
-                        )
-                    else:
-                        response = _create_response(
-                            llm,
-                            llm_tts=llm_tts,
-                            model=MODEL,
-                            tools=orchestrator_tools(),
-                            instructions=system,
-                            previous_response_id=previous_id,
-                            input=turn_input,
-                        )
-                    break
-                except LlmUnavailableError as e:
-                    _announce_llm_failure(client, e)
-                    response = None
-                    break
-                except Exception as e:
-                    if overflow_attempt == 0 and is_context_overflow_error(e):
-                        print(f"[orchestrator] context overflow ({e}); recovering once", flush=True)
-                        cp = run_orchestrator_checkpoint(
-                            llm,
-                            compact_state,
-                            task_history,
-                            capture_desktop=not bool(chat_shot),
-                            overflow=True,
-                        )
-                        task_history = cp.task_history
-                        if cp.reset_thread:
-                            previous_id = None
-                        system = _system_prompt(
-                            session_summary=compact_state.session_summary,
-                            memory_query=utterance,
-                        )
-                        if chat_shot:
-                            overflow_context = _CHAT_SCREENSHOT_CONTEXT
-                            overflow_png = chat_shot
-                        else:
-                            desktop = cp.desktop
-                            overflow_context = desktop.text
-                            overflow_png = desktop.screenshot_png
-                        turn_input = _user_turn_input(
-                            utterance,
-                            task_history,
-                            task_summary=compact_state.task_summary,
-                            pending_fn_outputs=None,
-                            photo_jpeg=jpeg,
-                            desktop_context=overflow_context,
-                            desktop_screenshot_png=overflow_png,
-                            execution_route=execution_route.prompt_block(),
-                        )
-                        continue
-                    _announce_llm_failure(client, e)
-                    response = None
-                    break
-            if response is None:
-                from latency_report import abandon_trace, current_trace_id
-
-                abandon_trace(current_trace_id(), reason="planning_failed")
-                print("[orchestrator] ready for next task.")
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-
-            if consume_cancel():
-                from latency_report import abandon_trace, current_trace_id
-
-                abandon_trace(current_trace_id(), reason="user_cancelled")
-                print("[orchestrator] voice turn discarded during planning", flush=True)
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-
-            from latency_report import current_trace_id, mark
-
-            mark(current_trace_id(), "plan_ready")
-
-            try:
-                response, end_session, pending_fn_outputs = _process_response(
-                    client,
-                    response,
-                    auto=auto,
-                    max_steps=max_steps,
-                    task_history=task_history,
-                    publisher=publisher,
-                    ask_bridge=ask_bridge,
-                    llm_tts=llm_tts,
-                    turn=turn,
-                    user_said=utterance,
-                    record_speaker=_record_speaker,
-                    compact_state=compact_state,
-                    llm=llm,
-                )
-            except VoiceTurnCancelled:
-                from latency_report import abandon_trace, current_trace_id
-
-                abandon_trace(current_trace_id(), reason="user_cancelled")
-                pending_fn_outputs = []
-                print("[orchestrator] voice turn cancelled — returning to idle", flush=True)
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-            except LlmUnavailableError as e:
-                _announce_llm_failure(client, e)
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-            except Exception as e:
-                _announce_llm_failure(client, e)
-                sess.enter("ready", "Waiting for next request")
-                audio.cooldown()
-                continue
-            previous_id = response.id
-            compact_state.record_turn(utterance, turn.as_text())
-            emit("turn_end", lane="main", utterance=utterance[:160])
-            from latency_report import current_trace_id, finish_trace
-
-            # Computer-agent turns finalize in the worker with action timings.
-            # Conversational voice turns still get persisted as no-action traces.
-            finish_trace(
-                current_trace_id(),
-                status="no_computer_action",
-                task=utterance,
-            )
-            maybe_extract_run_memories(
-                user_input=utterance,
-                transcript=turn.as_text(),
-            )
-
-            if quit_requested():
-                print("[orchestrator] quit requested from menu bar.")
-                sess.enter_and_log("done", "Quit from menu bar")
-                return
-
-            if end_session:
-                print("[orchestrator] session ended.")
-                sess.enter_and_log("done", "Session ended")
-                return
-
-            print("[orchestrator] ready for next task.")
-            sess.enter("ready", "Waiting for next request")
-            audio.cooldown()
-    finally:
-        if llm_tts is not None:
-            try:
-                llm_tts.close()
-            except Exception as e:
-                print(f"[orchestrator] TTS shutdown error: {e}", flush=True)
-        try:
-            audio.stop()
-        except Exception:
-            pass
-        try:
-            stop_mcp()
-        except Exception as e:
-            print(f"[orchestrator] MCP shutdown error: {e}", flush=True)
-        publisher.close()
-        unregister_orchestrator()
-        stop_phone_gateway()
-        stop_tray()
-        stop_dictation()
-        sess.enter("idle", "Orchestrator stopped")
-        bind_audio(None)
-        bind_session(None)
+    _run_orchestrator_loop(
+        client=client,
+        llm=llm,
+        audio=audio,
+        llm_tts=llm_tts,
+        mcp_rule=mcp_rule,
+        publisher=publisher,
+        ask_bridge=ask_bridge,
+        sess=sess,
+        auto=auto,
+        max_steps=max_steps,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:

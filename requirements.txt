@@ -1,4 +1,7 @@
-openai[realtime]>=1.50.0
+# 3.x adds beta WebSocket Responses types (BetaResponseWsError) that break
+# stream=True / realtime if the install is mixed. Stay on the v1/v2 SDK this
+# repo was written against (Responses API + client.realtime.connect).
+openai[realtime]>=1.66.0,<3
 sarvamai>=0.1.0
 # Local WhisperFlow STT. mlx-whisper if the HF snapshot is complete;
 # otherwise openai-whisper (~/.cache/whisper). Intel/Linux: faster-whisper
@@ -22,6 +25,9 @@ onnxruntime>=1.17.0
 transformers>=4.48.2
 speakeronnx>=0.1.0
 mcp>=1.28,<2
+# Local LLM traces UI (optional). JSONL still writes without this.
+# Run: phoenix serve  → http://127.0.0.1:6006  and set PHOENIX=1
+arize-phoenix>=11.0.0
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
 pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
 pyobjc-framework-ApplicationServices>=10.0; sys_platform == "darwin"

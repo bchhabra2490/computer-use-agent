@@ -22,6 +22,7 @@ const state = {
   recordingIndex: null,
   recorder: null,
   drafts: [],
+  scheduledTasks: [],
   memories: [],
   editingMemory: null,
   observeRunning: false,
@@ -765,6 +766,7 @@ function wire() {
   $("face-toggle").addEventListener("change", toggleFace);
   $("face-custom-form").addEventListener("submit", applyCustomFace);
   $("drafts-refresh").addEventListener("click", () => loadSystems());
+  $("queue-refresh").addEventListener("click", () => loadSystems());
   $("latency-refresh").addEventListener("click", () => loadLatency());
   $("drafts-accept-all").addEventListener("click", () => acceptDrafts({ all: true }));
   $("drafts-reject-all").addEventListener("click", () => rejectDrafts({ all: true }));
@@ -815,6 +817,7 @@ function wire() {
 function applyObserveStatus(data) {
   state.observeRunning = !!data.running;
   state.drafts = data.drafts || [];
+  state.scheduledTasks = data.scheduled_tasks || [];
   const mins = Math.round((data.draft_seconds || 600) / 60);
   $("observe-toggle").checked = state.observeRunning;
   $("observe-label").textContent = state.observeRunning ? "On" : "Off";
@@ -827,6 +830,7 @@ function applyObserveStatus(data) {
   const count = $("drafts-count");
   if (count) count.textContent = state.drafts.length ? `(${state.drafts.length})` : "";
   renderDrafts();
+  renderScheduledTasks();
 }
 
 function toggleDraftsCollapsed() {
@@ -848,6 +852,80 @@ async function loadSystems() {
     renderDrafts();
   }
   await Promise.all([loadMemories(), loadFace(), loadLatency()]);
+}
+
+function renderScheduledTasks() {
+  const list = $("queue-list");
+  list.innerHTML = "";
+  const rows = state.scheduledTasks || [];
+  $("queue-note").textContent = rows.length
+    ? `${rows.filter((row) => row.status === "queued").length} queued task(s).`
+    : "No scheduled tasks yet.";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "mcp-empty";
+    empty.textContent = "No future work queued.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const card = document.createElement("article");
+    card.className = "queue-row";
+    const top = document.createElement("div");
+    top.className = "queue-row-top";
+    const body = document.createElement("div");
+    body.innerHTML = `
+      <div class="queue-row-title">${esc(row.task || "Untitled task")}</div>
+      <div class="queue-row-meta">${esc(row.status || "queued")} · ${esc(
+        relativeTime(row.run_at_iso)
+      )} · ${esc(row.run_at_iso || "")}</div>
+    `;
+    const pill = document.createElement("span");
+    pill.className = "mcp-pill";
+    pill.textContent = row.id || "";
+    top.append(body, pill);
+    card.appendChild(top);
+    if (row.note) {
+      const note = document.createElement("div");
+      note.className = "queue-row-note";
+      note.textContent = row.note;
+      card.appendChild(note);
+    }
+    const meta = document.createElement("div");
+    meta.className = "queue-row-meta";
+    meta.textContent = `Source: ${row.source || "system"}${
+      row.parent_task_id ? ` · From ${row.parent_task_id}` : ""
+    }`;
+    card.appendChild(meta);
+    if (row.status === "queued") {
+      const actions = document.createElement("div");
+      actions.className = "queue-row-actions";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => cancelScheduledTask(row));
+      actions.appendChild(cancel);
+      card.appendChild(actions);
+    }
+    list.appendChild(card);
+  }
+}
+
+async function cancelScheduledTask(row) {
+  if (!confirm(`Cancel scheduled task “${row.task}”?`)) return;
+  const note = $("queue-note");
+  note.className = "mcp-note";
+  note.textContent = "Cancelling…";
+  try {
+    const data = await window.cuaChat.post("/v1/queue/cancel", { id: row.id, task: null });
+    state.scheduledTasks = data.scheduled_tasks || [];
+    renderScheduledTasks();
+    note.className = "mcp-note ok";
+    note.textContent = `Cancelled ${((data.cancelled || [])[0] || row.id)}`;
+  } catch (err) {
+    note.className = "mcp-note error";
+    note.textContent = String(err.message || err);
+  }
 }
 
 function formatLatency(ms) {

@@ -52,6 +52,12 @@ Desktop chat (Electron; ⌘⌃C)::
     cua chat off
     # first time: cd chat_app && npm install
 
+Scheduled task queue::
+
+    cua queue list
+    cua queue cancel q123
+    cua queue cancel --task "Open dashboard later"
+
 Sleep mode (ignore wake word; ⌘⌃S)::
 
     cua sleep on
@@ -74,6 +80,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from status_control import pid_alive as _pid_alive
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = ROOT / ".runtime"
@@ -131,16 +139,6 @@ def _clear_pid_file() -> None:
             path.unlink(missing_ok=True)
         except OSError:
             pass
-
-
-def _pid_alive(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def _orchestrator_pid_from_status() -> int | None:
@@ -497,7 +495,32 @@ def cmd_status() -> int:
         print("leftover processes:")
         for p, label in extras:
             print(f"  {p}  {label}")
+    try:
+        from scheduled_tasks import list_scheduled_tasks
+
+        queued = [row for row in list_scheduled_tasks() if row.status == "queued"]
+        print(f"scheduled queue: {len(queued)} task(s)")
+    except Exception:
+        pass
     return 0 if pid is not None else 1
+
+
+def cmd_queue_list(*, include_finished: bool = False) -> int:
+    from scheduled_tasks import format_scheduled_tasks
+
+    print(format_scheduled_tasks(include_finished=include_finished))
+    return 0
+
+
+def cmd_queue_cancel(*, task_id: str | None = None, task: str | None = None) -> int:
+    from scheduled_tasks import cancel_scheduled_task
+
+    result = cancel_scheduled_task(task_id=task_id, task=task)
+    if not result.get("ok"):
+        print(f"Error: {result.get('error')}", file=sys.stderr)
+        return 2
+    print(f"Cancelled scheduled tasks: {', '.join(result['cancelled'])}.")
+    return 0
 
 
 def format_help() -> str:
@@ -560,6 +583,12 @@ CHAT (Electron desktop app — screenshot attach off by default; ⌘⌃C)
   cua chat toggle
   # first time: cd chat_app && npm install
 
+QUEUE (future scheduled work)
+  cua queue list
+  cua queue list --all
+  cua queue cancel ID
+  cua queue cancel --task "exact task text"
+
 SLEEP (ignore wake word; face sleeps. ⌘⌃S or menu Sleep)
   cua sleep on
   cua sleep off
@@ -601,7 +630,7 @@ def cmd_help() -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cua",
         description="Start and stop the computer-use-agent daemon",
@@ -758,6 +787,26 @@ def main(argv: list[str] | None = None) -> int:
         help="on | off | toggle | status",
     )
 
+    queue_p = sub.add_parser(
+        "queue",
+        help="Inspect or cancel scheduled future tasks",
+    )
+    queue_sub = queue_p.add_subparsers(dest="queue_command", required=True)
+    queue_list_p = queue_sub.add_parser("list", help="List scheduled tasks")
+    queue_list_p.add_argument(
+        "--all",
+        action="store_true",
+        dest="include_finished",
+        help="Include done and cancelled tasks",
+    )
+    queue_cancel_p = queue_sub.add_parser("cancel", help="Cancel a scheduled task")
+    queue_cancel_p.add_argument("id", nargs="?", default=None, help="Scheduled task id")
+    queue_cancel_p.add_argument(
+        "--task",
+        default=None,
+        help="Exact task text when the id is not known",
+    )
+
     sleep_p = sub.add_parser(
         "sleep",
         help="Ignore wake word (Sleep). Hotkey ⌘⌃S. Face uses sleep vs wink.",
@@ -881,127 +930,166 @@ def main(argv: list[str] | None = None) -> int:
         help="After identification, speak Hey <name> or Hey Stranger via TTS",
     )
 
-    args = parser.parse_args(argv)
-    if args.command is None:
+    return parser
+
+
+def _dispatch_mcp(args) -> int:
+    from mcp_auth import (
+        cmd_mcp_login,
+        cmd_mcp_logout,
+        cmd_mcp_status,
+        format_apps_help,
+    )
+
+    actions = {
+        "login": lambda: cmd_mcp_login(args.name, url=args.url, token=args.token),
+        "logout": lambda: cmd_mcp_logout(args.name),
+        "status": cmd_mcp_status,
+        "apps": lambda: (print(format_apps_help()) or 0),
+    }
+    fn = actions.get(args.mcp_command)
+    return 2 if fn is None else fn()
+
+
+def _dispatch_skills(args) -> int:
+    from skills import cmd_condense_skills, cmd_merge_skills
+
+    actions = {
+        "condense": lambda: cmd_condense_skills(
+            names=args.names,
+            force=args.force,
+            dry_run=args.dry_run,
+            min_chars=args.min_chars,
+        ),
+        "merge": lambda: cmd_merge_skills(names=args.names, dry_run=args.dry_run),
+    }
+    fn = actions.get(args.skills_command)
+    return 2 if fn is None else fn()
+
+
+def _dispatch_observe(args) -> int:
+    import observe as observe_mod
+
+    actions = {
+        "start": observe_mod.cmd_start,
+        "stop": observe_mod.cmd_stop,
+        "status": observe_mod.cmd_status,
+        "list": observe_mod.cmd_list,
+        "compact": observe_mod.cmd_compact,
+        "accept": lambda: observe_mod.cmd_accept(
+            name=args.id,
+            all_drafts=args.all_drafts,
+            items=args.items,
+            memories=args.memories,
+            skills=args.skills,
+        ),
+        "reject": lambda: observe_mod.cmd_reject(
+            name=args.id,
+            all_drafts=args.all_drafts,
+            items=args.items,
+            memories=args.memories,
+            skills=args.skills,
+        ),
+    }
+    fn = actions.get(args.observe_command)
+    return 2 if fn is None else fn()
+
+
+def _dispatch_dictation(args) -> int:
+    import dictation as dictation_mod
+
+    actions = {
+        "start": dictation_mod.cmd_start,
+        "stop": dictation_mod.cmd_stop,
+        "status": dictation_mod.cmd_status,
+    }
+    fn = actions.get(args.dictation_command)
+    return 2 if fn is None else fn()
+
+
+def _dispatch_queue(args) -> int:
+    actions = {
+        "list": lambda: cmd_queue_list(include_finished=bool(args.include_finished)),
+        "cancel": lambda: cmd_queue_cancel(task_id=args.id, task=args.task),
+    }
+    fn = actions.get(args.queue_command)
+    return 2 if fn is None else fn()
+
+
+def _dispatch_speaker(args) -> int:
+    from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
+
+    actions = {
+        "enroll": lambda: cmd_enroll(
+            args.name,
+            max_seconds=args.max_seconds,
+            speak_prompts=args.speak_prompts,
+        ),
+        "list": cmd_list,
+        "delete": lambda: cmd_delete(args.name),
+        "test": lambda: cmd_test(
+            max_seconds=args.max_seconds,
+            verbose=args.verbose,
+            speak_prompts=args.speak_prompts,
+        ),
+    }
+    fn = actions.get(args.speaker_command)
+    return 2 if fn is None else fn()
+
+
+def _cmd_restart(args) -> int:
+    cmd_stop(all_procs=False)
+    return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
+
+
+def _cmd_face(args) -> int:
+    from face_overlay import cmd_face
+
+    return cmd_face(args.name)
+
+
+def _cmd_chat(args) -> int:
+    from chat_overlay import cmd_chat
+
+    return cmd_chat(args.mode)
+
+
+def _cmd_sleep(args) -> int:
+    from app_status import cmd_sleep
+
+    return cmd_sleep(args.mode)
+
+
+def _dispatch(args, parser: argparse.ArgumentParser) -> int:
+    if args.command is None or args.command == "help":
         return cmd_help()
-    if args.command == "help":
-        return cmd_help()
-    if args.command == "start":
-        return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
-    if args.command == "stop":
-        return cmd_stop(all_procs=bool(getattr(args, "all", False)))
-    if args.command == "status":
-        return cmd_status()
-    if args.command == "restart":
-        cmd_stop(all_procs=False)
-        return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
-    if args.command == "install":
-        return cmd_install()
-    if args.command == "mcp":
-        from mcp_auth import (
-            cmd_mcp_login,
-            cmd_mcp_logout,
-            cmd_mcp_status,
-            format_apps_help,
-        )
-
-        if args.mcp_command == "login":
-            return cmd_mcp_login(args.name, url=args.url, token=args.token)
-        if args.mcp_command == "logout":
-            return cmd_mcp_logout(args.name)
-        if args.mcp_command == "status":
-            return cmd_mcp_status()
-        if args.mcp_command == "apps":
-            print(format_apps_help())
-            return 0
+    actions = {
+        "start": lambda: cmd_start(no_auto=args.no_auto, max_steps=args.max_steps),
+        "stop": lambda: cmd_stop(all_procs=bool(getattr(args, "all", False))),
+        "status": cmd_status,
+        "restart": lambda: _cmd_restart(args),
+        "install": cmd_install,
+        "mcp": lambda: _dispatch_mcp(args),
+        "skills": lambda: _dispatch_skills(args),
+        "observe": lambda: _dispatch_observe(args),
+        "dictation": lambda: _dispatch_dictation(args),
+        "face": lambda: _cmd_face(args),
+        "blobatar": lambda: _cmd_face(args),
+        "chat": lambda: _cmd_chat(args),
+        "queue": lambda: _dispatch_queue(args),
+        "sleep": lambda: _cmd_sleep(args),
+        "speaker": lambda: _dispatch_speaker(args),
+    }
+    fn = actions.get(args.command)
+    if fn is None:
+        parser.print_help()
         return 2
-    if args.command == "skills":
-        from skills import cmd_condense_skills, cmd_merge_skills
+    return fn()
 
-        if args.skills_command == "condense":
-            return cmd_condense_skills(
-                names=args.names,
-                force=args.force,
-                dry_run=args.dry_run,
-                min_chars=args.min_chars,
-            )
-        if args.skills_command == "merge":
-            return cmd_merge_skills(names=args.names, dry_run=args.dry_run)
-        return 2
-    if args.command == "observe":
-        import observe as observe_mod
 
-        if args.observe_command == "start":
-            return observe_mod.cmd_start()
-        if args.observe_command == "stop":
-            return observe_mod.cmd_stop()
-        if args.observe_command == "status":
-            return observe_mod.cmd_status()
-        if args.observe_command == "list":
-            return observe_mod.cmd_list()
-        if args.observe_command == "compact":
-            return observe_mod.cmd_compact()
-        if args.observe_command == "accept":
-            return observe_mod.cmd_accept(
-                name=args.id,
-                all_drafts=args.all_drafts,
-                items=args.items,
-                memories=args.memories,
-                skills=args.skills,
-            )
-        if args.observe_command == "reject":
-            return observe_mod.cmd_reject(
-                name=args.id,
-                all_drafts=args.all_drafts,
-                items=args.items,
-                memories=args.memories,
-                skills=args.skills,
-            )
-        return 2
-    if args.command == "dictation":
-        import dictation as dictation_mod
-
-        if args.dictation_command == "start":
-            return dictation_mod.cmd_start()
-        if args.dictation_command == "stop":
-            return dictation_mod.cmd_stop()
-        if args.dictation_command == "status":
-            return dictation_mod.cmd_status()
-        return 2
-    if args.command in {"face", "blobatar"}:
-        from face_overlay import cmd_face
-
-        return cmd_face(args.name)
-    if args.command == "chat":
-        from chat_overlay import cmd_chat
-
-        return cmd_chat(args.mode)
-    if args.command == "sleep":
-        from app_status import cmd_sleep
-
-        return cmd_sleep(args.mode)
-    if args.command == "speaker":
-        from speaker_enroll import cmd_delete, cmd_enroll, cmd_list, cmd_test
-
-        if args.speaker_command == "enroll":
-            return cmd_enroll(
-                args.name,
-                max_seconds=args.max_seconds,
-                speak_prompts=args.speak_prompts,
-            )
-        if args.speaker_command == "list":
-            return cmd_list()
-        if args.speaker_command == "delete":
-            return cmd_delete(args.name)
-        if args.speaker_command == "test":
-            return cmd_test(
-                max_seconds=args.max_seconds,
-                verbose=args.verbose,
-                speak_prompts=args.speak_prompts,
-            )
-        return 2
-    parser.print_help()
-    return 2
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    return _dispatch(parser.parse_args(argv), parser)
 
 
 if __name__ == "__main__":

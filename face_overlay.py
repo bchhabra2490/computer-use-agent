@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import math
 import os
-import time
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -35,7 +34,6 @@ FACE_WIDTH = int(os.environ.get("FACE_OVERLAY_WIDTH", "128"))
 FACE_HEIGHT = int(os.environ.get("FACE_OVERLAY_HEIGHT", "128"))
 FACE_MARGIN_TOP = int(os.environ.get("FACE_OVERLAY_MARGIN_TOP", "10"))
 FACE_FPS = float(os.environ.get("FACE_OVERLAY_FPS", "20"))
-FACE_HUE = float(os.environ.get("FACE_OVERLAY_HUE", "198"))
 
 # Default organic outline (pebble). Other blobatars carry their own.
 _BLOB_PERTURB = (0.08, -0.12, 0.05, 0.14, -0.07, 0.10, -0.10, 0.04)

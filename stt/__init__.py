@@ -39,6 +39,8 @@ import numpy as np
 import sounddevice as sd
 from openai import OpenAI
 
+from llm_client import response_output_text as _response_output_text
+
 from tts import speak
 from .timing import timed
 
@@ -1873,19 +1875,6 @@ def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str 
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     print(f"[stt] model={model}")
     return text
-
-
-def _response_output_text(response) -> str:
-    chunks: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                chunks.append(part.text)
-    if chunks:
-        return "\n".join(chunks).strip()
-    return (getattr(response, "output_text", None) or "").strip()
 
 
 def choose_transcript(client: OpenAI, live: str, refined: str) -> str:

@@ -901,7 +901,7 @@ def read_phone_screen() -> bytes | None:
 
 
 # Backward-compatible public facade for the split control/presentation domain.
-from status_control import (  # noqa: E402
+from status_control import (  # noqa: E402  # pylint: disable=unused-import
     register_orchestrator,
     unregister_orchestrator,
     register_agent_process,

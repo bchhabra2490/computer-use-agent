@@ -228,6 +228,89 @@ CANCEL_TIMER_TOOL = {
     "strict": True,
 }
 
+SCHEDULE_TASK_TOOL = {
+    "type": "function",
+    "name": "schedule_task",
+    "description": (
+        "Queue a future task that should run automatically later. Use this when "
+        "the user asks for work at a specific future time, or when the current "
+        "task should schedule a follow-up run. Pass a normalized Unix timestamp "
+        "in seconds via run_at_epoch. This is for future work, not countdown-only "
+        "reminders; use set_timer for simple spoken reminders."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "Short future task goal in the user's words.",
+            },
+            "run_at_epoch": {
+                "type": "number",
+                "description": "Unix timestamp in seconds when the task should run.",
+            },
+            "source": {
+                "type": "string",
+                "enum": ["user", "agent", "system"],
+                "description": "Who created the scheduled task.",
+            },
+            "parent_task_id": {
+                "type": ["string", "null"],
+                "description": "Current task id when scheduling follow-up work; else null.",
+            },
+            "note": {
+                "type": ["string", "null"],
+                "description": "Optional reason or context for the scheduled task.",
+            },
+        },
+        "required": ["task", "run_at_epoch", "source", "parent_task_id", "note"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+LIST_SCHEDULED_TASKS_TOOL = {
+    "type": "function",
+    "name": "list_scheduled_tasks",
+    "description": "List queued future tasks and their due times.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "include_finished": {
+                "type": "boolean",
+                "description": "True to include done and cancelled tasks.",
+            },
+        },
+        "required": ["include_finished"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+CANCEL_SCHEDULED_TASK_TOOL = {
+    "type": "function",
+    "name": "cancel_scheduled_task",
+    "description": (
+        "Cancel a queued future task by id, or by exact task text if id is not known."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": ["string", "null"],
+                "description": "Scheduled task id, or null to match by task text.",
+            },
+            "task": {
+                "type": ["string", "null"],
+                "description": "Exact queued task text, or null when using id.",
+            },
+        },
+        "required": ["id", "task"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 BROWSER_DATA_TOOL = {
     "type": "function",
     "name": "browser_data",
@@ -618,6 +701,9 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT),
     _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT),
+    _entry(SCHEDULE_TASK_TOOL, ORCHESTRATOR, AGENT),
+    _entry(LIST_SCHEDULED_TASKS_TOOL, ORCHESTRATOR, AGENT),
+    _entry(CANCEL_SCHEDULED_TASK_TOOL, ORCHESTRATOR, AGENT),
     _entry(BROWSER_DATA_TOOL, ORCHESTRATOR, AGENT),
     _entry(WEBMCP_TOOL, ORCHESTRATOR, AGENT),
     _entry(LIST_SKILLS_TOOL, AGENT),
@@ -739,6 +825,10 @@ def execute_prepared_tool(
             from timers import run_timer_tool
 
             return ToolOutcome(output=run_timer_tool(name, args))
+        if name in {"schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"}:
+            from scheduled_tasks import run_scheduled_task_tool
+
+            return ToolOutcome(output=run_scheduled_task_tool(name, args))
         if name == "browser_data":
             from browser_data import run_browser_data_tool
 
@@ -768,22 +858,55 @@ def run_tool(
     brain: Brain = ORCHESTRATOR,
 ) -> ToolOutcome:
     """prepare → execute → finalize for shared tools."""
+    import time
+
     from events import emit
 
+    lane = "agent" if brain == AGENT else "main"
+    started = time.perf_counter()
     prepared = prepare_tool_call(name, args, call_id=call_id, brain=brain)
     if isinstance(prepared, ImmediateToolOutcome):
-        return finalize_tool_outcome(prepared.outcome)
-    emit("tool_start", lane="agent" if brain == AGENT else "main", name=name, call_id=call_id)
+        outcome = finalize_tool_outcome(prepared.outcome)
+        try:
+            from llm_trace import record_registry_tool
+
+            record_registry_tool(
+                name=name,
+                args=args,
+                output=outcome.output,
+                call_id=call_id,
+                lane=lane,
+                is_error=outcome.is_error,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
+        except Exception:
+            pass
+        return outcome
+    emit("tool_start", lane=lane, name=name, call_id=call_id)
     outcome = execute_prepared_tool(prepared, client=client)
     outcome = finalize_tool_outcome(outcome)
     emit(
         "tool_result",
-        lane="agent" if brain == AGENT else "main",
+        lane=lane,
         name=name,
         call_id=call_id,
         chars=len(outcome.output or ""),
         is_error=outcome.is_error,
     )
+    try:
+        from llm_trace import record_registry_tool
+
+        record_registry_tool(
+            name=name,
+            args=args,
+            output=outcome.output,
+            call_id=call_id,
+            lane=lane,
+            is_error=outcome.is_error,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
+    except Exception:
+        pass
     return outcome
 
 

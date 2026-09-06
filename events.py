@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 EventType = Literal[
     "turn_start",
     "turn_end",
+    "llm_request",
     "llm_response",
     "tool_start",
     "tool_result",
@@ -117,12 +118,22 @@ _default_sink: EventSink | None = None
 _sink_lock = threading.Lock()
 
 
+def _attach_llm_trace(sink: EventSink) -> None:
+    try:
+        from llm_trace import attach_listener
+
+        attach_listener(sink)
+    except Exception:
+        pass
+
+
 def get_events() -> EventSink:
     global _default_sink
     with _sink_lock:
         if _default_sink is None:
             _default_sink = EventSink()
             _default_sink.on(_default_logger)
+            _attach_llm_trace(_default_sink)
         return _default_sink
 
 
@@ -133,6 +144,7 @@ def bind_events(sink: EventSink | None) -> EventSink:
         _default_sink = sink if sink is not None else EventSink()
         if sink is None:
             _default_sink.on(_default_logger)
+            _attach_llm_trace(_default_sink)
         return _default_sink
 
 

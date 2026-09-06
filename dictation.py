@@ -28,6 +28,8 @@ import threading
 import time
 from pathlib import Path
 
+from status_control import pid_alive as _pid_alive
+
 ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = ROOT / ".runtime"
 PID_PATH = RUNTIME_DIR / "dictation.pid"
@@ -66,16 +68,6 @@ def _python() -> str:
     if venv.is_file():
         return str(venv)
     return sys.executable
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def running_pid() -> int | None:

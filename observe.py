@@ -29,6 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from actions import _capture_cg_display
+from status_control import pid_alive as _pid_alive
+
 ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(os.environ.get("AGENT_RUNTIME_DIR") or ROOT / ".runtime")
 OBSERVE_DIR = RUNTIME_DIR / "observe"
@@ -563,16 +566,6 @@ def _archive_draft(path: Path, dest_root: Path, *, status: str) -> None:
             draft.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         except (OSError, json.JSONDecodeError):
             pass
-
-
-def _pid_alive(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def running_pid() -> int | None:
@@ -1147,35 +1140,6 @@ def _downscale_png(data: bytes) -> bytes:
         return buf.getvalue()
     except Exception:
         return data
-
-
-def _capture_cg_display(display_id: int) -> bytes | None:
-    if sys.platform != "darwin" or not display_id:
-        return None
-    try:
-        from AppKit import NSBitmapImageRep
-        from Quartz import CGDisplayCreateImage
-    except Exception:
-        return None
-    try:
-        from AppKit import NSBitmapImageFileTypePNG as png_type
-    except ImportError:
-        try:
-            from AppKit import NSPNGFileType as png_type
-        except ImportError:
-            return None
-    try:
-        image = CGDisplayCreateImage(int(display_id))
-        if image is None:
-            return None
-        rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
-        blob = rep.representationUsingType_properties_(png_type, None)
-        if blob is None:
-            return None
-        return bytes(blob)
-    except Exception as e:
-        print(f"[observe] display capture failed: {e}", flush=True)
-        return None
 
 
 def _capture_primary_png() -> bytes | None:

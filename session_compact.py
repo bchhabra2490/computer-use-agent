@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from llm_client import response_output_text as _extract_response_text
+
 TASK_HISTORY_KEEP = int(os.environ.get("ORCHESTRATOR_TASK_HISTORY_KEEP", "3"))
 TURN_COMPACT_EVERY = int(os.environ.get("ORCHESTRATOR_TURN_COMPACT", "25"))
 COMPACT_MODEL = (
@@ -88,19 +90,6 @@ def _clip(text: str, limit: int) -> str:
         return body
     cut = body[: limit - 1].rsplit("\n", 1)[0].rstrip()
     return (cut or body[: limit - 1]) + "…"
-
-
-def _extract_response_text(response: Any) -> str:
-    parts: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                text = (getattr(part, "text", None) or "").strip()
-                if text:
-                    parts.append(text)
-    return "\n".join(parts).strip()
 
 
 def _summarize(client: Any, *, system: str, user: str) -> str:

@@ -315,24 +315,44 @@ def _part_payload(part) -> bytes:
     return payload
 
 
-def _is_audio_part(*, name: str = "", filename: str = "", content_type: str = "") -> bool:
-    if (name or "").lower() in _AUDIO_FIELD_NAMES:
+def _is_media_part(
+    *,
+    name: str = "",
+    filename: str = "",
+    content_type: str = "",
+    field_names: set[str],
+    exts: tuple[str, ...],
+    type_prefix: str,
+) -> bool:
+    if (name or "").lower() in field_names:
         return True
     fname = (filename or "").lower()
-    if any(fname.endswith(ext) for ext in _AUDIO_EXTS):
+    if any(fname.endswith(ext) for ext in exts):
         return True
     ctype = (content_type or "").split(";")[0].strip().lower()
-    return ctype.startswith("audio/")
+    return ctype.startswith(type_prefix)
+
+
+def _is_audio_part(*, name: str = "", filename: str = "", content_type: str = "") -> bool:
+    return _is_media_part(
+        name=name,
+        filename=filename,
+        content_type=content_type,
+        field_names=_AUDIO_FIELD_NAMES,
+        exts=_AUDIO_EXTS,
+        type_prefix="audio/",
+    )
 
 
 def _is_photo_part(*, name: str = "", filename: str = "", content_type: str = "") -> bool:
-    if (name or "").lower() in _PHOTO_FIELD_NAMES:
-        return True
-    fname = (filename or "").lower()
-    if any(fname.endswith(ext) for ext in _PHOTO_EXTS):
-        return True
-    ctype = (content_type or "").split(";")[0].strip().lower()
-    return ctype.startswith("image/")
+    return _is_media_part(
+        name=name,
+        filename=filename,
+        content_type=content_type,
+        field_names=_PHOTO_FIELD_NAMES,
+        exts=_PHOTO_EXTS,
+        type_prefix="image/",
+    )
 
 
 def transcribe_phone_audio(
@@ -821,27 +841,22 @@ class PhoneGatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(blob)
 
-    def _send_jpeg(self, blob: bytes, *, screen_at: Any = None) -> None:
+    def _send_bytes(self, blob: bytes, content_type: str, *, etag: Any = None) -> None:
         self.send_response(200)
         self._cors()
-        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(blob)))
         self.send_header("Cache-Control", "no-store")
-        if screen_at is not None:
-            self.send_header("ETag", f'"{screen_at}"')
+        if etag is not None:
+            self.send_header("ETag", f'"{etag}"')
         self.end_headers()
         self.wfile.write(blob)
 
+    def _send_jpeg(self, blob: bytes, *, screen_at: Any = None) -> None:
+        self._send_bytes(blob, "image/jpeg", etag=screen_at)
+
     def _send_wav(self, blob: bytes, *, speech_at: Any = None) -> None:
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "audio/wav")
-        self.send_header("Content-Length", str(len(blob)))
-        self.send_header("Cache-Control", "no-store")
-        if speech_at is not None:
-            self.send_header("ETag", f'"{speech_at}"')
-        self.end_headers()
-        self.wfile.write(blob)
+        self._send_bytes(blob, "audio/wav", etag=speech_at)
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)

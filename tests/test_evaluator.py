@@ -138,9 +138,11 @@ def test_coach_prompt_forbids_recommending_completed_actions(tmp_path):
 
     request = client.responses.create.call_args.kwargs
     assert "Never recommend an already successful" in request["instructions"]
+    assert "click-by-click" in request["instructions"]
     prompt = request["input"][0]["content"][0]["text"]
     assert "Progress checkpoint:" in prompt
     assert '"text": "hello"' in prompt
     assert "Submit the form" in tip
+    assert "not a click script" in tip
     recorded = log.record.call_args.args[2]
     assert recorded["completed_since_last_review"] == ["entered hello"]

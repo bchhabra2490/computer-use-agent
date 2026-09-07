@@ -366,18 +366,15 @@ class BearerTokenAuth(httpx.Auth):
     requires_response_body = False
 
     def __init__(self, token: str) -> None:
+        self.token = token
         self._token = token
 
     def auth_flow(self, request):
-        request.headers["Authorization"] = f"Bearer {self._token}"
-        yield request
-
-    def auth_flow(self, request):
-        request.headers["Authorization"] = f"Bearer {self._token}"
+        request.headers["Authorization"] = f"Bearer {self.token}"
         yield request
 
     async def async_auth_flow(self, request):
-        request.headers["Authorization"] = f"Bearer {self._token}"
+        request.headers["Authorization"] = f"Bearer {self.token}"
         yield request
 
 
@@ -497,12 +494,13 @@ async def login_oauth(app: McpApp) -> str:
             callback_handler=callback.wait,
         )
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
 
-        async with streamablehttp_client(app.url, auth=auth) as (read, write, _sid):
+        from mcp_compat import list_tools_page, streamable_http_session
+
+        async with streamable_http_session(app.url, auth=auth) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                listed = await session.list_tools()
+                listed = await list_tools_page(session)
                 n_tools = len(listed.tools or [])
         cfg = upsert_oauth_server(app.name, app.url, auth="oauth")
         return (

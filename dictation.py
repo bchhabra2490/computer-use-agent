@@ -2,7 +2,8 @@
 
 Hold Fn alone (no other modifiers) while a text field is focused. The mic
 opens immediately and partial transcript text is pasted in real time as you
-speak (OpenAI Realtime or rolling local Whisper when ``STT_PROVIDER=whisperflow``).
+speak (OpenAI Realtime, rolling local Whisper when ``STT_PROVIDER=whisperflow``,
+or Phonon-1 when ``STT_PROVIDER=phonon``).
 Release Fn to finish and keep the final text. Esc or Fn again while listening
 cancels.
 

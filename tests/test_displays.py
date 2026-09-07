@@ -246,6 +246,57 @@ class RunningAppsAndTabsTests(unittest.TestCase):
         self.assertIn("- Linear", text)
         self.assertNotIn("primary display only", text)
 
+    def test_caps_tabs_and_prefers_active(self) -> None:
+        single = [_monitor(0, "Built-in", main=True, x=0, y=0, width=1440, height=900)]
+        tabs_list = [
+            {"title": f"Tab {i}", "url": f"https://example.com/{i}", "active": i == 19}
+            for i in range(20)
+        ]
+        payload = [
+            {
+                "browser": "Google Chrome",
+                "windows": [{"index": 1, "tab_count": 20, "tabs": tabs_list}],
+            }
+        ]
+        with patch.object(disp, "_MAX_TABS", 8):
+            text = disp.format_monitor_occupancy(
+                monitors=single,
+                occupancy=[],
+                frontmost="Google Chrome",
+                apps=["Google Chrome"],
+                tabs=payload,
+            )
+        self.assertIn("Google Chrome (20 tabs; showing 8)", text)
+        self.assertIn("* Tab 19", text)
+        self.assertNotIn("Tab 8", text)
+        self.assertIn("more tabs", text)
+
+    def test_short_occupancy_omits_tabs(self) -> None:
+        single = [_monitor(0, "Built-in", main=True, x=0, y=0, width=1440, height=900)]
+        payload = [
+            {
+                "browser": "Google Chrome",
+                "windows": [
+                    {
+                        "index": 1,
+                        "tabs": [{"title": "YouTube", "url": "https://youtube.com", "active": True}],
+                    }
+                ],
+            }
+        ]
+        text = disp.format_monitor_occupancy(
+            monitors=single,
+            occupancy=[],
+            frontmost="Cursor",
+            apps=["Cursor"],
+            tabs=payload,
+            include_apps=False,
+            include_tabs=False,
+        )
+        self.assertIn("Frontmost app: Cursor", text)
+        self.assertNotIn("Browser tabs:", text)
+        self.assertNotIn("Running apps:", text)
+
     def test_list_tabs_disabled(self) -> None:
         with patch.dict("os.environ", {"DESKTOP_LIST_TABS": "0"}):
             self.assertFalse(disp.list_tabs_enabled())

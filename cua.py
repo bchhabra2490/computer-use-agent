@@ -545,7 +545,7 @@ VOICE (foreground — same orchestrator, attached terminal)
 
   Configure in .env (see README “Voice configuration”):
     OPENAI_API_KEY          required
-    STT_PROVIDER=openai|sarvam|whisperflow
+    STT_PROVIDER=openai|sarvam|whisperflow|phonon
     TTS_PROVIDER=openai|sarvam|piper|kokoro
     WAKE_MODEL / WAKE_PHRASE / WAKE_MODE=model|phrase
     TTS_BARGE_IN=1          wake word interrupts speech

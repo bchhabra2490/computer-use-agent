@@ -2193,6 +2193,9 @@ def _process_response(
                 task_history = cp.task_history
             if turn is not None:
                 turn.add("start_task_result", result or "", max_len=4000)
+            from text_sanitize import sanitize_utf8
+
+            result = sanitize_utf8(result or "")
             task_summary = compact_state.task_summary if compact_state is not None else ""
             history_blob = _format_task_history(task_history, task_summary=task_summary)
             redirect_note = ""
@@ -2214,16 +2217,8 @@ def _process_response(
                         f"Computer agent finished this task.\n"
                         f"Latest result:\n{result}\n\n"
                         f"{feedback_line}"
-                        f"Session task history (use this to decide next action):\n"
-                        f"{history_blob}\n\n"
-                        "Decide next:\n"
-                        "- If the user's request is fully satisfied, call "
-                        "give_response_to_user ONCE with an appropriate spoken summary "
-                        "(titles/names, not raw URLs), then stop. Do not recap "
-                        "again in a message.\n"
-                        "- If distinct work remains, call start_task with only "
-                        "the remaining GOAL (not a Chrome/new-tab screenplay).\n"
-                        "- Do not redo a task that already succeeded."
+                        f"Session task history:\n"
+                        f"{history_blob}"
                     ),
                 }
             )
@@ -2279,17 +2274,28 @@ def _shutdown_side_processes() -> None:
 
 
 def _orchestrator_system_prompt(
-    mcp_rule: str, *, session_summary: str = "", memory_query: str | None = None
+    mcp_rule: str,
+    *,
+    session_summary: str = "",
+    memory_query: str | None = None,
+    recent_turns: str = "",
+    frontmost: str | None = None,
 ) -> str:
-    bundle = assemble_context(memory_query=memory_query)
+    bundle = assemble_context(
+        memory_query=memory_query,
+        skill_detail="names",
+        occupancy_detail="omit",
+        frontmost=frontmost,
+    )
     return build_system_prompt(
         skills=bundle.skills,
         memories=bundle.memories,
-        displays=bundle.displays,
+        displays="",
         mcp=bundle.mcp,
         not_to_do=bundle.not_to_do,
         mcp_rule=mcp_rule,
         session_summary=session_summary,
+        recent_turns=recent_turns,
     )
 
 
@@ -2433,6 +2439,9 @@ def _run_one_voice_turn(
 ):
     """Returns (action, previous_id, task_history, pending_fn_outputs). action is continue or quit."""
     global _phone_photo_in_session
+    from text_sanitize import sanitize_utf8
+
+    utterance = sanitize_utf8(utterance or "")
     sess.enter("thinking", utterance[:100])
     from execution_router import resolve_execution_route
 
@@ -2483,6 +2492,7 @@ def _run_one_voice_turn(
         task_history,
         pending_fn_outputs=pending_fn_outputs or None,
         capture_desktop=not bool(chat_shot),
+        utterance=utterance,
     )
     if consume_cancel():
         print("[orchestrator] voice turn discarded during context capture", flush=True)
@@ -2490,7 +2500,7 @@ def _run_one_voice_turn(
         audio.cooldown()
         return "continue", previous_id, task_history, pending_fn_outputs
     task_history = cp.task_history
-    if cp.reset_thread:
+    if cp.reset_thread or not cp.pending_fn_outputs:
         previous_id = None
     if cp.next_run_messages:
         extras = " ".join(m.text for m in cp.next_run_messages if m.text)
@@ -2526,6 +2536,8 @@ def _run_one_voice_turn(
         mcp_rule,
         session_summary=compact_state.session_summary,
         memory_query=utterance,
+        recent_turns=compact_state.recent_turns_block(),
+        frontmost=getattr(cp.desktop, "frontmost", "") or None,
     )
 
     response = None
@@ -2564,14 +2576,17 @@ def _run_one_voice_turn(
                     task_history,
                     capture_desktop=not bool(chat_shot),
                     overflow=True,
+                    utterance=utterance,
                 )
                 task_history = cp.task_history
-                if cp.reset_thread:
+                if cp.reset_thread or not cp.pending_fn_outputs:
                     previous_id = None
                 system = _orchestrator_system_prompt(
-        mcp_rule,
+                    mcp_rule,
                     session_summary=compact_state.session_summary,
                     memory_query=utterance,
+                    recent_turns=compact_state.recent_turns_block(),
+                    frontmost=getattr(cp.desktop, "frontmost", "") or None,
                 )
                 if chat_shot:
                     overflow_context = _CHAT_SCREENSHOT_CONTEXT
@@ -2793,6 +2808,17 @@ def _run_orchestrator_loop(
                 return
             if prepared == "continue":
                 continue
+
+            if active_scheduled_task_id is None:
+                from utterance import is_garbage_utterance
+
+                if is_garbage_utterance(utterance or ""):
+                    print(
+                        f"[orchestrator] ignoring garbage utterance: {utterance!r}",
+                        flush=True,
+                    )
+                    pending = _speak(client, "I didn't catch that.")
+                    continue
 
             action, previous_id, task_history, pending_fn_outputs = _run_one_voice_turn(
                 utterance=utterance,

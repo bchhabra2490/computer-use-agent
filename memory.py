@@ -436,13 +436,25 @@ def format_relevant_memories(
     *,
     limit: int = 5,
     memory_dir: Path | None = None,
+    frontmost: str | None = None,
 ) -> str:
     """Prompt-ready memory excerpts selected for the current task."""
-    hits = search_memories(query, limit=limit, memory_dir=memory_dir)
+    try:
+        from utterance import is_garbage_utterance
+
+        if is_garbage_utterance(query):
+            return format_memory_catalog(memory_dir=memory_dir)
+    except Exception:
+        pass
+    boosted = (query or "").strip()
+    fm = (frontmost or "").strip()
+    if fm:
+        boosted = f"{fm} {boosted}".strip()
+    hits = search_memories(boosted, limit=limit, memory_dir=memory_dir)
     try:
         from memory_graph import format_graph_memories
 
-        graph_text = format_graph_memories(query, limit=limit, memory_dir=memory_dir)
+        graph_text = format_graph_memories(boosted, limit=limit, memory_dir=memory_dir)
     except Exception:
         graph_text = ""
     if not hits:

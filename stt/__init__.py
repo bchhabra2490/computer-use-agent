@@ -7,6 +7,8 @@ Providers live as modules in this package (``STT_PROVIDER``):
   - ``stt.sarvam`` — record locally until silence, then Sarvam Saaras (`saaras:v3`).
   - ``stt.whisperflow`` — record locally until silence, then on-device Whisper
     (mlx-whisper / faster-whisper / optional local HTTP).
+  - ``stt.phonon`` — record locally until silence, then Phonon-1
+    (in-process fermion-research / optional ``fermion serve`` HTTP).
 
 Add another backend as ``stt/<name>.py`` and branch on ``STT_PROVIDER``.
 """
@@ -50,9 +52,10 @@ CHANNELS = 1
 # Saved clips use the same rate we send to the API.
 SAMPLE_RATE = REALTIME_RATE
 
-# openai | sarvam | whisperflow
+# openai | sarvam | whisperflow | phonon
 STT_PROVIDER = os.environ.get("STT_PROVIDER", "openai").strip().lower()
-# Fn dictation STT: auto (whisperflow → local streaming, else realtime), realtime, whisperflow
+# Fn dictation STT: auto (local file STT → rolling partials, else realtime),
+# realtime, whisperflow, or phonon.
 DICTATION_STT = os.environ.get("DICTATION_STT", "auto").strip().lower()
 DICTATION_WHISPER_CHUNK_SECONDS = float(
     os.environ.get("DICTATION_WHISPER_CHUNK_SECONDS", "0.65")
@@ -520,15 +523,32 @@ def _use_whisperflow() -> bool:
     }
 
 
+def _use_phonon() -> bool:
+    return STT_PROVIDER in {
+        "phonon",
+        "phonon-1",
+        "phonon1",
+        "fermion",
+        "fermion-research",
+    }
+
+
+def _use_local_file_stt() -> bool:
+    """On-device file STT (no OpenAI Realtime sidecar)."""
+    return _use_whisperflow() or _use_phonon()
+
+
 def _use_file_stt() -> bool:
     """Providers that record a clip, then run file STT (no live partials)."""
-    return _use_sarvam() or _use_whisperflow()
+    return _use_sarvam() or _use_local_file_stt()
 
 
 def _dictation_provider() -> str:
     """Which STT backend Fn dictation uses."""
     choice = DICTATION_STT
     if choice in {"", "auto", "inherit"}:
+        if _use_phonon():
+            return "phonon"
         if _use_whisperflow():
             return "whisperflow"
         return "realtime"
@@ -536,6 +556,8 @@ def _dictation_provider() -> str:
         return "realtime"
     if choice in {"whisperflow", "whisper-flow", "whisper", "mlx", "local"}:
         return "whisperflow"
+    if choice in {"phonon", "phonon-1", "phonon1", "fermion"}:
+        return "phonon"
     return choice
 
 
@@ -785,6 +807,16 @@ def listen_realtime(
                     on_partial=on_partial,
                     hold_mode=hold_mode,
                 )
+        if _use_phonon():
+            with timed("listen_phonon"):
+                return _listen_phonon(
+                    client,
+                    prompt=prompt,
+                    mode=mode,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                    hold_mode=hold_mode,
+                )
         with timed("listen_openai_realtime"):
             return _listen_realtime_body(
                 client,
@@ -831,7 +863,7 @@ def _listen_record_then_transcribe(
     # File STT already uses the ONNX over-and-out spotter. The live OpenAI
     # sidecar is for the streaming provider only — and it is a connection
     # error on local WhisperFlow when the Realtime socket is unused.
-    if _end_phrase_live_enabled() and not _use_whisperflow():
+    if _end_phrase_live_enabled() and not _use_local_file_stt():
         watch = _EndPhraseWatcher(client)
         watch.start()
     try:
@@ -917,18 +949,64 @@ def _listen_whisperflow(
     )
 
 
+def _listen_phonon(
+    client: OpenAI,
+    *,
+    prompt: str | None = None,
+    mode: str = "freeform",
+    max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
+    hold_mode: bool = False,
+) -> tuple[str, bytes]:
+    """Record until pause (or Fn release in hold mode), then transcribe with Phonon-1."""
+    from .phonon import PHONON_MODEL, transcribe_wav
+
+    if hold_mode:
+        return _listen_whisperflow_hold(
+            client,
+            prompt=prompt,
+            max_wait_for_speech=max_wait_for_speech,
+            on_partial=on_partial,
+            transcribe=transcribe_wav,
+            model=None,
+            hold_tag=f"phonon-hold:{PHONON_MODEL}",
+            fail_label="Phonon dictation",
+            live_label="Phonon",
+        )
+    return _listen_record_then_transcribe(
+        client,
+        transcribe=transcribe_wav,
+        fail_label="Phonon STT",
+        banner=f"Phonon {PHONON_MODEL}",
+        max_record_seconds=MAX_RECORD_SECONDS,
+        prompt=prompt,
+        mode=mode,
+        max_wait_for_speech=max_wait_for_speech,
+    )
+
+
 def _listen_whisperflow_hold(
     client: OpenAI,
     *,
     prompt: str | None = None,
     max_wait_for_speech: float | None = None,
     on_partial: Callable[[str], None] | None = None,
+    transcribe: Callable[..., str] | None = None,
+    model: str | None = None,
+    hold_tag: str | None = None,
+    fail_label: str | None = None,
+    live_label: str | None = None,
 ) -> tuple[str, bytes]:
-    """Hold-to-talk dictation with rolling local Whisper partials (WhisperFlow-style)."""
-    from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav
+    """Hold-to-talk dictation with rolling local file-STT partials."""
+    from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav as whisperflow_transcribe
 
     del client
-    model = DICTATION_WHISPER_MODEL or None
+    transcribe_wav = transcribe or whisperflow_transcribe
+    if model is None and transcribe is None:
+        model = DICTATION_WHISPER_MODEL or None
+    fail_label = fail_label or "WhisperFlow dictation"
+    live_label = live_label or "Whisper"
+    hold_tag = hold_tag or f"whisperflow-hold:{model or WHISPERFLOW_MODEL}"
     chunk_interval = max(0.35, DICTATION_WHISPER_CHUNK_SECONDS)
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     speech_peak = float(os.environ.get("DICTATION_SPEECH_PEAK", "0.012"))
@@ -940,7 +1018,7 @@ def _listen_whisperflow_hold(
     print(
         prompt
         or (
-            f"Dictation… (hold Fn; live local Whisper; release to send; "
+            f"Dictation… (hold Fn; live local {live_label}; release to send; "
             f"chunk={chunk_interval:g}s)"
         ),
         flush=True,
@@ -986,7 +1064,7 @@ def _listen_whisperflow_hold(
                         text = transcribe_wav(wav, model=model)
                 except Exception as exc:
                     if finish.is_set():
-                        errors.put(NoSpeechError(f"WhisperFlow dictation failed: {exc}"))
+                        errors.put(NoSpeechError(f"{fail_label} failed: {exc}"))
                         return
                     print(f"[stt] dictation whisper chunk failed ({exc})", flush=True)
                     continue
@@ -1071,11 +1149,11 @@ def _listen_whisperflow_hold(
         try:
             text = transcribe_wav(wav, model=model).strip()
         except Exception as exc:
-            raise NoSpeechError(f"WhisperFlow dictation failed: {exc}") from exc
+            raise NoSpeechError(f"{fail_label} failed: {exc}") from exc
     if not text:
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     _emit_partial(on_partial, text)
-    print(f"[stt] model=whisperflow-hold:{model or WHISPERFLOW_MODEL}", flush=True)
+    print(f"[stt] model={hold_tag}", flush=True)
     return text, wav
 
 
@@ -1845,7 +1923,7 @@ def record_until_enter(*args, **kwargs) -> bytes:
 
 
 def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str | None = None) -> str:
-    """One-shot file transcription (OpenAI, Sarvam Saaras, or local WhisperFlow)."""
+    """One-shot file transcription (OpenAI, Sarvam, WhisperFlow, or Phonon)."""
     if not wav_bytes:
         raise NoSpeechError("No audio to transcribe.")
 
@@ -1854,6 +1932,14 @@ def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str 
         from .sarvam import transcribe_wav
 
         text = transcribe_wav(wav_bytes, model=model_name or None)
+        if not text:
+            raise NoSpeechError("Transcription came back empty — try speaking again.")
+        return text
+
+    if _use_phonon():
+        from .phonon import transcribe_wav as phonon_transcribe
+
+        text = phonon_transcribe(wav_bytes, model=model_name or None)
         if not text:
             raise NoSpeechError("Transcription came back empty — try speaking again.")
         return text
@@ -2014,6 +2100,14 @@ def listen_dictation(
                     prompt=prompt,
                     max_wait_for_speech=max_wait_for_speech,
                     on_partial=on_partial,
+                )
+            elif provider == "phonon":
+                live, wav = _listen_phonon(
+                    client,
+                    prompt=prompt,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                    hold_mode=True,
                 )
             else:
                 live, wav = _listen_realtime_body(

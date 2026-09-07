@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app_status import RUNTIME_DIR
 
@@ -35,6 +35,7 @@ class ContextBundle:
     mcp: str
     geometry: str = ""
     not_to_do: str = ""
+    frontmost: str = ""
 
     def desktop_block(self) -> str:
         parts = [p for p in (self.geometry, self.displays) if p.strip()]
@@ -95,6 +96,8 @@ def assemble_context(
     occupancy: list[dict[str, Any]] | None = None,
     frontmost: str | None = None,
     memory_query: str | None = None,
+    skill_detail: Literal["full", "names"] = "full",
+    occupancy_detail: Literal["full", "short", "omit"] = "full",
 ) -> ContextBundle:
     """Build the catalogs injected into orchestrator / agent prompts."""
     from actions import format_display_context
@@ -106,24 +109,43 @@ def assemble_context(
     geometry = ""
     if include_geometry:
         geometry = format_display_context(monitors, screenshot_size=screenshot_size)
-    displays = format_monitor_occupancy(
-        monitors=monitors,
-        occupancy=occupancy,
-        frontmost=frontmost,
-    )
+    displays = ""
+    resolved_frontmost = (frontmost or "").strip()
+    if occupancy_detail != "omit":
+        displays = format_monitor_occupancy(
+            monitors=monitors,
+            occupancy=occupancy,
+            frontmost=frontmost,
+            include_apps=occupancy_detail == "full",
+            include_tabs=occupancy_detail == "full",
+        )
+        if not resolved_frontmost:
+            for line in displays.splitlines():
+                if line.startswith("Frontmost app:"):
+                    resolved_frontmost = line.split(":", 1)[1].strip()
+                    break
     if persist:
         persist_ephemeral_desktop(displays, runtime_dir=runtime_dir)
 
     bundle = ContextBundle(
         displays=_clip(displays, BUDGET_DISPLAYS),
-        skills=_clip(format_skill_catalog(), BUDGET_SKILLS),
+        skills=_clip(
+            format_skill_catalog(names_only=skill_detail == "names"),
+            BUDGET_SKILLS,
+        ),
         memories=_clip(
-            format_relevant_memories(memory_query) if memory_query else format_memory_catalog(),
+            format_relevant_memories(
+                memory_query,
+                frontmost=resolved_frontmost or None,
+            )
+            if memory_query
+            else format_memory_catalog(),
             BUDGET_MEMORIES,
         ),
         mcp=_clip(format_mcp_catalog(), BUDGET_MCP),
         geometry=_clip(geometry, BUDGET_DISPLAYS) if geometry else "",
         not_to_do=_clip(format_not_to_do(), BUDGET_NOT_TO_DO),
+        frontmost=resolved_frontmost,
     )
     return bundle
 
@@ -134,6 +156,7 @@ class TurnDesktopContext:
 
     text: str
     screenshot_png: bytes | None = None
+    frontmost: str = ""
 
 
 def orchestrator_desktop_enabled() -> bool:
@@ -145,22 +168,30 @@ def orchestrator_desktop_enabled() -> bool:
     }
 
 
-def _orchestrator_desktop_ax_enabled() -> bool:
-    return os.environ.get("ORCHESTRATOR_DESKTOP_AX", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+def _env_flag(name: str, default: str = "1") -> str:
+    return os.environ.get(name, default).strip().lower()
 
 
-def _orchestrator_desktop_screenshot_enabled() -> bool:
-    return os.environ.get("ORCHESTRATOR_DESKTOP_SCREENSHOT", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+def _screenshot_wanted(utterance: str) -> bool:
+    mode = _env_flag("ORCHESTRATOR_DESKTOP_SCREENSHOT", "1")
+    if mode in {"0", "false", "no", "off"}:
+        return False
+    if mode in {"always", "all"}:
+        return True
+    from utterance import needs_screen_pixels
+
+    return needs_screen_pixels(utterance)
+
+
+def _ax_wanted(utterance: str) -> bool:
+    mode = _env_flag("ORCHESTRATOR_DESKTOP_AX", "1")
+    if mode in {"0", "false", "no", "off"}:
+        return False
+    if mode in {"always", "all"}:
+        return True
+    from utterance import needs_screen_pixels
+
+    return needs_screen_pixels(utterance)
 
 
 def _capture_desktop_context(
@@ -186,14 +217,18 @@ def _capture_desktop_context(
         print(f"[{log_prefix}] desktop screenshot failed: {e}", flush=True)
 
     desktop_text = ""
+    frontmost = ""
     try:
         bundle = assemble_context(
             monitors=monitors,
             screenshot_size=screenshot_size,
             include_geometry=True,
             persist=False,
+            occupancy_detail="full",
+            skill_detail="names",
         )
         desktop_text = bundle.desktop_block()
+        frontmost = bundle.frontmost
     except Exception as e:
         desktop_text = f"(display context unavailable: {e})"
 
@@ -228,7 +263,7 @@ def _capture_desktop_context(
     elif text.strip():
         print(f"[{log_prefix}] desktop context: {len(text)} chars (no screenshot)", flush=True)
 
-    return TurnDesktopContext(text=text, screenshot_png=screenshot_png)
+    return TurnDesktopContext(text=text, screenshot_png=screenshot_png, frontmost=frontmost)
 
 
 def read_screen() -> TurnDesktopContext:
@@ -268,17 +303,19 @@ def read_screen_vision_input(png: bytes) -> dict[str, Any]:
     }
 
 
-def capture_turn_desktop_context() -> TurnDesktopContext:
+def capture_turn_desktop_context(*, utterance: str = "") -> TurnDesktopContext:
     """
-    Capture display occupancy, accessibility text, and a desktop screenshot
-    for one orchestrator question (what the user is looking at now).
+    Capture display occupancy for one orchestrator question.
+
+    Screenshots and Accessibility trees are attached only when the utterance is
+    about what is on screen (or ORCHESTRATOR_DESKTOP_SCREENSHOT/AX=always).
     """
     if not orchestrator_desktop_enabled():
         return TurnDesktopContext("")
 
     return _capture_desktop_context(
-        enable_screenshot=_orchestrator_desktop_screenshot_enabled(),
-        enable_ax=_orchestrator_desktop_ax_enabled(),
+        enable_screenshot=_screenshot_wanted(utterance),
+        enable_ax=_ax_wanted(utterance),
         header="Desktop snapshot for this question (what the user is looking at on the Mac now):",
         log_prefix="orchestrator",
     )

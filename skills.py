@@ -130,11 +130,22 @@ def read_skill_file(name: str, relative_path: str, skills_dir: Path | None = Non
     return target.read_text(encoding="utf-8")
 
 
-def format_skill_catalog(skills: list[Skill] | None = None) -> str:
+def format_skill_catalog(
+    skills: list[Skill] | None = None,
+    *,
+    names_only: bool = False,
+) -> str:
     """Compact catalog for the agent’s starting prompt."""
     skills = discover_skills() if skills is None else skills
     if not skills:
         return "No skills installed yet. Add skills under skills/<name>/SKILL.md."
+
+    if names_only:
+        names = ", ".join(skill.name for skill in skills)
+        return (
+            "Desktop skills the computer agent can load (names only; it reads "
+            f"the matching SKILL.md): {names}"
+        )
 
     lines = ["Available skills (call read_skill to load full instructions):"]
     for skill in skills:

@@ -306,6 +306,9 @@ def coach_agent(
         "recommend retrying an action when the log or screenshot provides concrete evidence "
         "that it failed; state that evidence and propose a materially different retry. "
         "Do not invent UI that is not visible. Prefer concrete, short guidance. "
+        "Name the remaining GOAL and what is wrong on screen (wrong chat, missing window). "
+        "Do not write click-by-click, keypress, type-character, or Enter recipes — "
+        "the agent chooses actions from the screenshot. "
         "If the goal appears satisfied, say so. If the agent is looping or lost, say so. "
         "Starting media playback is done — do not tell the agent to sleep for duration, "
         "use macOS say, or wait in Terminal until a song or video finishes. "
@@ -381,7 +384,8 @@ def coach_agent(
     )
 
     lines = [
-        "Evaluator coaching (advisory — adapt to what you see; do not ignore the screen):",
+        "Evaluator coaching (advisory — remaining GOAL only, not a click script; "
+        "adapt to what you see; do not ignore the screen):",
         f"status: {status}",
     ]
     if next_focus:

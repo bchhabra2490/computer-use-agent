@@ -166,7 +166,7 @@ The defaults and all supported options are documented in `.env.example`.
 |---|---|---|
 | Orchestrator | `gpt-5-mini` | DeepSeek-compatible backend |
 | Computer agent | Difficulty-based Luna/Terra/Sol routing | `AGENT_MODEL` override |
-| STT | OpenAI live transcription | Sarvam, local WhisperFlow |
+| STT | OpenAI live transcription | Sarvam, local WhisperFlow, Phonon-1 |
 | TTS | OpenAI streaming TTS | Sarvam, Piper, Kokoro |
 | Wake word | Local openWakeWord | API phrase matching |
 

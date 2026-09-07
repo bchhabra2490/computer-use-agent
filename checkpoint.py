@@ -37,6 +37,7 @@ def run_orchestrator_checkpoint(
     capture_desktop: bool = True,
     after_task: bool = False,
     overflow: bool = False,
+    utterance: str = "",
 ) -> CheckpointResult:
     """
     Run one orchestrator checkpoint before (or after recovering) a model call.
@@ -67,7 +68,7 @@ def run_orchestrator_checkpoint(
 
     desktop = TurnDesktopContext("")
     if capture_desktop:
-        desktop = capture_turn_desktop_context()
+        desktop = capture_turn_desktop_context(utterance=utterance)
 
     emit(
         "checkpoint",

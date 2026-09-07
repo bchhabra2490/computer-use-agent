@@ -97,6 +97,14 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(state.turn_count, 0)
         self.assertEqual(state.session_summary, "Session recap.")
 
+    def test_recent_turns_block_clips(self) -> None:
+        state = sc.SessionCompactState()
+        state.record_turn("play music", "start_task youtube")
+        state.record_turn("send emoji", "failed utf-8")
+        block = state.recent_turns_block(limit=2, char_budget=500)
+        self.assertIn("play music", block)
+        self.assertIn("send emoji", block)
+
 
 class OverflowTests(unittest.TestCase):
     def test_detects_context_errors(self) -> None:

@@ -485,15 +485,10 @@ class McpManager:
         for name, spec in self._specs.items():
             live = self._servers.get(name)
             if live is None:
-                where = spec.url or spec.command or name
-                lines.append(
-                    f"- {name}: not connected yet (will retry on mcp_call; {where})"
-                )
+                lines.append(f"- {name}: down")
                 continue
             if live.error or live.session is None:
-                err = live.error or "not connected"
-                where = spec.url or spec.command or name
-                lines.append(f"- {name}: failed ({err}); retry on mcp_call — {where}")
+                lines.append(f"- {name}: down")
                 continue
             shown = live.tools
             if MCP_READ_ONLY:
@@ -511,6 +506,9 @@ class McpManager:
             lines.append(f"- {name}: " + "; ".join(bits) + extra)
         if not lines:
             return "No MCP servers connected."
+        healthy = [line for line in lines if not line.endswith(": down")]
+        if not healthy:
+            return "No MCP servers available. Do not call mcp_call."
         hint = (
             "Connected MCP servers. Prefer mcp_call over start_task / computer / "
             "run_terminal when one of these tools can complete the request."
@@ -610,11 +608,11 @@ class McpManager:
                 else:
                     if not spec.url:
                         raise ValueError("http server needs url")
-                    from mcp.client.streamable_http import streamablehttp_client
+                    from mcp_compat import streamable_http_session
 
                     oauth = self._oauth_auth(spec)
-                    read, write, _sid = await stack.enter_async_context(
-                        streamablehttp_client(
+                    read, write = await stack.enter_async_context(
+                        streamable_http_session(
                             spec.url,
                             headers=spec.headers or None,
                             auth=oauth,
@@ -691,10 +689,12 @@ class McpManager:
         return oauth_httpx_auth(spec)
 
     async def _list_tools(self, session: Any, server: str) -> list[McpTool]:
+        from mcp_compat import list_tools_page, tools_next_cursor
+
         collected: list[McpTool] = []
         cursor = None
         while True:
-            page = await session.list_tools(cursor=cursor)
+            page = await list_tools_page(session, cursor)
             for tool in page.tools or []:
                 schema = getattr(tool, "inputSchema", None) or {}
                 if not isinstance(schema, dict):
@@ -708,7 +708,7 @@ class McpManager:
                         input_schema=schema,
                     )
                 )
-            cursor = getattr(page, "nextCursor", None)
+            cursor = tools_next_cursor(page)
             if not cursor:
                 break
         return collected

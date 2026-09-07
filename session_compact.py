@@ -10,7 +10,7 @@ from typing import Any
 from llm_client import response_output_text as _extract_response_text
 
 TASK_HISTORY_KEEP = int(os.environ.get("ORCHESTRATOR_TASK_HISTORY_KEEP", "3"))
-TURN_COMPACT_EVERY = int(os.environ.get("ORCHESTRATOR_TURN_COMPACT", "25"))
+TURN_COMPACT_EVERY = int(os.environ.get("ORCHESTRATOR_TURN_COMPACT", "4"))
 COMPACT_MODEL = (
     os.environ.get("ORCHESTRATOR_COMPACT_MODEL", "").strip()
     or os.environ.get("ORCHESTRATOR_MODEL", "gpt-5-mini")
@@ -43,6 +43,14 @@ class SessionCompactState:
 
     def begin_turn(self) -> None:
         self.overflow_recovery_used = False
+
+    def recent_turns_block(self, *, limit: int = 3, char_budget: int = 1800) -> str:
+        """Clipped last N voice turns for a fresh Responses thread."""
+        rows = [row.strip() for row in self.turn_log[-max(1, limit) :] if row.strip()]
+        if not rows:
+            return ""
+        blob = "\n\n".join(rows)
+        return _clip(blob, char_budget)
 
     def record_turn(self, utterance: str, turn_text: str) -> None:
         body = (turn_text or "").strip()

@@ -96,7 +96,9 @@ def redact_text(text: str) -> str:
     def _image(match: re.Match[str]) -> str:
         return f"[image omitted, {len(match.group(0))} chars]"
 
-    body = _IMAGE_RE.sub(_image, text or "")
+    from text_sanitize import sanitize_utf8
+
+    body = _IMAGE_RE.sub(_image, sanitize_utf8(text or ""))
     return _SECRET_RE.sub("[redacted]", body)
 
 

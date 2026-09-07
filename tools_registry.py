@@ -820,7 +820,7 @@ def execute_prepared_tool(
         if name == "list_open_apps":
             from displays import format_monitor_occupancy
 
-            return ToolOutcome(output=format_monitor_occupancy())
+            return ToolOutcome(output=format_monitor_occupancy(tab_limit=40))
         if name in {"set_timer", "list_timers", "cancel_timer"}:
             from timers import run_timer_tool
 

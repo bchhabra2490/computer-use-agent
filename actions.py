@@ -117,13 +117,19 @@ def _mac_type_paste(text: str) -> None:
     """Paste via clipboard — fallback when Unicode injection fails in a field."""
     import subprocess
 
-    subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+    from text_sanitize import sanitize_utf8
+
+    payload = sanitize_utf8(text).encode("utf-8")
+    subprocess.run(["pbcopy"], input=payload, check=True)
     release_stuck_modifiers()
     pyautogui.hotkey("command", "v")
 
 
 def type_text(text: str, *, interval: float = 0.01) -> None:
     """Inject text into the focused control."""
+    from text_sanitize import sanitize_utf8
+
+    text = sanitize_utf8(text)
     mode = _type_mode()
     if mode == "paste" and sys.platform == "darwin":
         _mac_type_paste(text)

@@ -136,9 +136,12 @@ class PromptExtractTests(unittest.TestCase):
             not_to_do="don't",
             mcp_rule="",
             session_summary="Earlier: opened maps",
+            recent_turns="User: hi\nopened maps",
         )
         self.assertIn("Chrome {tab}", text)
         self.assertIn("Earlier: opened maps", text)
+        self.assertIn("Recent voice turns:", text)
+        self.assertIn("User: hi", text)
         self.assertIn("skills", text)
         self.assertIn("refer to memory first", text)
         self.assertIn("read_memory", text)

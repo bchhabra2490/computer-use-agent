@@ -1439,7 +1439,7 @@ def _prompt_side_blocks(speaker_context: str, execution_route) -> tuple[str, str
     try:
         from speaker_output import speaker_output_block
 
-        audio_block = speaker_output_block(force_media=True)
+        audio_block = speaker_output_block(force_media=True, always=True)
     except Exception:
         audio_block = ""
     if audio_block:
@@ -1651,6 +1651,12 @@ def _bootstrap_agent_run(
         log_dir=str(log.dir),
     )
     get_session().enter_and_log("agent", f"Starting: {task[:120]}", task=task, log_dir=str(log.dir))
+    try:
+        from speaker_output import reset_speaker_output_history
+
+        reset_speaker_output_history()
+    except Exception:
+        pass
 
     monitors = list_monitors()
     desk_w, desk_h = desktop_logical_size(monitors)
@@ -1665,6 +1671,8 @@ def _bootstrap_agent_run(
         screenshot_size=(shot_w, shot_h),
         include_geometry=True,
         memory_query=task,
+        skill_detail="full",
+        occupancy_detail="full",
     )
     display_ctx = bundle.desktop_block()
     skills = discover_skills()

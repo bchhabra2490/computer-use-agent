@@ -188,6 +188,17 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertIn("app/maps.md", relevant)
         fallback = mem.format_relevant_memories("quantum zebras", memory_dir=self.root)
         self.assertIn("Saved memories", fallback)
+        garbage = mem.format_relevant_memories(
+            "and and and and and and",
+            memory_dir=self.root,
+        )
+        self.assertIn("Saved memories", garbage)
+        boosted = mem.format_relevant_memories(
+            "send emoji",
+            memory_dir=self.root,
+            frontmost="Google Maps",
+        )
+        self.assertIn("app/maps.md", boosted)
 
 
 class TurnTraceTests(unittest.TestCase):

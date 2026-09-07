@@ -35,7 +35,7 @@ _SKIP_OWNERS = {
 
 _MAX_WINDOWS_PER_MONITOR = 8
 _MAX_APPS = 40
-_MAX_TABS = 40
+_MAX_TABS = int(os.environ.get("DESKTOP_TAB_PROMPT_MAX", "8"))
 _MAX_TAB_URL = 90
 _MIN_WINDOW_PX = 80
 _BROWSER_SCRIPT_TIMEOUT = float(os.environ.get("DESKTOP_TAB_TIMEOUT", "8"))
@@ -492,7 +492,14 @@ def _clip_url(url: str) -> str:
     return url[: _MAX_TAB_URL - 1] + "…"
 
 
-def format_browser_tabs(browsers: list[dict[str, Any]]) -> str:
+def format_browser_tabs(
+    browsers: list[dict[str, Any]],
+    *,
+    max_tabs: int | None = None,
+) -> str:
+    cap = _MAX_TABS if max_tabs is None else int(max_tabs)
+    if cap <= 0:
+        cap = 10_000
     if not browsers:
         return "Browser tabs: (none listed — Chrome/Safari/Brave/Edge not running, or Automation permission missing)"
     lines = ["Browser tabs:"]
@@ -502,42 +509,42 @@ def format_browser_tabs(browsers: list[dict[str, Any]]) -> str:
         name = str(browser.get("browser") or "Browser")
         windows = list(browser.get("windows") or [])
         tab_total = 0
+        ranked: list[tuple[int, Any, dict[str, Any]]] = []
         for win in windows:
             try:
                 tab_total += int(win.get("tab_count") or 0)
             except (TypeError, ValueError):
                 pass
+            tabs = list(win.get("tabs") or [])
             if not win.get("tab_count"):
-                tab_total += len(win.get("tabs") or [])
+                tab_total += len(tabs)
+            for tab in tabs:
+                ranked.append((0 if tab.get("active") else 1, win, tab))
         if tab_total == 0:
             lines.append(f"  {name}: (no tabs)")
             continue
-        lines.append(f"  {name} ({tab_total} tab{'s' if tab_total != 1 else ''}):")
+        extra = f"; showing {min(cap, tab_total)}" if tab_total > cap else ""
+        lines.append(f"  {name} ({tab_total} tab{'s' if tab_total != 1 else ''}{extra}):")
+        ranked.sort(key=lambda row: row[0])
         multi_win = len(windows) > 1
-        for win in windows:
-            if shown >= _MAX_TABS:
+        for _prio, win, tab in ranked:
+            if shown >= cap:
                 truncated = True
                 break
-            tabs = list(win.get("tabs") or [])
-            if multi_win:
-                lines.append(f"    window {win.get('index') or '?'}:")
-            indent = "      " if multi_win else "    "
-            for tab in tabs:
-                if shown >= _MAX_TABS:
-                    truncated = True
-                    break
-                title = str(tab.get("title") or "").strip() or "(untitled)"
-                if len(title) > 80:
-                    title = title[:77] + "…"
-                url = _clip_url(str(tab.get("url") or ""))
-                mark = "*" if tab.get("active") else "-"
-                extra = f" — {url}" if url else ""
-                lines.append(f"{indent}{mark} {title}{extra}")
-                shown += 1
+            title = str(tab.get("title") or "").strip() or "(untitled)"
+            if len(title) > 80:
+                title = title[:77] + "…"
+            url = _clip_url(str(tab.get("url") or ""))
+            mark = "*" if tab.get("active") else "-"
+            extra_url = f" — {url}" if url else ""
+            indent = "    "
+            win_bit = f"w{win.get('index') or '?'} " if multi_win else ""
+            lines.append(f"{indent}{mark} {win_bit}{title}{extra_url}")
+            shown += 1
         if truncated:
             break
     if truncated:
-        lines.append(f"  - … more tabs (showing first {_MAX_TABS})")
+        lines.append(f"  - … more tabs (showing first {cap})")
     return "\n".join(lines)
 
 
@@ -557,6 +564,9 @@ def format_monitor_occupancy(
     frontmost: str | None = None,
     apps: list[str] | None = None,
     tabs: list[dict[str, Any]] | None = None,
+    include_apps: bool = True,
+    include_tabs: bool = True,
+    tab_limit: int | None = None,
 ) -> str:
     """Compact per-display window list, running apps, and browser tabs."""
     live = occupancy is None
@@ -568,10 +578,14 @@ def format_monitor_occupancy(
         occupancy = list_windows_by_monitor(monitors=monitors)
     if frontmost is None:
         frontmost = _frontmost_name()
-    if apps is None and live:
+    if include_apps and apps is None and live:
         apps = list_open_apps()
-    if tabs is None and live and list_tabs_enabled():
+    if include_tabs and tabs is None and live and list_tabs_enabled():
         tabs = list_browser_tabs()
+    if not include_apps:
+        apps = None
+    if not include_tabs:
+        tabs = None
 
     lines = [f"Open windows by display ({len(monitors)} attached):"]
     by_index: dict[int, list[dict[str, Any]]] = {m["index"]: [] for m in monitors}
@@ -611,7 +625,7 @@ def format_monitor_occupancy(
         lines.append(format_running_apps(apps, frontmost=frontmost or ""))
     if tabs is not None:
         lines.append("")
-        lines.append(format_browser_tabs(tabs))
+        lines.append(format_browser_tabs(tabs, max_tabs=tab_limit))
     if len(monitors) > 1:
         lines.append(
             "Screenshots and click coordinates are the primary display only. "

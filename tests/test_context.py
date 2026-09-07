@@ -111,12 +111,44 @@ class TurnDesktopContextTests(unittest.TestCase):
             patch.object(ctx, "assemble_context", return_value=bundle),
             patch("accessibility.read_ui_text", return_value="App: Safari\n- Tab: Example"),
         ):
-            out = ctx.capture_turn_desktop_context()
+            out = ctx.capture_turn_desktop_context(utterance="what is on my screen?")
         self.assertIn("Desktop snapshot", out.text)
         self.assertIn("Accessibility text", out.text)
         self.assertIn("geometry", out.text)
         self.assertIn("occupancy", out.text)
         self.assertEqual(out.screenshot_png, b"\x89PNG")
+
+    def test_skips_screenshot_when_utterance_is_not_about_the_screen(self) -> None:
+        bundle = ctx.ContextBundle(
+            displays="occupancy",
+            skills="",
+            memories="",
+            mcp="",
+            geometry="geometry",
+        )
+        mock_actions = MagicMock()
+        mock_actions.list_monitors.return_value = [{"index": 0, "name": "Built-in", "main": True}]
+        desktop = MagicMock()
+        desktop.capture_screenshot.return_value = b"\x89PNG"
+        mock_actions.DesktopController.return_value = desktop
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "ORCHESTRATOR_DESKTOP_CONTEXT": "1",
+                    "ORCHESTRATOR_DESKTOP_SCREENSHOT": "1",
+                    "ORCHESTRATOR_DESKTOP_AX": "1",
+                },
+            ),
+            patch.dict(sys.modules, {"actions": mock_actions}),
+            patch.object(ctx, "assemble_context", return_value=bundle),
+            patch("accessibility.read_ui_text", return_value="App: Safari"),
+        ):
+            out = ctx.capture_turn_desktop_context(utterance="play old hindi songs")
+        self.assertIn("occupancy", out.text)
+        self.assertNotIn("Accessibility text", out.text)
+        self.assertIsNone(out.screenshot_png)
+        desktop.capture_screenshot.assert_not_called()
 
     def test_read_screen_always_captures(self) -> None:
         bundle = ctx.ContextBundle(

@@ -92,8 +92,6 @@ class AgentMessageInbox:
 
     def drain(self) -> list[str]:
         """Legacy: return steer + follow_up texts only (next_run excluded)."""
-        from input_queues import DrainBatch
-
         batch = self.drain_batch()
         return batch.all_texts("steer", "follow_up")
 

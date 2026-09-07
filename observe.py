@@ -3,9 +3,10 @@
 Watches the user's own mouse activity. Logs cheap metadata (app, window,
 URL, event kind). Captures a screenshot when the session ends (app/URL
 change) or after OBSERVE_IDLE_SECONDS of idle, on the display that holds
-the focused window. Accumulates that into a window and only then extracts
-a draft (default 10 minutes). Does not click, type, or steal focus. Pauses
-while a computer-use agent is driving the pointer.
+the focused window. Accumulates that into a window and then automatically
+saves durable memories and graph claims (default 10 minutes). Generated
+executable skills remain reviewable drafts. Does not click, type, or steal
+focus. Pauses while a computer-use agent is driving the pointer.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import sys
 import threading
 import time
@@ -26,6 +28,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from actions import _capture_cg_display
+from status_control import pid_alive as _pid_alive
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(os.environ.get("AGENT_RUNTIME_DIR") or ROOT / ".runtime")
@@ -227,7 +232,7 @@ class WindowBuffer:
 
 
 _EXTRACT_PROMPT = """You watch a passive log of what a person did on their Mac (not an agent).
-Extract durable memories and optional UI playbooks.
+Extract durable memories, knowledge-graph changes, and optional UI playbooks.
 
 Memories: standing facts the assistant should recall later (preferred apps,
 accounts that are not passwords, repo names, usual workflows).
@@ -235,6 +240,14 @@ accounts that are not passwords, repo names, usual workflows).
 Skills: only if the session shows a repeatable UI procedure the computer-use
 agent could follow with menus, hotkeys, or named buttons — never click
 coordinates, never pixel positions.
+
+Knowledge graph: represent durable relationships among people, projects,
+organizations, applications, documents, repositories, websites, concepts,
+tasks, decisions, and workflows. Every claim must reference entities included
+in this response and include confidence, epistemic_status, and brief evidence.
+Allowed predicates: WORKS_ON, USES, OPENED, CREATED, EDITED, DISCUSSED, DECIDED,
+PREFERS, DEPENDS_ON, RELATED_TO, ASSIGNED_TO, BLOCKED_BY, PART_OF,
+PERFORMED_STEP, FOLLOWED_BY, INSPIRED_BY.
 
 Do NOT save:
 - Passwords, API keys, OTPs, tokens, payment details
@@ -251,8 +264,12 @@ Observation window (~10 minutes of desktop activity: apps, windows, URLs, event 
 
 Respond with JSON only (no markdown fences):
 {"memories": [{"kind": "personal" or "app", "name": "short-slug", "text": "bullets"}],
- "skills": [{"name": "hyphen-slug", "description": "one line", "body": "## Steps\\n..."}]}
-If nothing is worth saving, return {"memories": [], "skills": []}.
+ "skills": [{"name": "hyphen-slug", "description": "one line", "body": "## Steps\\n..."}],
+ "graph_changes": {
+   "entities": [{"id": "type:stable-slug", "type": "project", "label": "Name", "sensitivity": "normal"}],
+   "claims": [{"subject_id": "type:slug", "predicate": "RELATED_TO", "object_id": "type:slug", "epistemic_status": "observed" or "extracted" or "inferred", "confidence": 0.0, "evidence": "brief support"}]
+ }}
+If nothing is worth saving, return empty arrays for all three sections.
 """
 
 
@@ -282,6 +299,12 @@ def parse_observe_extract(payload: Any) -> tuple[list[dict[str, str]], list[dict
             continue
         skills.append({"name": name, "description": description, "body": body})
     return memories, skills
+
+
+def parse_observe_graph_changes(payload: Any) -> dict[str, list[dict[str, Any]]]:
+    from memory_graph import normalize_graph_changes
+
+    return normalize_graph_changes(payload)
 
 
 def list_proposed(*, root: Path | None = None, include_empty: bool = False) -> list[Path]:
@@ -545,16 +568,6 @@ def _archive_draft(path: Path, dest_root: Path, *, status: str) -> None:
             pass
 
 
-def _pid_alive(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
 def running_pid() -> int | None:
     try:
         raw = PID_PATH.read_text(encoding="utf-8").strip()
@@ -660,6 +673,59 @@ def cmd_list() -> int:
     print("Accept names:  cua observe accept <id> --memory NAME --skill NAME")
     print("Accept all:    cua observe accept <id>   or   cua observe accept --all")
     print("Reject all:    cua observe reject --all")
+    return 0
+
+
+def compact_observe_artifacts(
+    *,
+    roots: list[Path] | None = None,
+    screenshot_days: int | None = None,
+    archive_days: int | None = None,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Expire archived screenshots and old session folders, never pending drafts."""
+    shot_days = max(1, screenshot_days if screenshot_days is not None else int(os.environ.get("OBSERVE_SCREENSHOT_DAYS", "7")))
+    folder_days = max(shot_days, archive_days if archive_days is not None else int(os.environ.get("OBSERVE_ARCHIVE_DAYS", "30")))
+    clock = now if now is not None else time.time()
+    shot_cutoff = clock - shot_days * 86400
+    folder_cutoff = clock - folder_days * 86400
+    stats = {"screenshots_deleted": 0, "archives_deleted": 0}
+    archive_roots = roots if roots is not None else [ACCEPTED_DIR, SKIPPED_DIR, REJECTED_DIR]
+    for root in archive_roots:
+        if not root.is_dir():
+            continue
+        for folder in root.iterdir():
+            if not folder.is_dir():
+                continue
+            try:
+                modified = folder.stat().st_mtime
+                if modified < folder_cutoff:
+                    shutil.rmtree(folder)
+                    stats["archives_deleted"] += 1
+                    continue
+                screenshot = folder / "screen.png"
+                if screenshot.is_file() and screenshot.stat().st_mtime < shot_cutoff:
+                    screenshot.unlink()
+                    stats["screenshots_deleted"] += 1
+            except OSError as e:
+                print(f"[observe] artifact compaction skipped {folder}: {e}", flush=True)
+    return stats
+
+
+def cmd_compact() -> int:
+    from memory_graph import compact_graph, export_graphify
+
+    stats = compact_graph()
+    export_graphify()
+    artifacts = compact_observe_artifacts()
+    print(
+        "memory graph compacted: "
+        f"payloads={stats['payloads_compacted']} "
+        f"evidence={stats['evidence_pruned']} "
+        f"observations={stats['observations_deleted']} "
+        f"screenshots={artifacts['screenshots_deleted']} "
+        f"archives={artifacts['archives_deleted']}"
+    )
     return 0
 
 
@@ -985,7 +1051,24 @@ class Observer:
 
     def _extract(self, folder: Path, payload: dict[str, Any], png: bytes | None) -> None:
         with self._extract_lock:
-            memories, skills = _run_extract(payload, png)
+            memories, skills, graph_changes = _run_extract(payload, png)
+        saved_memories: list[str] = []
+        for item in memories:
+            try:
+                saved = _write_memory_item(item)
+            except (OSError, ValueError) as e:
+                print(f"[observe] memory auto-save failed: {e}", flush=True)
+                continue
+            if saved:
+                saved_memories.append(saved)
+        try:
+            from memory_graph import apply_observation_graph
+
+            graph_result = apply_observation_graph(folder.name, payload, graph_changes)
+            compact_observe_artifacts()
+        except Exception as e:
+            print(f"[observe] graph memory save failed: {e}", flush=True)
+            graph_result = {"observations": 0, "entities": 0, "claims": 0}
         draft = {
             "id": folder.name,
             "status": "proposed",
@@ -993,19 +1076,30 @@ class Observer:
             "n_events": len(payload.get("events") or []),
             "n_segments": len(payload.get("segments") or []),
             "screenshot": "screen.png" if png else None,
-            "memories": memories,
+            "memories": [],
+            "auto_saved_memories": saved_memories,
+            "graph_changes": graph_changes,
+            "graph_saved": graph_result,
             "skills": skills,
         }
         (folder / "draft.json").write_text(
             json.dumps(draft, indent=2) + "\n",
             encoding="utf-8",
         )
-        if not memories and not skills:
+        if not memories and not skills and not graph_changes.get("claims"):
             print(f"[observe] {folder.name}: nothing durable", flush=True)
             _archive_draft(folder, SKIPPED_DIR, status="empty")
             return
+        if not skills:
+            print(
+                f"[observe] saved automatically memories={len(saved_memories)} "
+                f"graph_claims={graph_result.get('claims', 0)}",
+                flush=True,
+            )
+            _archive_draft(folder, ACCEPTED_DIR, status="accepted")
+            return
         print(
-            f"[observe] draft {folder.name} " f"memories={len(memories)} skills={len(skills)}",
+            f"[observe] saved memory; draft {folder.name} skills={len(skills)}",
             flush=True,
         )
 
@@ -1046,35 +1140,6 @@ def _downscale_png(data: bytes) -> bytes:
         return buf.getvalue()
     except Exception:
         return data
-
-
-def _capture_cg_display(display_id: int) -> bytes | None:
-    if sys.platform != "darwin" or not display_id:
-        return None
-    try:
-        from AppKit import NSBitmapImageRep
-        from Quartz import CGDisplayCreateImage
-    except Exception:
-        return None
-    try:
-        from AppKit import NSBitmapImageFileTypePNG as png_type
-    except ImportError:
-        try:
-            from AppKit import NSPNGFileType as png_type
-        except ImportError:
-            return None
-    try:
-        image = CGDisplayCreateImage(int(display_id))
-        if image is None:
-            return None
-        rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
-        blob = rep.representationUsingType_properties_(png_type, None)
-        if blob is None:
-            return None
-        return bytes(blob)
-    except Exception as e:
-        print(f"[observe] display capture failed: {e}", flush=True)
-        return None
 
 
 def _capture_primary_png() -> bytes | None:
@@ -1135,7 +1200,7 @@ def _capture_png(path: Path) -> bytes | None:
 def _run_extract(
     payload: dict[str, Any],
     png: bytes | None,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, list[dict[str, Any]]]]:
     from memory import _parse_json_object, _response_output_text, format_memory_catalog
 
     session_blob = json.dumps(
@@ -1167,10 +1232,11 @@ def _run_extract(
         )
         raw = _response_output_text(response)
         parsed = _parse_json_object(raw) or {}
-        return parse_observe_extract(parsed)
+        memories, skills = parse_observe_extract(parsed)
+        return memories, skills, parse_observe_graph_changes(parsed)
     except Exception as e:
         print(f"[observe] extract failed: {e}", flush=True)
-        return [], []
+        return [], [], {"entities": [], "claims": []}
 
 
 def _install_event_tap(observer: Observer) -> bool:

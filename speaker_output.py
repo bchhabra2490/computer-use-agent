@@ -19,6 +19,7 @@ PROBE_TTL = float(os.environ.get("SPEAKER_OUTPUT_PROBE_TTL", "1.5"))
 
 _cache_at = 0.0
 _cache_playing: bool | None = None
+_last_block: str | None = None
 
 
 def _osascript(script: str, *, timeout: float = 1.5) -> str:
@@ -70,14 +71,23 @@ def media_playing(*, force: bool = False) -> bool:
     return playing
 
 
-def speaker_output_block(*, force_media: bool = False) -> str:
-    """One-line status for the agent, or empty when disabled."""
+def reset_speaker_output_history() -> None:
+    """Forget the last injected line (call at the start of an agent run)."""
+    global _last_block
+    _last_block = None
+
+
+def speaker_output_block(*, force_media: bool = False, always: bool = False) -> str:
+    """One-line status for the agent, or empty when disabled / unchanged."""
+    global _last_block
     if not ENABLED:
         return ""
     try:
         playing = media_playing(force=force_media)
     except Exception:
         playing = False
-    if playing:
-        return "Media playing: yes"
-    return "Media playing: no"
+    block = "Media playing: yes" if playing else "Media playing: no"
+    if not always and _last_block == block:
+        return ""
+    _last_block = block
+    return block

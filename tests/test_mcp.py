@@ -145,6 +145,10 @@ class ConnectErrorIsolationTests(unittest.TestCase):
 @unittest.skipUnless(ECHO_SERVER.is_file(), "echo fixture missing")
 class LiveStdioTests(unittest.TestCase):
     def setUp(self) -> None:
+        try:
+            from mcp.server.fastmcp import FastMCP  # noqa: F401
+        except ImportError:
+            self.skipTest("mcp.server.fastmcp is not in this MCP SDK")
         mc.stop_mcp()
         self.specs = {
             "echo": mc.ServerSpec(
@@ -262,6 +266,32 @@ class LiveStdioTests(unittest.TestCase):
         self.assertEqual(out, "pong")
         mgr._loop.close()
         mgr._loop = None
+
+
+class CatalogTextTests(unittest.TestCase):
+    def test_all_down_omits_prefer_mcp_call(self) -> None:
+        spec = mc.ServerSpec(name="github", url="https://example.invalid", transport="http")
+        mgr = mc.McpManager(specs={"github": spec})
+        mgr._servers = {}
+        text = mgr.catalog_text()
+        self.assertIn("Do not call mcp_call", text)
+        self.assertNotIn("Prefer mcp_call", text)
+        self.assertNotIn("streamablehttp", text)
+        self.assertNotIn("retry on mcp_call", text)
+
+    def test_failed_server_is_one_line(self) -> None:
+        spec = mc.ServerSpec(name="github", url="https://example.invalid", transport="http")
+        mgr = mc.McpManager(specs={"github": spec})
+        mgr._servers = {
+            "github": mc._LiveServer(
+                spec=spec,
+                session=None,
+                error="cannot import name 'streamablehttp_client' from 'mcp.client.streamable_http'",
+            )
+        }
+        text = mgr.catalog_text()
+        self.assertEqual(text, "No MCP servers available. Do not call mcp_call.")
+        self.assertNotIn("streamablehttp_client", text)
 
 
 if __name__ == "__main__":

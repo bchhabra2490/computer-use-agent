@@ -14,11 +14,16 @@ memory/personal/*.md
 memory/apps/*.md
 memory/screens/*
 !memory/screens/.gitkeep
+*.sqlite3
+*.sqlite
+*.sqlite3-wal
+*.sqlite3-shm
 mcp.json
 .gitignore
 mqtt.log
 models/speakers/
 models/piper/
+models/smart-turn-*.onnx
 docs/
 node_modules/
 chat_app/node_modules/

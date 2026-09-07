@@ -1182,6 +1182,47 @@ select,
   display: none;
 }
 
+.queue-card {
+  display: grid;
+  gap: 10px;
+}
+
+.queue-row {
+  border: 1px solid var(--line);
+  background: #0f1116;
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.queue-row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.queue-row-title {
+  font-weight: 640;
+}
+
+.queue-row-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.queue-row-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.queue-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .drafts-scroll {
   max-height: min(42vh, 420px);
   overflow-x: hidden;

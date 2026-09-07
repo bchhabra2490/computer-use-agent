@@ -8,7 +8,9 @@ STT/TTS keep their own clients — do not point the audio ``OpenAI()`` at DeepSe
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from typing import Any
 
 from openai import OpenAI
@@ -264,3 +266,42 @@ def make_llm_client(
             )
         return OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
     return OpenAI()
+
+
+def response_output_text(response: Any) -> str:
+    """Join ``output_text`` parts from a Responses API object."""
+    chunks: list[str] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "message":
+            continue
+        for part in getattr(item, "content", None) or []:
+            if getattr(part, "type", None) == "output_text":
+                text = getattr(part, "text", None) or ""
+                if text:
+                    chunks.append(text)
+    if chunks:
+        return "\n".join(chunks).strip()
+    return (getattr(response, "output_text", None) or "").strip()
+
+
+def parse_json_object(text: str) -> Any | None:
+    """Parse a JSON value, including one buried in surrounding prose."""
+    blob = (text or "").strip()
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", blob, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_json_dict(text: str) -> dict[str, Any] | None:
+    data = parse_json_object(text)
+    return data if isinstance(data, dict) else None

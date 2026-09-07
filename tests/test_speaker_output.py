@@ -18,19 +18,23 @@ class SpeakerOutputBlockTests(unittest.TestCase):
         with patch.object(so, "ENABLED", False):
             self.assertEqual(so.speaker_output_block(), "")
 
-    def test_playing(self) -> None:
-        with (
-            patch.object(so, "ENABLED", True),
-            patch.object(so, "media_playing", return_value=True),
-        ):
-            self.assertEqual(so.speaker_output_block(), "Media playing: yes")
-
     def test_not_playing(self) -> None:
+        so.reset_speaker_output_history()
         with (
             patch.object(so, "ENABLED", True),
             patch.object(so, "media_playing", return_value=False),
         ):
             self.assertEqual(so.speaker_output_block(), "Media playing: no")
+            self.assertEqual(so.speaker_output_block(), "")
+            self.assertEqual(so.speaker_output_block(always=True), "Media playing: no")
+
+    def test_playing(self) -> None:
+        so.reset_speaker_output_history()
+        with (
+            patch.object(so, "ENABLED", True),
+            patch.object(so, "media_playing", return_value=True),
+        ):
+            self.assertEqual(so.speaker_output_block(), "Media playing: yes")
 
 
 if __name__ == "__main__":

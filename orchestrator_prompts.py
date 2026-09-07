@@ -61,10 +61,10 @@ Rules:
 - For what day, date, or time it is now, use the "Current local date and time" line on
   each user message and answer with give_response_to_user. Do not claim tools are
   unavailable or ask the user to run Terminal unless they want the on-screen clock changed.
-- When a desktop snapshot and/or screenshot is attached, read it. Answer questions about
-  visible apps, windows, tabs, text, or UI state with give_response_to_user. Only use
-  start_task when they want you to change something on the Mac (click, type, open, play,
-  search, navigate, etc.).
+- When the user message includes a desktop snapshot and/or screenshot, read it.
+  Answer questions about visible apps, windows, tabs, text, or UI state with
+  give_response_to_user. Only use start_task when they want you to change
+  something on the Mac (click, type, open, play, search, navigate, etc.).
   list_open_apps is still useful when they need a fresher tab/app list than the snapshot.
 - Playing music, songs, playlists, videos, or resuming playback ALWAYS needs start_task
   (YouTube Music / browser / app). Do not invent a playlist name from memory and claim
@@ -138,15 +138,11 @@ Rules:
 - If they say "mark it done", "that's done", or "no other action is required"
   while a computer task is running, the runtime stops that task — do not
   start_task again for the same work.
-- When multiple displays are listed below, use that layout in start_task
-  (which screen already has Chrome, Slack, etc.). Screenshots are primary-only.
 
 Available desktop skills the computer agent can load:
 {skills}
 
 {memories}
-
-{displays}
 
 {mcp}
 
@@ -174,22 +170,27 @@ def build_system_prompt(
     not_to_do: str,
     mcp_rule: str = "",
     session_summary: str = "",
+    recent_turns: str = "",
 ) -> str:
     """Assemble the orchestrator system prompt for one turn."""
-    # Occupancy text can contain `{` from window titles; inject after format.
     prompt = (
-        SYSTEM_PROMPT.replace("{displays}", "__DISPLAYS__")
+        SYSTEM_PROMPT.replace("{skills}", "__SKILLS__")
+        .replace("{memories}", "__MEMORIES__")
+        .replace("{mcp}", "__MCP__")
         .replace("{not_to_do}", "__NOT_TO_DO__")
-        .format(
-            skills=skills,
-            memories=memories,
-            mcp=mcp,
-            mcp_rule=mcp_rule,
-        )
-        .replace("__DISPLAYS__", displays)
+        .format(mcp_rule=mcp_rule)
+        .replace("__SKILLS__", skills)
+        .replace("__MEMORIES__", memories)
+        .replace("__MCP__", mcp)
         .replace("__NOT_TO_DO__", not_to_do)
     )
+    layout = (displays or "").strip()
+    if layout:
+        prompt += f"\n\n{layout}\n"
     summary = (session_summary or "").strip()
     if summary:
         prompt += f"\n\nEarlier in this voice session (summarized):\n{summary}\n"
+    recent = (recent_turns or "").strip()
+    if recent:
+        prompt += f"\n\nRecent voice turns:\n{recent}\n"
     return prompt

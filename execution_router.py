@@ -119,7 +119,13 @@ def resolve_execution_route(task: str) -> ExecutionRoute:
     text = (task or "").strip()
     recipe = _matching_recipe_name(text)
     if recipe:
-        lane: SpecialistLane = "browser" if _BROWSER.search(text) else "desktop"
+        lane: SpecialistLane = (
+            "integration"
+            if _INTEGRATION.search(text)
+            else "browser"
+            if _BROWSER.search(text)
+            else "desktop"
+        )
         return ExecutionRoute("fast", lane, "A saved deterministic recipe matches.", 0.98, recipe)
     if _INTEGRATION.search(text):
         return ExecutionRoute("fast", "integration", "A native or connected tool can likely handle it.", 0.9)

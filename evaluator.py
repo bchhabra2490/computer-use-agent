@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
 
-from llm_client import make_llm_client, model_for_request
+from llm_client import make_llm_client, model_for_request, parse_json_dict, response_output_text
 from task_log import TaskLog
 
 
@@ -71,35 +70,11 @@ def max_steps_for_difficulty(difficulty: str) -> int:
 
 
 def _response_text(response) -> str:
-    chunks: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                chunks.append(part.text)
-    if chunks:
-        return "\n".join(chunks).strip()
-    return (getattr(response, "output_text", None) or "").strip()
+    return response_output_text(response)
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
-    text = (text or "").strip()
-    if not text:
-        return None
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    return parse_json_dict(text)
 
 
 def _route(model: str, difficulty: str) -> AgentRoute:
@@ -331,9 +306,15 @@ def coach_agent(
         "recommend retrying an action when the log or screenshot provides concrete evidence "
         "that it failed; state that evidence and propose a materially different retry. "
         "Do not invent UI that is not visible. Prefer concrete, short guidance. "
+        "Name the remaining GOAL and what is wrong on screen (wrong chat, missing window). "
+        "Do not write click-by-click, keypress, type-character, or Enter recipes — "
+        "the agent chooses actions from the screenshot. "
         "If the goal appears satisfied, say so. If the agent is looping or lost, say so. "
         "Starting media playback is done — do not tell the agent to sleep for duration, "
-        "use macOS say, or wait in Terminal until a song or video finishes."
+        "use macOS say, or wait in Terminal until a song or video finishes. "
+        "For public information retrieval, do not recommend visible browser UI after "
+        "a failed browser_data fetch unless the log also shows a browser_data "
+        "discover_endpoints attempt (or the task requires authentication/interaction)."
     )
     content: list[dict[str, Any]] = [
         {
@@ -403,7 +384,8 @@ def coach_agent(
     )
 
     lines = [
-        "Evaluator coaching (advisory — adapt to what you see; do not ignore the screen):",
+        "Evaluator coaching (advisory — remaining GOAL only, not a click script; "
+        "adapt to what you see; do not ignore the screen):",
         f"status: {status}",
     ]
     if next_focus:

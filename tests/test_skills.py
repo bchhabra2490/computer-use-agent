@@ -39,6 +39,26 @@ class DiscoverSkillsTests(unittest.TestCase):
             self.assertIn("Cmd+Space", found[0].body)
 
 
+class SkillCatalogTests(unittest.TestCase):
+    def test_names_only_omits_descriptions(self) -> None:
+        skills = [
+            sk.Skill("open-app", "Opens apps via Spotlight.", "body", Path("open-app/SKILL.md")),
+            sk.Skill(
+                "amazon-checkout-place-order",
+                "Completes checkout on Amazon.in for a long description.",
+                "body",
+                Path("amazon/SKILL.md"),
+            ),
+        ]
+        full = sk.format_skill_catalog(skills)
+        names = sk.format_skill_catalog(skills, names_only=True)
+        self.assertIn("Opens apps via Spotlight", full)
+        self.assertNotIn("Opens apps via Spotlight", names)
+        self.assertIn("open-app", names)
+        self.assertIn("amazon-checkout-place-order", names)
+        self.assertIn("names only", names)
+
+
 class CondenseParseTests(unittest.TestCase):
     def test_needs_condense_uses_length(self) -> None:
         short = sk.Skill("a", "short desc", "tiny body", Path("a/SKILL.md"))

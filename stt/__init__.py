@@ -7,6 +7,8 @@ Providers live as modules in this package (``STT_PROVIDER``):
   - ``stt.sarvam`` — record locally until silence, then Sarvam Saaras (`saaras:v3`).
   - ``stt.whisperflow`` — record locally until silence, then on-device Whisper
     (mlx-whisper / faster-whisper / optional local HTTP).
+  - ``stt.phonon`` — record locally until silence, then Phonon-1
+    (in-process fermion-research / optional ``fermion serve`` HTTP).
 
 Add another backend as ``stt/<name>.py`` and branch on ``STT_PROVIDER``.
 """
@@ -39,6 +41,8 @@ import numpy as np
 import sounddevice as sd
 from openai import OpenAI
 
+from llm_client import response_output_text as _response_output_text
+
 from tts import speak
 from .timing import timed
 
@@ -48,9 +52,10 @@ CHANNELS = 1
 # Saved clips use the same rate we send to the API.
 SAMPLE_RATE = REALTIME_RATE
 
-# openai | sarvam | whisperflow
+# openai | sarvam | whisperflow | phonon
 STT_PROVIDER = os.environ.get("STT_PROVIDER", "openai").strip().lower()
-# Fn dictation STT: auto (whisperflow → local streaming, else realtime), realtime, whisperflow
+# Fn dictation STT: auto (local file STT → rolling partials, else realtime),
+# realtime, whisperflow, or phonon.
 DICTATION_STT = os.environ.get("DICTATION_STT", "auto").strip().lower()
 DICTATION_WHISPER_CHUNK_SECONDS = float(
     os.environ.get("DICTATION_WHISPER_CHUNK_SECONDS", "0.65")
@@ -83,6 +88,21 @@ FAN_HIGHPASS_HZ = float(os.environ.get("STT_HIGHPASS_HZ", "140"))
 # Kept for offline record_until_silence helper only.
 SPEECH_PEAK = 0.02
 VAD_THRESHOLD = float(os.environ.get("STT_VAD_THRESHOLD", "0.55"))
+# Optional audio-native endpoint classifier for free-form Realtime turns.
+SMART_TURN_ENABLED = os.environ.get("STT_SMART_TURN", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+SMART_TURN_MODEL = Path(
+    os.environ.get("STT_SMART_TURN_MODEL", str(_ROOT / "models" / "smart-turn-v3.2-cpu.onnx"))
+).expanduser()
+SMART_TURN_THRESHOLD = float(os.environ.get("STT_SMART_TURN_THRESHOLD", "0.5"))
+SMART_TURN_SILENCE_SECONDS = float(os.environ.get("STT_SMART_TURN_SILENCE_SECONDS", "0.8"))
+SMART_TURN_SPEECH_PEAK = float(os.environ.get("STT_SMART_TURN_SPEECH_PEAK", "0.02"))
+
+_smart_turn_classifier = None
+_smart_turn_lock = threading.Lock()
+_smart_turn_warned = False
+_smart_turn_failed = False
 
 _mic_logged = False
 
@@ -503,15 +523,32 @@ def _use_whisperflow() -> bool:
     }
 
 
+def _use_phonon() -> bool:
+    return STT_PROVIDER in {
+        "phonon",
+        "phonon-1",
+        "phonon1",
+        "fermion",
+        "fermion-research",
+    }
+
+
+def _use_local_file_stt() -> bool:
+    """On-device file STT (no OpenAI Realtime sidecar)."""
+    return _use_whisperflow() or _use_phonon()
+
+
 def _use_file_stt() -> bool:
     """Providers that record a clip, then run file STT (no live partials)."""
-    return _use_sarvam() or _use_whisperflow()
+    return _use_sarvam() or _use_local_file_stt()
 
 
 def _dictation_provider() -> str:
     """Which STT backend Fn dictation uses."""
     choice = DICTATION_STT
     if choice in {"", "auto", "inherit"}:
+        if _use_phonon():
+            return "phonon"
         if _use_whisperflow():
             return "whisperflow"
         return "realtime"
@@ -519,6 +556,8 @@ def _dictation_provider() -> str:
         return "realtime"
     if choice in {"whisperflow", "whisper-flow", "whisper", "mlx", "local"}:
         return "whisperflow"
+    if choice in {"phonon", "phonon-1", "phonon1", "fermion"}:
+        return "phonon"
     return choice
 
 
@@ -768,6 +807,16 @@ def listen_realtime(
                     on_partial=on_partial,
                     hold_mode=hold_mode,
                 )
+        if _use_phonon():
+            with timed("listen_phonon"):
+                return _listen_phonon(
+                    client,
+                    prompt=prompt,
+                    mode=mode,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                    hold_mode=hold_mode,
+                )
         with timed("listen_openai_realtime"):
             return _listen_realtime_body(
                 client,
@@ -814,7 +863,7 @@ def _listen_record_then_transcribe(
     # File STT already uses the ONNX over-and-out spotter. The live OpenAI
     # sidecar is for the streaming provider only — and it is a connection
     # error on local WhisperFlow when the Realtime socket is unused.
-    if _end_phrase_live_enabled() and not _use_whisperflow():
+    if _end_phrase_live_enabled() and not _use_local_file_stt():
         watch = _EndPhraseWatcher(client)
         watch.start()
     try:
@@ -900,18 +949,64 @@ def _listen_whisperflow(
     )
 
 
+def _listen_phonon(
+    client: OpenAI,
+    *,
+    prompt: str | None = None,
+    mode: str = "freeform",
+    max_wait_for_speech: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
+    hold_mode: bool = False,
+) -> tuple[str, bytes]:
+    """Record until pause (or Fn release in hold mode), then transcribe with Phonon-1."""
+    from .phonon import PHONON_MODEL, transcribe_wav
+
+    if hold_mode:
+        return _listen_whisperflow_hold(
+            client,
+            prompt=prompt,
+            max_wait_for_speech=max_wait_for_speech,
+            on_partial=on_partial,
+            transcribe=transcribe_wav,
+            model=None,
+            hold_tag=f"phonon-hold:{PHONON_MODEL}",
+            fail_label="Phonon dictation",
+            live_label="Phonon",
+        )
+    return _listen_record_then_transcribe(
+        client,
+        transcribe=transcribe_wav,
+        fail_label="Phonon STT",
+        banner=f"Phonon {PHONON_MODEL}",
+        max_record_seconds=MAX_RECORD_SECONDS,
+        prompt=prompt,
+        mode=mode,
+        max_wait_for_speech=max_wait_for_speech,
+    )
+
+
 def _listen_whisperflow_hold(
     client: OpenAI,
     *,
     prompt: str | None = None,
     max_wait_for_speech: float | None = None,
     on_partial: Callable[[str], None] | None = None,
+    transcribe: Callable[..., str] | None = None,
+    model: str | None = None,
+    hold_tag: str | None = None,
+    fail_label: str | None = None,
+    live_label: str | None = None,
 ) -> tuple[str, bytes]:
-    """Hold-to-talk dictation with rolling local Whisper partials (WhisperFlow-style)."""
-    from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav
+    """Hold-to-talk dictation with rolling local file-STT partials."""
+    from .whisperflow import WHISPERFLOW_MODEL, transcribe_wav as whisperflow_transcribe
 
     del client
-    model = DICTATION_WHISPER_MODEL or None
+    transcribe_wav = transcribe or whisperflow_transcribe
+    if model is None and transcribe is None:
+        model = DICTATION_WHISPER_MODEL or None
+    fail_label = fail_label or "WhisperFlow dictation"
+    live_label = live_label or "Whisper"
+    hold_tag = hold_tag or f"whisperflow-hold:{model or WHISPERFLOW_MODEL}"
     chunk_interval = max(0.35, DICTATION_WHISPER_CHUNK_SECONDS)
     wait_limit = MAX_WAIT_FOR_SPEECH if max_wait_for_speech is None else float(max_wait_for_speech)
     speech_peak = float(os.environ.get("DICTATION_SPEECH_PEAK", "0.012"))
@@ -923,7 +1018,7 @@ def _listen_whisperflow_hold(
     print(
         prompt
         or (
-            f"Dictation… (hold Fn; live local Whisper; release to send; "
+            f"Dictation… (hold Fn; live local {live_label}; release to send; "
             f"chunk={chunk_interval:g}s)"
         ),
         flush=True,
@@ -969,7 +1064,7 @@ def _listen_whisperflow_hold(
                         text = transcribe_wav(wav, model=model)
                 except Exception as exc:
                     if finish.is_set():
-                        errors.put(NoSpeechError(f"WhisperFlow dictation failed: {exc}"))
+                        errors.put(NoSpeechError(f"{fail_label} failed: {exc}"))
                         return
                     print(f"[stt] dictation whisper chunk failed ({exc})", flush=True)
                     continue
@@ -1054,11 +1149,11 @@ def _listen_whisperflow_hold(
         try:
             text = transcribe_wav(wav, model=model).strip()
         except Exception as exc:
-            raise NoSpeechError(f"WhisperFlow dictation failed: {exc}") from exc
+            raise NoSpeechError(f"{fail_label} failed: {exc}") from exc
     if not text:
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     _emit_partial(on_partial, text)
-    print(f"[stt] model=whisperflow-hold:{model or WHISPERFLOW_MODEL}", flush=True)
+    print(f"[stt] model={hold_tag}", flush=True)
     return text, wav
 
 
@@ -1069,6 +1164,38 @@ def _emit_partial(on_partial: Callable[[str], None] | None, live: str) -> None:
         on_partial(live)
     except Exception as e:
         print(f"[stt] on_partial failed: {e}", flush=True)
+
+
+def _get_smart_turn_classifier():
+    """Return the shared local classifier, or None so transcript-idle can take over."""
+    global _smart_turn_classifier, _smart_turn_warned, _smart_turn_failed
+    if not SMART_TURN_ENABLED or _smart_turn_failed:
+        return None
+    if _smart_turn_classifier is not None:
+        return _smart_turn_classifier
+    with _smart_turn_lock:
+        if _smart_turn_classifier is not None:
+            return _smart_turn_classifier
+        try:
+            from .smart_turn import SmartTurnClassifier, ensure_model
+
+            if not SMART_TURN_MODEL.exists():
+                print("[stt] downloading optional Smart Turn v3.2 CPU model…", flush=True)
+            model_path = ensure_model(SMART_TURN_MODEL)
+            _smart_turn_classifier = SmartTurnClassifier(
+                model_path, threshold=SMART_TURN_THRESHOLD
+            )
+            return _smart_turn_classifier
+        except Exception as exc:
+            _smart_turn_failed = True
+            if not _smart_turn_warned:
+                print(
+                    f"[stt] Smart Turn unavailable ({exc}); using transcript-idle fallback.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _smart_turn_warned = True
+            return None
 
 
 def _listen_realtime_body(
@@ -1111,6 +1238,7 @@ def _listen_realtime_body(
     stop = threading.Event()
     errors: queue.Queue[BaseException] = queue.Queue()
     pcm_24k_chunks: list[np.ndarray] = []
+    pcm_lock = threading.Lock()
     send_lock = threading.Lock()
     # "committed" here means "stop appending / finish listen" — not WS commit ack.
     committed = threading.Event()
@@ -1124,6 +1252,9 @@ def _listen_realtime_body(
         "first_word_at": None,
         "timer_armed": False,
         "finish_deadline": None,
+        "last_voice_at": None,
+        "voice_revision": 0,
+        "smart_turn_checked_revision": 0,
     }
     started_at = time.monotonic()
     mic_deadline = started_at + MAX_RECORD_SECONDS
@@ -1188,7 +1319,8 @@ def _listen_realtime_body(
                     cleaned = noise.process(raw)
                     pcm_24k = _resample(cleaned, capture_rate, REALTIME_RATE)
                     if pcm_24k.size:
-                        pcm_24k_chunks.append(pcm_24k.copy())
+                        with pcm_lock:
+                            pcm_24k_chunks.append(pcm_24k.copy())
                         b64 = _float_to_pcm16_b64(pcm_24k)
                         with send_lock:
                             if not committed.is_set():
@@ -1217,9 +1349,14 @@ def _listen_realtime_body(
                     if pcm_24k.size == 0:
                         continue
                     peak = _peak(pcm_24k)
+                    if peak >= SMART_TURN_SPEECH_PEAK:
+                        with state_lock:
+                            shared["last_voice_at"] = time.monotonic()
+                            shared["voice_revision"] += 1
                     if peak > 1e-4:
                         pcm_24k = np.clip(pcm_24k * min(NORMALIZE_PEAK / peak, 4.0), -1.0, 1.0)
-                    pcm_24k_chunks.append(pcm_24k.copy())
+                    with pcm_lock:
+                        pcm_24k_chunks.append(pcm_24k.copy())
                     b64 = _float_to_pcm16_b64(pcm_24k)
                     with send_lock:
                         if not committed.is_set():
@@ -1238,6 +1375,9 @@ def _listen_realtime_body(
                     text = shared["partial"].strip()
                     last = shared["last_delta_at"]
                     first = shared["first_word_at"]
+                    last_voice = shared["last_voice_at"]
+                    voice_revision = shared["voice_revision"]
+                    checked_revision = shared["smart_turn_checked_revision"]
                 if hotkeys.cancel.is_set() or _cancel_pending():
                     _abort_listen(connection, "cancelled — discarding audio.")
                     return
@@ -1283,6 +1423,46 @@ def _listen_realtime_body(
                         stop.set()
                         _close_connection(connection)
                     continue
+                if (
+                    mode == "freeform"
+                    and SMART_TURN_ENABLED
+                    and last_voice is not None
+                    and (now - last_voice) >= SMART_TURN_SILENCE_SECONDS
+                    and voice_revision > checked_revision
+                ):
+                    with pcm_lock:
+                        audio = np.concatenate(pcm_24k_chunks)
+                    with state_lock:
+                        shared["smart_turn_checked_revision"] = voice_revision
+                    classifier = _get_smart_turn_classifier()
+                    if classifier is not None:
+                        try:
+                            complete, probability = classifier.is_complete(
+                                audio, REALTIME_RATE
+                            )
+                            print(
+                                f"[stt] Smart Turn complete={complete} "
+                                f"p={probability:.3f}",
+                                flush=True,
+                            )
+                            if complete:
+                                _finish_listen(
+                                    connection,
+                                    f"Smart Turn p={probability:.2f} — sending.",
+                                    settle=0.4,
+                                )
+                                return
+                        except Exception as exc:
+                            global _smart_turn_warned, _smart_turn_failed
+                            _smart_turn_failed = True
+                            if not _smart_turn_warned:
+                                print(
+                                    f"[stt] Smart Turn inference failed ({exc}); "
+                                    "using transcript-idle fallback.",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                _smart_turn_warned = True
                 if (now - last) >= idle:
                     _finish_listen(
                         connection,
@@ -1743,7 +1923,7 @@ def record_until_enter(*args, **kwargs) -> bytes:
 
 
 def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str | None = None) -> str:
-    """One-shot file transcription (OpenAI, Sarvam Saaras, or local WhisperFlow)."""
+    """One-shot file transcription (OpenAI, Sarvam, WhisperFlow, or Phonon)."""
     if not wav_bytes:
         raise NoSpeechError("No audio to transcribe.")
 
@@ -1752,6 +1932,14 @@ def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str 
         from .sarvam import transcribe_wav
 
         text = transcribe_wav(wav_bytes, model=model_name or None)
+        if not text:
+            raise NoSpeechError("Transcription came back empty — try speaking again.")
+        return text
+
+    if _use_phonon():
+        from .phonon import transcribe_wav as phonon_transcribe
+
+        text = phonon_transcribe(wav_bytes, model=model_name or None)
         if not text:
             raise NoSpeechError("Transcription came back empty — try speaking again.")
         return text
@@ -1773,19 +1961,6 @@ def transcribe(client: OpenAI | None = None, wav_bytes: bytes = b"", model: str 
         raise NoSpeechError("Transcription came back empty — try speaking again.")
     print(f"[stt] model={model}")
     return text
-
-
-def _response_output_text(response) -> str:
-    chunks: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                chunks.append(part.text)
-    if chunks:
-        return "\n".join(chunks).strip()
-    return (getattr(response, "output_text", None) or "").strip()
 
 
 def choose_transcript(client: OpenAI, live: str, refined: str) -> str:
@@ -1925,6 +2100,14 @@ def listen_dictation(
                     prompt=prompt,
                     max_wait_for_speech=max_wait_for_speech,
                     on_partial=on_partial,
+                )
+            elif provider == "phonon":
+                live, wav = _listen_phonon(
+                    client,
+                    prompt=prompt,
+                    max_wait_for_speech=max_wait_for_speech,
+                    on_partial=on_partial,
+                    hold_mode=True,
                 )
             else:
                 live, wav = _listen_realtime_body(

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Race STT providers on the same clip and log who finishes first.
 
-Records once (or loads ``--wav``), then runs openai / sarvam / whisperflow
-file transcription in parallel. As each returns, prints rank + latency + text.
+Records once (or loads ``--wav``), then runs openai / sarvam / whisperflow /
+phonon file transcription in parallel. As each returns, prints rank + latency + text.
 
 Usage:
     python stt_race.py
     python stt_race.py --wav recordings/some.wav
-    python stt_race.py --providers sarvam,whisperflow
+    python stt_race.py --providers sarvam,whisperflow,phonon
     python stt_race.py --rounds 3
 """
 
@@ -29,7 +29,7 @@ load_dotenv()
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_LOG = ROOT / "stt_race.log"
-ALL_PROVIDERS = ("openai", "sarvam", "whisperflow")
+ALL_PROVIDERS = ("openai", "sarvam", "whisperflow", "phonon")
 
 
 @dataclass
@@ -82,6 +82,14 @@ def _provider_ready(name: str) -> tuple[bool, str]:
             return True, f"backend={backend} model={WHISPERFLOW_MODEL}"
         except Exception as e:
             return False, str(e)
+    if name == "phonon":
+        try:
+            from stt.phonon import PHONON_MODEL, resolve_backend
+
+            backend = resolve_backend()
+            return True, f"backend={backend} model={PHONON_MODEL}"
+        except Exception as e:
+            return False, str(e)
     return False, f"unknown provider {name!r}"
 
 
@@ -128,10 +136,25 @@ def _run_whisperflow(wav: bytes) -> RaceResult:
         return RaceResult("whisperflow", detail, ms, "", error=str(e))
 
 
+def _run_phonon(wav: bytes) -> RaceResult:
+    from stt.phonon import PHONON_MODEL, resolve_backend, transcribe_wav
+
+    detail = f"backend={resolve_backend()} model={PHONON_MODEL}"
+    t0 = time.perf_counter()
+    try:
+        text = transcribe_wav(wav)
+        ms = (time.perf_counter() - t0) * 1000
+        return RaceResult("phonon", detail, ms, text or "")
+    except Exception as e:
+        ms = (time.perf_counter() - t0) * 1000
+        return RaceResult("phonon", detail, ms, "", error=str(e))
+
+
 _RUNNERS = {
     "openai": _run_openai,
     "sarvam": _run_sarvam,
     "whisperflow": _run_whisperflow,
+    "phonon": _run_phonon,
 }
 
 

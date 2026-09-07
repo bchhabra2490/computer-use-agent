@@ -20,8 +20,11 @@ from orchestrator import (  # noqa: E402
     _confirm_heard_enabled,
     _give_response_closes_turn,
     _listen_for_answer,
+    _looks_like_claimed_action,
     _looks_like_question,
+    _must_use_real_action_tool,
     _strip_wait_filler,
+    _tts_word_count,
     _turn_already_spoke,
     _turn_spoke_since,
     _user_turn_input,
@@ -56,6 +59,18 @@ class LooksLikeQuestionTests(unittest.TestCase):
         self.assertFalse(_looks_like_question("   "))
 
 
+class ActionGuardSignalTests(unittest.TestCase):
+    def test_desktop_action_requires_real_tool(self) -> None:
+        self.assertTrue(_must_use_real_action_tool("Play the song Earth Kiya Hai by Anub Jan"))
+        self.assertTrue(_must_use_real_action_tool("Open Chrome and search for the release notes"))
+        self.assertFalse(_must_use_real_action_tool("What time is it?"))
+
+    def test_claimed_action_text_is_detected(self) -> None:
+        self.assertTrue(_looks_like_claimed_action("Okay — playing it now."))
+        self.assertTrue(_looks_like_claimed_action("Sure, opening Chrome."))
+        self.assertFalse(_looks_like_claimed_action("The current time is 7 PM."))
+
+
 class AssistantMessageTextTests(unittest.TestCase):
     def test_joins_output_text(self) -> None:
         response = SimpleNamespace(
@@ -77,6 +92,18 @@ class AssistantMessageTextTests(unittest.TestCase):
             output=[SimpleNamespace(type="function_call", name="mcp_call")]
         )
         self.assertEqual(_assistant_message_text(response), "")
+
+
+def _plain_response(text: str):
+    return SimpleNamespace(
+        id="resp_test",
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text=text)],
+            )
+        ],
+    )
 
 
 class RepeatSpeechTests(unittest.TestCase):
@@ -219,6 +246,40 @@ class ListenForAnswerTests(unittest.TestCase):
 
 
 class ChatTextOnlySpeakTests(unittest.TestCase):
+    def test_word_count_handles_punctuation(self) -> None:
+        self.assertEqual(_tts_word_count("One, two — don't stop."), 4)
+
+    def test_long_reply_opens_chat_without_tts(self) -> None:
+        message = "word " * 81
+        with (
+            patch("orchestrator.set_chat_overlay_enabled") as enable,
+            patch("orchestrator.set_last_spoken") as last,
+            patch("chat_overlay.ensure_chat_bridge_and_app") as ensure,
+            patch("orchestrator.get_audio") as audio,
+            patch("orchestrator.log_llm"),
+        ):
+            out = orchestrator._speak(SimpleNamespace(), message, user_reply=True)
+        self.assertIsNone(out)
+        enable.assert_called_once_with(True)
+        last.assert_called_once_with(message, enqueue_chat=True)
+        ensure.assert_called_once_with(focus=True)
+        audio.assert_not_called()
+
+    def test_eighty_word_reply_still_uses_tts(self) -> None:
+        message = "word " * 80
+        audio = SimpleNamespace(speak=lambda text: "spoken")
+        with (
+            patch("orchestrator.chat_text_only", return_value=False),
+            patch("orchestrator.reply_tts_enabled", return_value=True),
+            patch("orchestrator.set_last_spoken"),
+            patch("orchestrator.get_audio", return_value=audio),
+            patch("orchestrator.log_llm"),
+            patch("chat_overlay.ensure_chat_bridge_and_app") as ensure,
+        ):
+            out = orchestrator._speak(SimpleNamespace(), message, user_reply=True)
+        self.assertEqual(out, "spoken")
+        ensure.assert_not_called()
+
     def test_speak_skips_chat_for_status_blurbs(self) -> None:
         with (
             patch("orchestrator.chat_text_only", return_value=True),
@@ -258,6 +319,38 @@ class ChatTextOnlySpeakTests(unittest.TestCase):
             "Ready. Say the wake word, then tell me what you need.",
             enqueue_chat=False,
         )
+
+
+class ProcessResponseActionGuardTests(unittest.TestCase):
+    def test_plain_action_claim_retries_then_fails_cleanly(self) -> None:
+        first = _plain_response('Okay — playing "Earth Kiya Hai" by Anub Jan now.')
+        second = _plain_response("Sure, opening it now.")
+        turn = TurnTrace("play the song Earth Kiya Hai by Anub Jan")
+        with (
+            patch("orchestrator.consume_cancel", return_value=False),
+            patch("orchestrator._print_messages"),
+            patch("orchestrator._record_llm_step"),
+            patch("orchestrator.chat_text_only", return_value=False),
+            patch("orchestrator._create_response", return_value=second) as create,
+            patch("orchestrator._speak_later") as speak_later,
+        ):
+            out, end_session, pending = orchestrator._process_response(
+                SimpleNamespace(),
+                first,
+                auto=True,
+                max_steps=25,
+                task_history=[],
+                publisher=SimpleNamespace(),
+                ask_bridge=SimpleNamespace(),
+                turn=turn,
+                user_said="play the song Earth Kiya Hai by Anub Jan",
+            )
+        self.assertIs(out, second)
+        self.assertFalse(end_session)
+        self.assertEqual(pending, [])
+        create.assert_called_once()
+        speak_later.assert_called_once()
+        self.assertIn("need to use a real tool", speak_later.call_args[0][1])
 
 
 if __name__ == "__main__":

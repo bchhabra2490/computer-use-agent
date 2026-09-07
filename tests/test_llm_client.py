@@ -127,6 +127,29 @@ class LlmClientTests(unittest.TestCase):
         self.assertIn("Who am I?", folded[0]["content"])
         self.assertNotIn("function_call_output", str(folded))
 
+    def test_response_output_text_joins_message_parts(self) -> None:
+        from types import SimpleNamespace
+
+        response = SimpleNamespace(
+            output_text="",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(type="output_text", text="Hello"),
+                        SimpleNamespace(type="output_text", text="world"),
+                    ],
+                )
+            ],
+        )
+        self.assertEqual(lc.response_output_text(response), "Hello\nworld")
+
+    def test_parse_json_object_from_prose(self) -> None:
+        self.assertEqual(lc.parse_json_dict('say {"ok": true} please'), {"ok": True})
+        self.assertIsNone(lc.parse_json_object(""))
+        self.assertEqual(lc.parse_json_object("[1, 2]"), [1, 2])
+        self.assertIsNone(lc.parse_json_dict("[1, 2]"))
+
 
 if __name__ == "__main__":
     unittest.main()

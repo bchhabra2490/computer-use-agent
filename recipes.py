@@ -29,6 +29,7 @@ from utterance_match import (
     frontmost_app_name,
     match_phrases_for,
 )
+from llm_client import parse_json_dict as _extract_json_object
 
 RECIPES_DIR = Path(__file__).resolve().parent / "recipes"
 
@@ -1092,21 +1093,6 @@ def validate_recipe(recipe: Recipe) -> str | None:
             except RecipeError:
                 return "invalid app name"
     return None
-
-
-def _extract_json_object(text: str) -> dict | None:
-    text = (text or "").strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
 
 
 def _recipe_from_proposal(data: dict[str, Any], task: str) -> Recipe | None:

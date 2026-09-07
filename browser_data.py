@@ -25,6 +25,7 @@ DEFAULT_MAX_CHARS = 80_000
 DEFAULT_LIGHTPANDA_WAIT_MS = 3_000
 DEFAULT_CHROMIUM_WAIT_MS = 5_000
 ALLOWED_CONTENT_TYPES = ("text/html", "text/plain", "application/json", "application/xhtml+xml")
+ENDPOINT_DISCOVERY_SCRIPT = os.path.join(os.path.dirname(__file__), "webmcp_chromium.mjs")
 
 
 class BrowserDataError(RuntimeError):
@@ -486,6 +487,166 @@ def fetch_chromium(
     )
 
 
+def _discovery_terms(query: str) -> set[str]:
+    stop = {"about", "after", "before", "could", "from", "into", "only", "page", "that", "their", "this", "today", "what", "when", "where", "which", "with", "would"}
+    return {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9_'-]{3,}", query or "")
+        if token.casefold() not in stop
+    }
+
+
+def _json_field_names(value: Any, *, limit: int = 500) -> set[str]:
+    fields: set[str] = set()
+    stack = [value]
+    while stack and len(fields) < limit:
+        item = stack.pop()
+        if isinstance(item, dict):
+            fields.update(str(key).casefold() for key in item)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item[:50])
+    return fields
+
+
+def _endpoint_score(
+    *, page_url: str, endpoint_url: str, status: int, data: Any, terms: set[str]
+) -> tuple[int, list[str]]:
+    text = json.dumps(data, ensure_ascii=False).casefold()[:100_000]
+    fields = _json_field_names(data)
+    matched = sorted(term for term in terms if term in text or term in fields)
+    score = 20 if 200 <= status < 300 else -20
+    if urlsplit(page_url).netloc.casefold() == urlsplit(endpoint_url).netloc.casefold():
+        score += 20
+    score += min(40, len(matched) * 8)
+    if isinstance(data, (dict, list)):
+        score += 10
+    if any(word in fields for word in {"data", "result", "results", "items", "forecast", "hourly"}):
+        score += 5
+    return score, matched
+
+
+def discover_endpoints(
+    url: str,
+    *,
+    query: str = "",
+    max_chars: int = DEFAULT_MAX_CHARS,
+    timeout: float = DEFAULT_TIMEOUT,
+    wait_ms: int = DEFAULT_CHROMIUM_WAIT_MS,
+) -> dict[str, Any]:
+    """Discover public JSON endpoints from isolated Chromium and return the best data."""
+    _validate_public_url(url)
+    node = shutil.which("node")
+    if not node:
+        raise BrowserDataError("Node.js 22+ is required for endpoint discovery.")
+    payload = {
+        "url": url,
+        "chromium_bin": _chromium_binary(),
+        "timeout_ms": int(timeout * 1_000),
+        "wait_ms": max(500, min(int(wait_ms), int(timeout * 1_000) - 250)),
+        "operation": "discover",
+    }
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            [node, ENDPOINT_DISCOVERY_SCRIPT, json.dumps(payload, ensure_ascii=False)],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 4,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BrowserDataError(f"Endpoint discovery exceeded the {timeout:g}-second deadline.") from exc
+    if completed.returncode != 0:
+        detail = " ".join((completed.stderr or completed.stdout or "unknown error").split())[:500]
+        raise BrowserDataError(f"Endpoint discovery failed: {detail}")
+    try:
+        raw = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise BrowserDataError("Endpoint discovery returned invalid JSON.") from exc
+    if raw.get("error"):
+        raise BrowserDataError(str(raw["error"]))
+
+    terms = _discovery_terms(query)
+    candidates: list[dict[str, Any]] = []
+    for item in raw.get("endpoints") or []:
+        endpoint_url = str(item.get("url") or "")
+        try:
+            _validate_public_url(endpoint_url)
+            data = json.loads(str(item.get("body") or ""))
+        except (BrowserDataError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        status = int(item.get("status") or 0)
+        score, matched = _endpoint_score(
+            page_url=url,
+            endpoint_url=endpoint_url,
+            status=status,
+            data=data,
+            terms=terms,
+        )
+        candidates.append(
+            {
+                "url": endpoint_url,
+                "status": status,
+                "content_type": str(item.get("content_type") or ""),
+                "score": score,
+                "matched_terms": matched,
+                "data": data,
+            }
+        )
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+
+    selected = candidates[0] if candidates else None
+    # A generic navigation/config payload is not evidence for a specific task.
+    # When the caller supplied intent terms, require at least one actual match.
+    if selected is not None and terms and not selected["matched_terms"]:
+        selected = None
+    selected_source = "isolated_chromium_network" if selected else None
+    replay_error = None
+    if selected is not None:
+        try:
+            replayed = fetch_page(
+                selected["url"],
+                max_chars=max_chars,
+                timeout=min(timeout, 8.0),
+                max_bytes=min(DEFAULT_MAX_BYTES, 1_000_000),
+            )
+            if replayed.content_type == "application/json":
+                selected["data"] = json.loads(replayed.markdown)
+                selected_source = "safe_http_replay"
+        except (BrowserDataError, json.JSONDecodeError) as exc:
+            replay_error = str(exc)
+
+    summaries = []
+    for candidate in candidates[:10]:
+        preview = json.dumps(candidate["data"], ensure_ascii=False)
+        summaries.append({**{k: v for k, v in candidate.items() if k != "data"}, "preview": preview[:500]})
+    selected_data: Any = None
+    selected_serialized = ""
+    if selected is not None:
+        selected_serialized = json.dumps(selected["data"], ensure_ascii=False)
+        selected_data = (
+            selected["data"]
+            if len(selected_serialized) <= max_chars
+            else selected_serialized[:max_chars]
+        )
+    return {
+        "requested_url": url,
+        "operation": "discover_endpoints",
+        "backend": "chromium-network",
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "query": query,
+        "selected_endpoint": selected["url"] if selected else None,
+        "selected_source": selected_source,
+        "data": selected_data,
+        "data_truncated": bool(selected and len(selected_serialized) > max_chars),
+        "candidates": summaries,
+        "replay_error": replay_error,
+        "fallback_required": None if selected else "desktop",
+        "warnings": [] if selected else ["No useful public JSON/XHR endpoint was observed."],
+    }
+
+
 def _apply_operation(result: PageResult, operation: str, query: str, max_chars: int) -> dict[str, Any]:
     payload = asdict(result)
     if operation == "links":
@@ -507,6 +668,17 @@ def run_browser_data_tool(args: dict[str, Any]) -> str:
     try:
         timeout = float(os.environ.get("BROWSER_DATA_TIMEOUT", DEFAULT_TIMEOUT))
         chromium_wait_ms = int(os.environ.get("CHROMIUM_WAIT_MS", DEFAULT_CHROMIUM_WAIT_MS))
+        if operation == "discover_endpoints":
+            return json.dumps(
+                discover_endpoints(
+                    url,
+                    query=query,
+                    max_chars=max_chars,
+                    timeout=timeout,
+                    wait_ms=chromium_wait_ms,
+                ),
+                ensure_ascii=False,
+            )
         if backend == "chromium":
             result = fetch_chromium(url, max_chars=max_chars, timeout=timeout, wait_ms=chromium_wait_ms)
             return json.dumps(_apply_operation(result, operation, query, max_chars), ensure_ascii=False)
@@ -554,5 +726,13 @@ def run_browser_data_tool(args: dict[str, Any]) -> str:
                 result.attempts.append({"backend": "chromium", "ok": False, "error": str(exc)})
         return json.dumps(_apply_operation(result, operation, query, max_chars), ensure_ascii=False)
     except (BrowserDataError, ValueError) as exc:
-        fallback = "chromium" if backend == "lightpanda" else "desktop" if backend == "chromium" else None
+        fallback = (
+            "desktop"
+            if operation == "discover_endpoints"
+            else "chromium"
+            if backend == "lightpanda"
+            else "desktop"
+            if backend == "chromium"
+            else None
+        )
         return json.dumps({"error": str(exc), "backend": backend, "requested_url": url, "fallback_required": fallback})

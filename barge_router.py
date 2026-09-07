@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
+
+from llm_client import parse_json_dict, response_output_text
 
 CLASSIFY_MODEL = os.environ.get("BARGE_CLASSIFY_MODEL", os.environ.get("ORCHESTRATOR_MODEL", "gpt-5-mini"))
 BARGE_CLASSIFY = os.environ.get("BARGE_CLASSIFY", "1").strip().lower() not in {
@@ -33,35 +33,11 @@ class BargeDecision:
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
-    text = (text or "").strip()
-    if not text:
-        return None
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        return None
+    return parse_json_dict(text)
 
 
 def _response_text(response) -> str:
-    chunks: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                chunks.append(part.text)
-    if chunks:
-        return "\n".join(chunks).strip()
-    return (getattr(response, "output_text", None) or "").strip()
+    return response_output_text(response)
 
 
 def classify_barge_utterance(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -102,6 +103,54 @@ class FnFlagTests(unittest.TestCase):
             paster.finalize("hello world")
         self.assertEqual(pasted, ["hello", " world"])
 
+    def test_live_paster_revises_only_unstable_suffix(self) -> None:
+        pasted: list[str] = []
+        backs: list[int] = []
+        paster = di.LiveDictationPaster(debounce_s=0.0)
+        with (
+            patch.object(paster, "_paste_chunk", side_effect=pasted.append),
+            patch.object(paster, "_ax_replace", return_value=False),
+            patch("dictation._backspace_n", side_effect=backs.append),
+        ):
+            paster._apply("Let's improve the chat app also. Currently there are bugs.")
+            paster._apply(
+                "let's improve the chat app also currently there are bugs in messaging"
+            )
+
+        # Case/punctuation changes near the start must not cause the whole
+        # cumulative transcript to be pasted a second time.
+        self.assertEqual(pasted[0], "Let's improve the chat app also. Currently there are bugs.")
+        self.assertEqual(pasted[1], " in messaging")
+        self.assertEqual(backs, [1])
+
+    def test_live_paster_serializes_timer_and_final_revision(self) -> None:
+        paster = di.LiveDictationPaster(debounce_s=0.0)
+        entered = threading.Event()
+        release = threading.Event()
+        pasted: list[str] = []
+
+        def slow_paste(chunk: str) -> None:
+            pasted.append(chunk)
+            entered.set()
+            release.wait(timeout=1.0)
+
+        with (
+            patch.object(paster, "_paste_chunk", side_effect=slow_paste),
+            patch.object(paster, "_ax_replace", return_value=False),
+            patch.object(paster, "_restore_clip"),
+        ):
+            worker = threading.Thread(target=paster._apply, args=("hello",))
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1.0))
+            final = threading.Thread(target=paster.finalize, args=("hello world",))
+            final.start()
+            time.sleep(0.02)
+            release.set()
+            worker.join(timeout=1.0)
+            final.join(timeout=1.0)
+
+        self.assertEqual(pasted, ["hello", " world"])
+
     def test_live_paster_coalesces_partials(self) -> None:
         applied: list[str] = []
         paster = di.LiveDictationPaster(debounce_s=0.05)
@@ -144,6 +193,7 @@ class FnFlagTests(unittest.TestCase):
         fake_stt.ListenCancelled = type("ListenCancelled", (Exception,), {})
         fake_stt.NoSpeechError = type("NoSpeechError", (Exception,), {})
         with (
+            patch.object(di, "DICTATION_LIVE_PASTE", True),
             patch.object(daemon, "_can_start", return_value=(True, "ok")),
             patch("dictation_overlay.show_dictation_overlay", side_effect=lambda: shown.append("show")),
             patch("dictation_overlay.hide_dictation_overlay", side_effect=lambda: hidden.append("hide")),
@@ -155,6 +205,48 @@ class FnFlagTests(unittest.TestCase):
             daemon._run_session()
         self.assertEqual(shown, ["show"])
         self.assertEqual(hidden, ["hide"])
+
+    def test_daemon_pastes_complete_final_transcript_once_by_default(self) -> None:
+        daemon = di.DictationDaemon()
+        fake_stt = MagicMock()
+        fake_stt.listen_dictation.return_value = "first sentence. last sentence."
+        fake_stt.ListenCancelled = type("ListenCancelled", (Exception,), {})
+        fake_stt.NoSpeechError = type("NoSpeechError", (Exception,), {})
+        with (
+            patch.object(di, "DICTATION_LIVE_PASTE", False),
+            patch.object(daemon, "_can_start", return_value=(True, "ok")),
+            patch.dict(sys.modules, {"stt": fake_stt, "openai": MagicMock()}),
+            patch("dictation.paste_dictation") as paste,
+            patch("app_status.set_state"),
+            patch("app_status.read_status", return_value={}),
+            patch("dictation_overlay.show_dictation_overlay"),
+            patch("dictation_overlay.hide_dictation_overlay"),
+        ):
+            daemon._run_session()
+
+        self.assertIsNone(fake_stt.listen_dictation.call_args.kwargs["on_partial"])
+        paste.assert_called_once_with("first sentence. last sentence.")
+
+    def test_cancel_does_not_modify_field_in_final_only_mode(self) -> None:
+        daemon = di.DictationDaemon()
+        cancelled = type("ListenCancelled", (Exception,), {})
+        fake_stt = MagicMock()
+        fake_stt.listen_dictation.side_effect = cancelled("cancel")
+        fake_stt.ListenCancelled = cancelled
+        fake_stt.NoSpeechError = type("NoSpeechError", (Exception,), {})
+        with (
+            patch.object(di, "DICTATION_LIVE_PASTE", False),
+            patch.object(daemon, "_can_start", return_value=(True, "ok")),
+            patch.dict(sys.modules, {"stt": fake_stt, "openai": MagicMock()}),
+            patch("dictation.paste_dictation") as paste,
+            patch("app_status.set_state"),
+            patch("app_status.read_status", return_value={}),
+            patch("dictation_overlay.show_dictation_overlay"),
+            patch("dictation_overlay.hide_dictation_overlay"),
+        ):
+            daemon._run_session()
+
+        paste.assert_not_called()
 
 
 if __name__ == "__main__":

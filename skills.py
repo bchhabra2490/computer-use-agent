@@ -10,13 +10,15 @@ Each skill is a folder containing SKILL.md with YAML frontmatter (`name`,
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from llm_client import parse_json_object as _parse_json_object
+from llm_client import response_output_text as _response_output_text
 
 SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
@@ -128,11 +130,22 @@ def read_skill_file(name: str, relative_path: str, skills_dir: Path | None = Non
     return target.read_text(encoding="utf-8")
 
 
-def format_skill_catalog(skills: list[Skill] | None = None) -> str:
+def format_skill_catalog(
+    skills: list[Skill] | None = None,
+    *,
+    names_only: bool = False,
+) -> str:
     """Compact catalog for the agent’s starting prompt."""
     skills = discover_skills() if skills is None else skills
     if not skills:
         return "No skills installed yet. Add skills under skills/<name>/SKILL.md."
+
+    if names_only:
+        names = ", ".join(skill.name for skill in skills)
+        return (
+            "Desktop skills the computer agent can load (names only; it reads "
+            f"the matching SKILL.md): {names}"
+        )
 
     lines = ["Available skills (call read_skill to load full instructions):"]
     for skill in skills:
@@ -207,37 +220,6 @@ def skill_needs_condense(skill: Skill, *, min_chars: int | None = None) -> bool:
     """True when the playbook is long enough that a rewrite is worth an LLM call."""
     threshold = skill_condense_min_chars() if min_chars is None else min_chars
     return (len(skill.description) + len(skill.body)) >= threshold
-
-
-def _parse_json_object(text: str) -> Any | None:
-    blob = (text or "").strip()
-    if not blob:
-        return None
-    try:
-        return json.loads(blob)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", blob, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-
-
-def _response_output_text(response: Any) -> str:
-    text = (getattr(response, "output_text", None) or "").strip()
-    if text:
-        return text
-    parts: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                parts.append(getattr(part, "text", "") or "")
-    return "".join(parts).strip()
 
 
 def parse_condensed_skill(payload: Any, *, expected_name: str) -> dict[str, str] | None:

@@ -207,6 +207,16 @@ class MainTests(unittest.TestCase):
                 skills=None,
             )
 
+    def test_queue_list_dispatches(self) -> None:
+        with patch.object(cua, "cmd_queue_list", return_value=0) as cmd:
+            self.assertEqual(cua.main(["queue", "list"]), 0)
+            cmd.assert_called_once_with(include_finished=False)
+
+    def test_queue_cancel_dispatches(self) -> None:
+        with patch.object(cua, "cmd_queue_cancel", return_value=0) as cmd:
+            self.assertEqual(cua.main(["queue", "cancel", "q123"]), 0)
+            cmd.assert_called_once_with(task_id="q123", task=None)
+
 
 if __name__ == "__main__":
     unittest.main()

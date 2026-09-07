@@ -61,6 +61,24 @@ class PersistInboxTests(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0].content, "orphan reply")
 
+    def test_persist_routes_reply_to_originating_chat(self) -> None:
+        first = self.store.create_chat(title="First")
+        second = self.store.create_chat(title="Second")
+        self.store.set_active_chat_id(second.id)
+        st.set_chat_overlay_enabled(True)
+        st.enqueue_utterance("question", source="chat", chat_id=first.id)
+        self.assertEqual(st.consume_utterance(), "question")
+        st.set_last_spoken("answer for first")
+
+        out = cb.persist_chat_inbox()
+
+        self.assertEqual(out["chat_ids"], [first.id])
+        self.assertEqual(
+            [m.content for m in self.store.list_messages(first.id)],
+            ["answer for first"],
+        )
+        self.assertEqual(self.store.list_messages(second.id), [])
+
     def test_agent_message_posts_to_active_chat(self) -> None:
         chat = self.store.create_chat(title="Mine")
         self.store.set_active_chat_id(chat.id)

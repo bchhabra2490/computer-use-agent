@@ -17,7 +17,6 @@ Files: ``memory/personal/profile.md``, ``memory/apps/<slug>.md``,
 from __future__ import annotations
 
 import base64
-import json
 import math
 import os
 import re
@@ -26,6 +25,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from llm_client import parse_json_object as _parse_json_object
+from llm_client import response_output_text as _response_text
 
 MEMORY_DIR = Path(__file__).resolve().parent / "memory"
 _MEMORY_WRITE_LOCK = threading.Lock()
@@ -434,16 +436,36 @@ def format_relevant_memories(
     *,
     limit: int = 5,
     memory_dir: Path | None = None,
+    frontmost: str | None = None,
 ) -> str:
     """Prompt-ready memory excerpts selected for the current task."""
-    hits = search_memories(query, limit=limit, memory_dir=memory_dir)
+    try:
+        from utterance import is_garbage_utterance
+
+        if is_garbage_utterance(query):
+            return format_memory_catalog(memory_dir=memory_dir)
+    except Exception:
+        pass
+    boosted = (query or "").strip()
+    fm = (frontmost or "").strip()
+    if fm:
+        boosted = f"{fm} {boosted}".strip()
+    hits = search_memories(boosted, limit=limit, memory_dir=memory_dir)
+    try:
+        from memory_graph import format_graph_memories
+
+        graph_text = format_graph_memories(boosted, limit=limit, memory_dir=memory_dir)
+    except Exception:
+        graph_text = ""
     if not hits:
-        return format_memory_catalog(memory_dir=memory_dir)
+        return graph_text or format_memory_catalog(memory_dir=memory_dir)
     lines = ["Relevant saved memory excerpts (selected for this request):"]
     for hit in hits:
         excerpt = " ".join(line.strip() for line in hit.text.splitlines() if line.strip())
         lines.append(f"  - {hit.note.rel}: {excerpt[:500]}")
     lines.append("Use search_memories for broader recall and read_memory for the complete note.")
+    if graph_text:
+        lines.extend(["", graph_text])
     return "\n".join(lines)
 
 
@@ -516,10 +538,7 @@ def _text_looks_volatile_hardware(text: str) -> bool:
 
 
 def _response_output_text(response: Any) -> str:
-    text = _response_text(response)
-    if text:
-        return text
-    return (getattr(response, "output_text", None) or "").strip()
+    return _response_text(response)
 
 
 def parse_extracted_memory_items(payload: Any) -> list[dict[str, str]]:
@@ -564,23 +583,6 @@ def parse_extracted_memory_items(payload: Any) -> list[dict[str, str]]:
             continue
         items.append({"kind": kind, "name": name, "text": text})
     return items
-
-
-def _parse_json_object(text: str) -> Any | None:
-    blob = (text or "").strip()
-    if not blob:
-        return None
-    try:
-        return json.loads(blob)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", blob, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
 
 
 def apply_extracted_memory_items(
@@ -1038,19 +1040,6 @@ def _capture_png() -> bytes:
     from actions import DesktopController
 
     return DesktopController().capture_screenshot()
-
-
-def _response_text(response: Any) -> str:
-    chunks: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "output_text":
-                chunks.append(part.text)
-    if chunks:
-        return "\n".join(chunks).strip()
-    return (getattr(response, "output_text", None) or "").strip()
 
 
 def _describe_screenshot(client: Any, png: bytes, *, hint: str | None, app: str) -> str:

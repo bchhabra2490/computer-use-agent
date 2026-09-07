@@ -30,7 +30,7 @@ load_dotenv()
 from app_status import (  # noqa: E402
     RUNTIME_DIR,
     chat_stream_payload,
-    consume_chat_inbox,
+    consume_chat_inbox_items,
     enqueue_utterance,
     pid_alive,
     read_status,
@@ -104,6 +104,30 @@ def _redact_map(data: Any) -> dict[str, str]:
     return out
 
 
+def _mcp_connection_row(name, spec: Any) -> dict[str, Any] | None:
+    if not isinstance(spec, dict):
+        return None
+    command = spec.get("command")
+    url = spec.get("url") or spec.get("serverUrl")
+    transport = str(spec.get("type") or spec.get("transport") or "").strip().lower()
+    if not transport:
+        transport = "stdio" if command else "http"
+    if transport in {"streamable-http", "streamable_http"}:
+        transport = "http"
+    disabled = spec.get("disabled") is True or spec.get("enabled") is False
+    return {
+        "name": str(name),
+        "transport": transport,
+        "url": str(url) if url else None,
+        "command": str(command) if command else None,
+        "args": [str(a) for a in (spec.get("args") or [])] if isinstance(spec.get("args"), list) else [],
+        "auth": str(spec.get("auth") or "").strip().lower() or None,
+        "headers": _redact_map(spec.get("headers")),
+        "env": _redact_map(spec.get("env")),
+        "enabled": not disabled,
+    }
+
+
 def list_mcp_connections() -> list[dict[str, Any]]:
     """Connections as stored in mcp.json (secrets redacted for the UI)."""
     raw = _read_mcp_raw().get("mcpServers") or {}
@@ -111,33 +135,84 @@ def list_mcp_connections() -> list[dict[str, Any]]:
     if not isinstance(raw, dict):
         return rows
     for name, spec in raw.items():
-        if not isinstance(spec, dict):
-            continue
-        command = spec.get("command")
-        url = spec.get("url") or spec.get("serverUrl")
-        transport = str(spec.get("type") or spec.get("transport") or "").strip().lower()
-        if not transport:
-            transport = "stdio" if command else "http"
-        if transport in {"streamable-http", "streamable_http"}:
-            transport = "http"
-        disabled = spec.get("disabled") is True or spec.get("enabled") is False
-        rows.append(
-            {
-                "name": str(name),
-                "transport": transport,
-                "url": str(url) if url else None,
-                "command": str(command) if command else None,
-                "args": [str(a) for a in (spec.get("args") or [])]
-                if isinstance(spec.get("args"), list)
-                else [],
-                "auth": str(spec.get("auth") or "").strip().lower() or None,
-                "headers": _redact_map(spec.get("headers")),
-                "env": _redact_map(spec.get("env")),
-                "enabled": not disabled,
-            }
-        )
+        row = _mcp_connection_row(name, spec)
+        if row is not None:
+            rows.append(row)
     rows.sort(key=lambda r: r["name"])
     return rows
+
+
+def _normalize_mcp_auth(auth: str) -> str:
+    if auth in {"oauth2", "browser", "login"}:
+        return "oauth"
+    if auth in {"bearer", "pat"}:
+        return "token"
+    if auth in {"", "none", "off"}:
+        return ""
+    return auth
+
+
+def _normalize_mcp_kind(kind: str, *, url: str, command: str) -> str:
+    if kind in {"stdio", "command", "local"}:
+        return "stdio"
+    if kind in {"http", "url", "remote"}:
+        return "http"
+    if kind == "sse":
+        return "sse"
+    if url:
+        return "http"
+    if command:
+        return "stdio"
+    raise ValueError("Provide a URL (remote) or command (local stdio)")
+
+
+def _mcp_string_map(raw: Any, *, field: str) -> dict[str, str] | None:
+    if isinstance(raw, dict) and raw:
+        return {str(k): str(v) for k, v in raw.items()}
+    if isinstance(raw, str) and raw.strip():
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{field} must be a JSON object")
+        return {str(k): str(v) for k, v in parsed.items()}
+    return None
+
+
+def _stdio_mcp_entry(body: dict[str, Any]) -> dict[str, Any]:
+    command = str(body.get("command") or "").strip()
+    if not command:
+        raise ValueError("command is required for local MCP servers")
+    entry: dict[str, Any] = {"command": command}
+    args_raw = body.get("args")
+    if isinstance(args_raw, list):
+        entry["args"] = [str(a) for a in args_raw if str(a).strip()]
+    elif isinstance(args_raw, str) and args_raw.strip():
+        lines = [ln.strip() for ln in args_raw.splitlines() if ln.strip()]
+        entry["args"] = lines if len(lines) > 1 else args_raw.strip().split()
+    env = _mcp_string_map(body.get("env"), field="env")
+    if env:
+        entry["env"] = env
+    return entry
+
+
+def _http_mcp_entry(body: dict[str, Any], *, kind: str, url: str, auth: str) -> dict[str, Any]:
+    if not url:
+        raise ValueError("url is required for remote MCP servers")
+    entry: dict[str, Any] = {"url": url}
+    if kind == "sse":
+        entry["transport"] = "sse"
+    if auth:
+        entry["auth"] = auth
+    headers = _mcp_string_map(body.get("headers"), field="headers") or {}
+    token = str(body.get("token") or body.get("bearer") or "").strip()
+    if token:
+        if not token.lower().startswith("bearer "):
+            token = f"Bearer {token}"
+        headers["Authorization"] = token
+        if not auth:
+            entry["auth"] = "token"
+    if headers:
+        entry["headers"] = headers
+    return entry
 
 
 def upsert_mcp_connection(body: dict[str, Any]) -> dict[str, Any]:
@@ -145,74 +220,21 @@ def upsert_mcp_connection(body: dict[str, Any]) -> dict[str, Any]:
     from mcp_auth import sanitize_server_name
 
     name = sanitize_server_name(str(body.get("name") or ""))
-    kind = str(body.get("kind") or body.get("transport") or "").strip().lower()
-    url = str(body.get("url") or "").strip()
-    command = str(body.get("command") or "").strip()
-    auth = str(body.get("auth") or "").strip().lower()
-    if auth in {"oauth2", "browser", "login"}:
-        auth = "oauth"
-    elif auth in {"bearer", "pat"}:
-        auth = "token"
-    elif auth in {"", "none", "off"}:
-        auth = ""
-
-    if kind in {"stdio", "command", "local"}:
-        kind = "stdio"
-    elif kind in {"http", "url", "sse", "remote"}:
-        kind = "http" if kind != "sse" else "sse"
-    elif url:
-        kind = "http"
-    elif command:
-        kind = "stdio"
-    else:
-        raise ValueError("Provide a URL (remote) or command (local stdio)")
-
-    entry: dict[str, Any] = {}
+    kind = _normalize_mcp_kind(
+        str(body.get("kind") or body.get("transport") or "").strip().lower(),
+        url=str(body.get("url") or "").strip(),
+        command=str(body.get("command") or "").strip(),
+    )
+    auth = _normalize_mcp_auth(str(body.get("auth") or "").strip().lower())
     if kind == "stdio":
-        if not command:
-            raise ValueError("command is required for local MCP servers")
-        entry["command"] = command
-        args_raw = body.get("args")
-        if isinstance(args_raw, list):
-            entry["args"] = [str(a) for a in args_raw if str(a).strip()]
-        elif isinstance(args_raw, str) and args_raw.strip():
-            # Prefer newline-separated; fall back to shlex-like split on spaces.
-            lines = [ln.strip() for ln in args_raw.splitlines() if ln.strip()]
-            entry["args"] = lines if len(lines) > 1 else args_raw.strip().split()
-        env = body.get("env")
-        if isinstance(env, dict) and env:
-            entry["env"] = {str(k): str(v) for k, v in env.items()}
-        elif isinstance(env, str) and env.strip():
-            parsed = json.loads(env)
-            if not isinstance(parsed, dict):
-                raise ValueError("env must be a JSON object")
-            entry["env"] = {str(k): str(v) for k, v in parsed.items()}
+        entry = _stdio_mcp_entry(body)
     else:
-        if not url:
-            raise ValueError("url is required for remote MCP servers")
-        entry["url"] = url
-        if kind == "sse":
-            entry["transport"] = "sse"
-        if auth:
-            entry["auth"] = auth
-        headers: dict[str, str] = {}
-        raw_headers = body.get("headers")
-        if isinstance(raw_headers, dict):
-            headers.update({str(k): str(v) for k, v in raw_headers.items()})
-        elif isinstance(raw_headers, str) and raw_headers.strip():
-            parsed = json.loads(raw_headers)
-            if not isinstance(parsed, dict):
-                raise ValueError("headers must be a JSON object")
-            headers.update({str(k): str(v) for k, v in parsed.items()})
-        token = str(body.get("token") or body.get("bearer") or "").strip()
-        if token:
-            if not token.lower().startswith("bearer "):
-                token = f"Bearer {token}"
-            headers["Authorization"] = token
-            if not auth:
-                entry["auth"] = "token"
-        if headers:
-            entry["headers"] = headers
+        entry = _http_mcp_entry(
+            body,
+            kind=kind,
+            url=str(body.get("url") or "").strip(),
+            auth=auth,
+        )
 
     data = _read_mcp_raw()
     servers = data.setdefault("mcpServers", {})
@@ -422,9 +444,7 @@ def enroll_speaker_from_body(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(samples_b64, list):
         raise ValueError("samples must be a list of base64 WAV strings")
     if len(samples_b64) != len(ENROLLMENT_PASSAGES):
-        raise ValueError(
-            f"Need {len(ENROLLMENT_PASSAGES)} WAV samples (got {len(samples_b64)})"
-        )
+        raise ValueError(f"Need {len(ENROLLMENT_PASSAGES)} WAV samples (got {len(samples_b64)})")
     _release_audio_for_capture()
     samples: list[bytes] = []
     for i, raw in enumerate(samples_b64):
@@ -500,6 +520,44 @@ def observe_status_payload() -> dict[str, Any]:
         "proposed_dir": str(observe_mod.PROPOSED_DIR),
         "drafts": drafts,
     }
+
+
+def scheduled_queue_payload(*, include_finished: bool = False) -> dict[str, Any]:
+    from scheduled_tasks import list_scheduled_tasks
+
+    rows = []
+    now = time.time()
+    for item in list_scheduled_tasks(include_finished=include_finished):
+        rows.append(
+            {
+                "id": item.id,
+                "task": item.task,
+                "status": item.status,
+                "source": item.source,
+                "parent_task_id": item.parent_task_id,
+                "note": item.note,
+                "run_at": item.run_at,
+                "run_at_iso": item.run_at_iso,
+                "remaining_seconds": max(0.0, round(item.run_at - now, 1)),
+                "created_at": item.created_at,
+            }
+        )
+    queued = sum(1 for row in rows if row["status"] == "queued")
+    return {"ok": True, "scheduled_tasks": rows, "queued_count": queued}
+
+
+def cancel_scheduled_queue_item(body: dict[str, Any]) -> dict[str, Any]:
+    from scheduled_tasks import cancel_scheduled_task
+
+    result = cancel_scheduled_task(
+        task_id=str(body.get("id") or "").strip() or None,
+        task=str(body.get("task") or "").strip() or None,
+    )
+    if not result.get("ok"):
+        raise ValueError(str(result.get("error") or "cancel failed"))
+    payload = scheduled_queue_payload()
+    payload["cancelled"] = list(result.get("cancelled") or [])
+    return payload
 
 
 def set_observe_running(enabled: bool) -> dict[str, Any]:
@@ -650,9 +708,7 @@ def face_status_payload(*, include_previews: bool = True) -> dict[str, Any]:
             )
     preview_b64 = None
     if include_previews:
-        preview_b64 = base64.b64encode(
-            blobatar_png_bytes(128, mood="wink", seed=current.id)
-        ).decode("ascii")
+        preview_b64 = base64.b64encode(blobatar_png_bytes(128, mood="wink", seed=current.id)).decode("ascii")
     return {
         "ok": True,
         "enabled": face_overlay_enabled(snap),
@@ -779,23 +835,32 @@ def persist_chat_inbox() -> dict[str, Any]:
     The Electron UI used to be the only consumer of ``chat_inbox``; if the
     window was closed mid-reply, lines were lost or never written to history.
     """
-    lines = consume_chat_inbox()
-    if not lines:
+    items = consume_chat_inbox_items()
+    if not items:
         return {"ok": True, "appended": 0, "chat_id": resolve_active_chat_id()}
     store = get_store()
-    chat_id = resolve_active_chat_id(store)
-    if not chat_id:
-        chat = store.create_chat(title="Chat")
-        chat_id = chat.id
-        store.set_active_chat_id(chat_id)
-    for text in lines:
-        store.add_message(chat_id, "assistant", text)
+    fallback_chat_id = resolve_active_chat_id(store)
+    appended_chat_ids: list[str] = []
+    for item in items:
+        chat_id = str(item.get("chat_id") or "").strip() or fallback_chat_id
+        if not chat_id or store.get_chat(chat_id) is None:
+            chat = store.create_chat(title="Chat")
+            chat_id = chat.id
+            fallback_chat_id = chat_id
+            store.set_active_chat_id(chat_id)
+        store.add_message(chat_id, "assistant", str(item["text"]))
+        appended_chat_ids.append(chat_id)
     # History now has the final line — drop the live stream cursor.
     try:
         set_chat_stream(None)
     except Exception:
         pass
-    return {"ok": True, "appended": len(lines), "chat_id": chat_id}
+    return {
+        "ok": True,
+        "appended": len(items),
+        "chat_id": appended_chat_ids[-1],
+        "chat_ids": list(dict.fromkeys(appended_chat_ids)),
+    }
 
 
 def ensure_inbox_worker() -> None:
@@ -861,11 +926,7 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         return bool(got) and secrets.compare_digest(got, self.token)
 
     def _send(self, code: int, payload: Any, *, content_type: str = "application/json") -> None:
-        body = (
-            payload
-            if isinstance(payload, (bytes, bytearray))
-            else json.dumps(payload).encode("utf-8")
-        )
+        body = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -878,6 +939,98 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send(204, b"")
 
+    def _ok(self, fn) -> None:
+        try:
+            self._send(200, fn())
+        except ValueError as e:
+            self._send(400, {"ok": False, "error": str(e)})
+        except KeyError as e:
+            self._send(404, {"ok": False, "error": str(e)})
+        except json.JSONDecodeError as e:
+            self._send(400, {"ok": False, "error": f"invalid JSON: {e}"})
+        except Exception as e:
+            self._send(500, {"ok": False, "error": str(e)})
+
+    def _get_status(self, store) -> None:
+        snap = read_status()
+        persisted = persist_chat_inbox()
+        stream = chat_stream_payload()
+        self._send(
+            200,
+            {
+                "ok": True,
+                "orchestrator_alive": pid_alive(snap.get("orchestrator_pid")),
+                "chat_enabled": bool(snap.get("chat_overlay_enabled")),
+                "overlay_hidden": bool(snap.get("overlay_hidden")),
+                "screenshot_on": store.get_pref(PREF_SCREENSHOT_ON, "0") == "1",
+                "screenshot_displays": screenshot_display_indexes(store),
+                "chat_tts_on": store.get_pref(PREF_CHAT_TTS, "1") != "0",
+                "face_preset": snap.get("face_preset"),
+                "inbox": [],
+                "assistant_appended": int(persisted.get("appended") or 0),
+                "active_chat_id": persisted.get("chat_id") or resolve_active_chat_id(store),
+                "appended_chat_ids": persisted.get("chat_ids") or [],
+                "chat_stream": stream,
+            },
+        )
+
+    def _get_chats(self, store) -> None:
+        self._send(200, {"ok": True, "chats": [_chat_row(c) for c in store.list_chats()]})
+
+    def _get_mcp(self, _store) -> None:
+        self._send(
+            200,
+            {
+                "ok": True,
+                "path": str(_mcp_config_path()),
+                "connections": list_mcp_connections(),
+            },
+        )
+
+    def _get_systems(self, _store) -> dict:
+        payload = observe_status_payload()
+        payload.update(scheduled_queue_payload())
+        return payload
+
+    def _get_latency(self, _store) -> dict:
+        from latency_report import build_report, report_payload
+
+        build_report()
+        return report_payload(limit=30)
+
+    def _get_avatars(self, _store) -> dict:
+        from AppKit import NSApplication  # type: ignore
+
+        NSApplication.sharedApplication()
+        from face_overlay import chat_avatar_pngs
+
+        avatars = chat_avatar_pngs(size=128)
+        return {
+            "ok": True,
+            "assistant_id": avatars["assistant_id"],
+            "user_id": avatars["user_id"],
+            "assistant_b64": base64.b64encode(avatars["assistant_png"]).decode("ascii"),
+            "user_b64": base64.b64encode(avatars["user_png"]).decode("ascii"),
+        }
+
+    def _get_chat_messages(self, path: str, store) -> bool:
+        if not (path.startswith("/v1/chats/") and path.endswith("/messages")):
+            return False
+        chat_id = path[len("/v1/chats/") : -len("/messages")]
+        msgs = store.list_messages(chat_id)
+        self._send(200, {"ok": True, "messages": [_msg_row(m, store) for m in msgs]})
+        return True
+
+    def _get_screenshot(self, path: str, store) -> bool:
+        if not path.startswith("/v1/screenshots/"):
+            return False
+        png = store.read_screenshot(path[len("/v1/screenshots/") :])
+        if not png:
+            self._send(404, {"ok": False, "error": "not found"})
+            return True
+        self._send(200, png, content_type="image/png")
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path == "/v1/health":
@@ -887,117 +1040,168 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
         store = get_store()
-        if path == "/v1/status":
-            snap = read_status()
-            persisted = persist_chat_inbox()
-            stream = chat_stream_payload()
-            self._send(
-                200,
-                {
-                    "ok": True,
-                    "orchestrator_alive": pid_alive(snap.get("orchestrator_pid")),
-                    "chat_enabled": bool(snap.get("chat_overlay_enabled")),
-                    "overlay_hidden": bool(snap.get("overlay_hidden")),
-                    "screenshot_on": store.get_pref(PREF_SCREENSHOT_ON, "0") == "1",
-                    "screenshot_displays": screenshot_display_indexes(store),
-                    "chat_tts_on": store.get_pref(PREF_CHAT_TTS, "1") != "0",
-                    "face_preset": snap.get("face_preset"),
-                    "inbox": [],
-                    "assistant_appended": int(persisted.get("appended") or 0),
-                    "active_chat_id": persisted.get("chat_id") or resolve_active_chat_id(store),
-                    "chat_stream": stream,
-                },
-            )
+        exact = {
+            "/v1/status": self._get_status,
+            "/v1/chats": self._get_chats,
+            "/v1/mcp": self._get_mcp,
+        }.get(path)
+        if exact is not None:
+            exact(store)
             return
-        if path == "/v1/displays":
-            try:
-                self._send(200, displays_payload())
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
+        payloads = {
+            "/v1/displays": displays_payload,
+            "/v1/speakers": list_speaker_payload,
+            "/v1/queue": scheduled_queue_payload,
+            "/v1/systems": lambda: self._get_systems(store),
+            "/v1/observe": lambda: self._get_systems(store),
+            "/v1/latency": lambda: self._get_latency(store),
+            "/v1/face": face_status_payload,
+            "/v1/memories": list_memories_payload,
+            "/v1/avatars": lambda: self._get_avatars(store),
+        }.get(path)
+        if payloads is not None:
+            self._ok(payloads)
             return
-        if path == "/v1/chats":
-            self._send(200, {"ok": True, "chats": [_chat_row(c) for c in store.list_chats()]})
-            return
-        if path == "/v1/mcp":
-            self._send(
-                200,
-                {
-                    "ok": True,
-                    "path": str(_mcp_config_path()),
-                    "connections": list_mcp_connections(),
-                },
-            )
-            return
-        if path == "/v1/speakers":
-            try:
-                self._send(200, list_speaker_payload())
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/systems" or path == "/v1/observe":
-            try:
-                self._send(200, observe_status_payload())
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/latency":
-            try:
-                from latency_report import build_report, report_payload
-
-                build_report()
-                self._send(200, report_payload(limit=30))
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/face":
-            try:
-                self._send(200, face_status_payload())
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/memories":
-            try:
-                self._send(200, list_memories_payload())
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/avatars":
-            try:
-                from AppKit import NSApplication  # type: ignore
-
-                NSApplication.sharedApplication()
-                from face_overlay import chat_avatar_pngs
-
-                avatars = chat_avatar_pngs(size=128)
-                self._send(
-                    200,
-                    {
-                        "ok": True,
-                        "assistant_id": avatars["assistant_id"],
-                        "user_id": avatars["user_id"],
-                        "assistant_b64": base64.b64encode(avatars["assistant_png"]).decode(
-                            "ascii"
-                        ),
-                        "user_b64": base64.b64encode(avatars["user_png"]).decode("ascii"),
-                    },
-                )
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path.startswith("/v1/chats/") and path.endswith("/messages"):
-            chat_id = path[len("/v1/chats/") : -len("/messages")]
-            msgs = store.list_messages(chat_id)
-            self._send(200, {"ok": True, "messages": [_msg_row(m, store) for m in msgs]})
-            return
-        if path.startswith("/v1/screenshots/"):
-            rel = path[len("/v1/screenshots/") :]
-            png = store.read_screenshot(rel)
-            if not png:
-                self._send(404, {"ok": False, "error": "not found"})
-                return
-            self._send(200, png, content_type="image/png")
+        if self._get_chat_messages(path, store) or self._get_screenshot(path, store):
             return
         self._send(404, {"ok": False, "error": "not found"})
+
+    def _post_chats(self, store, body) -> None:
+        chat = store.create_chat(
+            title=str(body.get("title") or "New chat"),
+            model_id=str(body.get("model_id") or "orchestrator"),
+        )
+        store.set_active_chat_id(chat.id)
+        self._send(200, {"ok": True, "chat": _chat_row(chat)})
+
+    def _post_screenshot_pref(self, store, body) -> None:
+        on = bool(body.get("on"))
+        store.set_pref(PREF_SCREENSHOT_ON, "1" if on else "0")
+        self._send(200, {"ok": True, "screenshot_on": on})
+
+    def _post_tts_pref(self, store, body) -> None:
+        on = bool(body.get("on"))
+        store.set_pref(PREF_CHAT_TTS, "1" if on else "0")
+        self._send(200, {"ok": True, "chat_tts_on": on})
+
+    def _post_screenshot_displays(self, store, body) -> None:
+        if body.get("all") is True or body.get("displays") in (None, "all", "*", []):
+            selected = set_screenshot_display_indexes(None, store)
+        else:
+            selected = set_screenshot_display_indexes(
+                _parse_display_indexes(body.get("displays")),
+                store,
+            )
+        return {**displays_payload(), "selected": selected}
+
+    def _post_active_chat(self, store, body) -> None:
+        chat_id = str(body.get("chat_id") or "").strip()
+        if not chat_id:
+            self._send(400, {"ok": False, "error": "chat_id required"})
+            return
+        if store.get_chat(chat_id) is None:
+            self._send(404, {"ok": False, "error": "chat not found"})
+            return
+        store.set_active_chat_id(chat_id)
+        self._send(200, {"ok": True, "active_chat_id": chat_id})
+
+    def _post_mcp(self, _store, body) -> dict:
+        result = upsert_mcp_connection(body)
+        return {
+            "ok": True,
+            "connection": next(
+                (c for c in list_mcp_connections() if c["name"] == result["name"]),
+                {"name": result["name"]},
+            ),
+            "note": "Restart the orchestrator to load new MCP servers.",
+        }
+
+    def _post_speakers_prepare(self, _store, _body) -> dict:
+        try:
+            from speaker_enroll import _release_audio_for_capture
+
+            _release_audio_for_capture()
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def _post_observe(self, _store, body) -> None:
+        enabled = body.get("enabled")
+        if enabled is None and "running" in body:
+            enabled = body.get("running")
+        if enabled is None:
+            self._send(400, {"ok": False, "error": "enabled required"})
+            return
+        self._ok(lambda: set_observe_running(bool(enabled)))
+
+    def _observe_draft_kwargs(self, body) -> dict:
+        return {
+            "items": [str(x) for x in (body.get("items") or [])],
+            "all_drafts": bool(body.get("all")),
+        }
+
+    def _post_observe_accept(self, _store, body) -> dict:
+        return accept_observe_draft(str(body.get("id") or ""), **self._observe_draft_kwargs(body))
+
+    def _post_observe_reject(self, _store, body) -> dict:
+        return reject_observe_draft(str(body.get("id") or ""), **self._observe_draft_kwargs(body))
+
+    def _capture_send_shot(self, store, body, chat_id: str):
+        indexes = _parse_display_indexes(body.get("displays"))
+        if indexes is None:
+            indexes = screenshot_display_indexes(store)
+        png = _capture_desktop_png(display_indexes=indexes)
+        return store.save_screenshot(chat_id, png), save_chat_screenshot_png(png)
+
+    def _post_send(self, store, body) -> None:
+        chat_id = str(body.get("chat_id") or "").strip()
+        text = str(body.get("text") or "")
+        look = bool(body.get("look_at_screen"))
+        if not chat_id:
+            self._send(400, {"ok": False, "error": "chat_id required"})
+            return
+        if not text.strip() and not look:
+            self._send(400, {"ok": False, "error": "text or look_at_screen required"})
+            return
+        relpath = None
+        shot_file = None
+        if look:
+            try:
+                relpath, shot_file = self._capture_send_shot(store, body, chat_id)
+            except Exception as e:
+                self._send(500, {"ok": False, "error": f"screenshot failed: {e}"})
+                return
+        user_text = text.strip() or "(screenshot)"
+        store.add_message(chat_id, "user", user_text, screenshot_relpath=relpath)
+        store.set_active_chat_id(chat_id)
+        chat = store.get_chat(chat_id)
+        title_kw = {"title": title_from_text(user_text)} if chat and chat.title == "New chat" else {}
+        store.touch_chat(chat_id, model_id="orchestrator", **title_kw)
+        enqueue_utterance(
+            command_for_orchestrator(text, look_at_screen=look),
+            source="chat",
+            tts=store.get_pref(PREF_CHAT_TTS, "1") != "0",
+            screenshot_file=shot_file,
+            chat_id=chat_id,
+        )
+        orch_ok = pid_alive(read_status().get("orchestrator_pid"))
+        self._send(
+            200,
+            {
+                "ok": True,
+                "orchestrator_alive": orch_ok,
+                "warning": None if orch_ok else "Orchestrator is not running. Start: python orchestrator.py --auto",
+            },
+        )
+
+    def _post_assistant(self, store, body) -> None:
+        chat_id = str(body.get("chat_id") or "").strip()
+        text = str(body.get("text") or "").strip()
+        if not chat_id or not text:
+            self._send(400, {"ok": False, "error": "chat_id and text required"})
+            return
+        store.add_message(chat_id, "assistant", text)
+        self._send(200, {"ok": True})
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -1007,216 +1211,31 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         max_bytes = 40_000_000 if path == "/v1/speakers" else 8_000_000
         body = _json_body(self, max_bytes=max_bytes)
         store = get_store()
-        if path == "/v1/chats":
-            chat = store.create_chat(
-                title=str(body.get("title") or "New chat"),
-                model_id=str(body.get("model_id") or "orchestrator"),
-            )
-            store.set_active_chat_id(chat.id)
-            self._send(200, {"ok": True, "chat": _chat_row(chat)})
+        senders = {
+            "/v1/chats": self._post_chats,
+            "/v1/prefs/screenshot": self._post_screenshot_pref,
+            "/v1/prefs/tts": self._post_tts_pref,
+            "/v1/prefs/active-chat": self._post_active_chat,
+            "/v1/observe": self._post_observe,
+            "/v1/send": self._post_send,
+            "/v1/assistant": self._post_assistant,
+        }.get(path)
+        if senders is not None:
+            senders(store, body)
             return
-        if path == "/v1/prefs/screenshot":
-            on = bool(body.get("on"))
-            store.set_pref(PREF_SCREENSHOT_ON, "1" if on else "0")
-            self._send(200, {"ok": True, "screenshot_on": on})
-            return
-        if path == "/v1/prefs/tts":
-            on = bool(body.get("on"))
-            store.set_pref(PREF_CHAT_TTS, "1" if on else "0")
-            self._send(200, {"ok": True, "chat_tts_on": on})
-            return
-        if path == "/v1/prefs/screenshot-displays":
-            try:
-                if body.get("all") is True or body.get("displays") in (None, "all", "*", []):
-                    selected = set_screenshot_display_indexes(None, store)
-                else:
-                    selected = set_screenshot_display_indexes(
-                        _parse_display_indexes(body.get("displays")),
-                        store,
-                    )
-                self._send(200, {**displays_payload(), "selected": selected})
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/prefs/active-chat":
-            chat_id = str(body.get("chat_id") or "").strip()
-            if not chat_id:
-                self._send(400, {"ok": False, "error": "chat_id required"})
-                return
-            if store.get_chat(chat_id) is None:
-                self._send(404, {"ok": False, "error": "chat not found"})
-                return
-            store.set_active_chat_id(chat_id)
-            self._send(200, {"ok": True, "active_chat_id": chat_id})
-            return
-        if path == "/v1/mcp":
-            try:
-                result = upsert_mcp_connection(body)
-            except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
-                return
-            except json.JSONDecodeError as e:
-                self._send(400, {"ok": False, "error": f"invalid JSON: {e}"})
-                return
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-                return
-            self._send(
-                200,
-                {
-                    "ok": True,
-                    "connection": next(
-                        (c for c in list_mcp_connections() if c["name"] == result["name"]),
-                        {"name": result["name"]},
-                    ),
-                    "note": "Restart the orchestrator to load new MCP servers.",
-                },
-            )
-            return
-        if path == "/v1/speakers":
-            try:
-                result = enroll_speaker_from_body(body)
-            except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
-                return
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-                return
-            self._send(200, result)
-            return
-        if path == "/v1/speakers/prepare":
-            try:
-                from speaker_enroll import _release_audio_for_capture
-
-                _release_audio_for_capture()
-            except Exception:
-                pass
-            self._send(200, {"ok": True})
-            return
-        if path == "/v1/observe":
-            try:
-                enabled = body.get("enabled")
-                if enabled is None and "running" in body:
-                    enabled = body.get("running")
-                if enabled is None:
-                    self._send(400, {"ok": False, "error": "enabled required"})
-                    return
-                self._send(200, set_observe_running(bool(enabled)))
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-            return
-        if path == "/v1/face":
-            try:
-                self._send(200, update_face_payload(body))
-            except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
-                return
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-                return
-            return
-        if path == "/v1/observe/accept":
-            try:
-                result = accept_observe_draft(
-                    str(body.get("id") or ""),
-                    items=[str(x) for x in (body.get("items") or [])],
-                    all_drafts=bool(body.get("all")),
-                )
-            except KeyError as e:
-                self._send(404, {"ok": False, "error": str(e)})
-                return
-            except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
-                return
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-                return
-            self._send(200, result)
-            return
-        if path == "/v1/observe/reject":
-            try:
-                result = reject_observe_draft(
-                    str(body.get("id") or ""),
-                    items=[str(x) for x in (body.get("items") or [])],
-                    all_drafts=bool(body.get("all")),
-                )
-            except KeyError as e:
-                self._send(404, {"ok": False, "error": str(e)})
-                return
-            except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
-                return
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-                return
-            self._send(200, result)
-            return
-        if path == "/v1/memories":
-            try:
-                result = write_memory_payload(body)
-            except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
-                return
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
-                return
-            self._send(200, result)
-            return
-        if path == "/v1/send":
-            chat_id = str(body.get("chat_id") or "").strip()
-            text = str(body.get("text") or "")
-            look = bool(body.get("look_at_screen"))
-            if not chat_id:
-                self._send(400, {"ok": False, "error": "chat_id required"})
-                return
-            if not text.strip() and not look:
-                self._send(400, {"ok": False, "error": "text or look_at_screen required"})
-                return
-            relpath = None
-            shot_file = None
-            if look:
-                try:
-                    indexes = _parse_display_indexes(body.get("displays"))
-                    if indexes is None:
-                        indexes = screenshot_display_indexes(store)
-                    png = _capture_desktop_png(display_indexes=indexes)
-                    relpath = store.save_screenshot(chat_id, png)
-                    shot_file = save_chat_screenshot_png(png)
-                except Exception as e:
-                    self._send(500, {"ok": False, "error": f"screenshot failed: {e}"})
-                    return
-            user_text = text.strip() or "(screenshot)"
-            store.add_message(chat_id, "user", user_text, screenshot_relpath=relpath)
-            store.set_active_chat_id(chat_id)
-            chat = store.get_chat(chat_id)
-            if chat and chat.title == "New chat":
-                store.touch_chat(chat_id, title=title_from_text(user_text), model_id="orchestrator")
-            else:
-                store.touch_chat(chat_id, model_id="orchestrator")
-            cmd = command_for_orchestrator(text, look_at_screen=look)
-            tts_on = store.get_pref(PREF_CHAT_TTS, "1") != "0"
-            enqueue_utterance(cmd, source="chat", tts=tts_on, screenshot_file=shot_file)
-            orch_ok = pid_alive(read_status().get("orchestrator_pid"))
-            self._send(
-                200,
-                {
-                    "ok": True,
-                    "orchestrator_alive": orch_ok,
-                    "warning": None
-                    if orch_ok
-                    else "Orchestrator is not running. Start: python orchestrator.py --auto",
-                },
-            )
-            return
-        if path == "/v1/assistant":
-            # Optional: UI can push a line; normally inbox poll handles this.
-            chat_id = str(body.get("chat_id") or "").strip()
-            text = str(body.get("text") or "").strip()
-            if not chat_id or not text:
-                self._send(400, {"ok": False, "error": "chat_id and text required"})
-                return
-            store.add_message(chat_id, "assistant", text)
-            self._send(200, {"ok": True})
+        payloads = {
+            "/v1/prefs/screenshot-displays": lambda: self._post_screenshot_displays(store, body),
+            "/v1/queue/cancel": lambda: cancel_scheduled_queue_item(body),
+            "/v1/mcp": lambda: self._post_mcp(store, body),
+            "/v1/speakers": lambda: enroll_speaker_from_body(body),
+            "/v1/speakers/prepare": lambda: self._post_speakers_prepare(store, body),
+            "/v1/face": lambda: update_face_payload(body),
+            "/v1/observe/accept": lambda: self._post_observe_accept(store, body),
+            "/v1/observe/reject": lambda: self._post_observe_reject(store, body),
+            "/v1/memories": lambda: write_memory_payload(body),
+        }.get(path)
+        if payloads is not None:
+            self._ok(payloads)
             return
         self._send(404, {"ok": False, "error": "not found"})
 

@@ -7,11 +7,19 @@ Brain-only tools (start_task, give_response, computer, …) stay in their loops.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from memory import MEMORY_TOOLS, run_memory_tool
 from whoami import WHO_AM_I_TOOL, run_whoami_tool
+
+_OFF = {"0", "false", "no", "off"}
+
+
+def computer_use_enabled() -> bool:
+    """False in Pi / headless mode: hide ``start_task`` from the orchestrator."""
+    return os.environ.get("COMPUTER_USE", "1").strip().lower() not in _OFF
 
 Brain = Literal["orchestrator", "agent"]
 
@@ -724,9 +732,13 @@ def openai_tools(brain: Brain, *, provider: str = "openai") -> list[dict[str, An
             tools.append(DESKTOP_ACTIONS_TOOL)
         else:
             tools.append(COMPUTER_TOOL)
+    hide_computer = brain == ORCHESTRATOR and not computer_use_enabled()
     for item in REGISTRY:
-        if brain in item.brains:
-            tools.append(item.schema)
+        if brain not in item.brains:
+            continue
+        if hide_computer and item.name == "start_task":
+            continue
+        tools.append(item.schema)
     tools.extend(mcp_openai_tools(for_agent=(brain == AGENT)))
     return tools
 
@@ -741,6 +753,8 @@ def agent_tools(*, provider: str = "openai") -> list[dict[str, Any]]:
 
 def tool_names(brain: Brain, *, provider: str = "openai") -> set[str]:
     names = {item.name for item in REGISTRY if brain in item.brains}
+    if brain == ORCHESTRATOR and not computer_use_enabled():
+        names.discard("start_task")
     if brain == AGENT:
         if (provider or "openai").strip().lower() == "deepseek":
             names.add("desktop_actions")

@@ -1,4 +1,4 @@
-/* Electron renderer — talks to chat_bridge via preload. */
+/* Chat renderer — talks to chat_bridge via Electron preload or browser.js. */
 
 const state = {
   chats: [],

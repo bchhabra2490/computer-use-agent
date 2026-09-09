@@ -1,8 +1,12 @@
-"""Localhost HTTP API for the Electron chat desktop app.
+"""Localhost (or LAN) HTTP API for the chat app.
 
-Bound to 127.0.0.1 only. Auth: Bearer token in ``.runtime/chat.token``.
-The Electron UI talks here for SQLite history and orchestrator IPC
-(``enqueue_utterance`` / ``consume_chat_inbox``).
+Default bind is 127.0.0.1. Auth: Bearer token in ``.runtime/chat.token``.
+The Electron UI and the browser UI talk here for SQLite history and
+orchestrator IPC (``enqueue_utterance`` / ``consume_chat_inbox``).
+
+When ``CHAT_BROWSER=1``, the existing ``chat_app/renderer`` is served as a
+web page, the bridge may bind ``0.0.0.0`` (``CHAT_BRIDGE_HOST``), and API
+calls do not require a token.
 
 Started by the tray when chat is enabled, or: ``python chat_bridge.py``.
 """
@@ -55,6 +59,18 @@ TOKEN_LEN = 24
 PID_KEY = "chat_bridge_pid"
 _OFF = {"0", "false", "no", "off"}
 ROOT = Path(__file__).resolve().parent
+RENDERER_DIR = ROOT / "chat_app" / "renderer"
+_CHAT_URLS_PRINTED = False
+_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".map": "application/json",
+}
 _SECRET_KEY_RE = re.compile(
     r"(token|secret|password|passwd|api[_-]?key|authorization|credential)",
     re.I,
@@ -271,6 +287,50 @@ def chat_bridge_enabled() -> bool:
     if os.environ.get("CHAT_BRIDGE", "").strip().lower() not in {"", *_OFF}:
         return True
     return bool(read_status().get("chat_overlay_enabled"))
+
+
+def chat_browser_enabled() -> bool:
+    """Serve the existing chat renderer as a web page (no Electron)."""
+    return os.environ.get("CHAT_BROWSER", "").strip().lower() not in {"", *_OFF}
+
+
+def bind_host() -> str:
+    return os.environ.get("CHAT_BRIDGE_HOST", HOST).strip() or HOST
+
+
+def loopback_url() -> str:
+    return f"http://127.0.0.1:{PORT}"
+
+
+def renderer_file(url_path: str) -> Path | None:
+    """Map a URL path to a file under chat_app/renderer, or None."""
+    rel = url_path.lstrip("/")
+    if not rel:
+        rel = "index.html"
+    parts = Path(rel).parts
+    if ".." in parts:
+        return None
+    path = (RENDERER_DIR / rel).resolve()
+    try:
+        path.relative_to(RENDERER_DIR.resolve())
+    except ValueError:
+        return None
+    if path.is_file():
+        return path
+    return None
+
+
+def print_chat_urls() -> None:
+    """Print LAN URLs for the browser chat app (once per process)."""
+    global _CHAT_URLS_PRINTED
+    if _CHAT_URLS_PRINTED or not chat_browser_enabled():
+        return
+    _CHAT_URLS_PRINTED = True
+    from phone_gateway import advertise_urls
+
+    print("[chat] browser app (same chat as Electron):", flush=True)
+    for base in advertise_urls(PORT):
+        print(f"[chat]   {base}/", flush=True)
 
 
 def _new_token() -> str:
@@ -917,6 +977,8 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         print(f"[chat-bridge] " + fmt % args, flush=True)
 
     def _auth_ok(self) -> bool:
+        if chat_browser_enabled():
+            return True
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             got = auth[7:].strip()
@@ -1031,10 +1093,24 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         self._send(200, png, content_type="image/png")
         return True
 
+    def _serve_renderer(self, path: str) -> bool:
+        file = renderer_file(path)
+        if file is None:
+            return False
+        data = file.read_bytes()
+        ctype = _STATIC_TYPES.get(file.suffix.lower(), "application/octet-stream")
+        self._send(200, data, content_type=ctype)
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path == "/v1/health":
             self._send(200, {"ok": True, "service": "cua-chat-bridge"})
+            return
+        if not path.startswith("/v1/"):
+            if self._serve_renderer(path):
+                return
+            self._send(404, {"ok": False, "error": "not found"})
             return
         if not self._auth_ok():
             self._send(401, {"ok": False, "error": "unauthorized"})
@@ -1280,13 +1356,16 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
         self._send(404, {"ok": False, "error": "not found"})
 
 
-def serve_forever(*, host: str = HOST, port: int = PORT) -> None:
+def serve_forever(*, host: str | None = None, port: int = PORT) -> None:
     token = load_or_create_token()
     ChatBridgeHandler.token = token
     ensure_inbox_worker()
-    server = ThreadingHTTPServer((host, port), ChatBridgeHandler)
-    print(f"[chat-bridge] http://{host}:{port}", flush=True)
-    print(f"[chat-bridge] token at {TOKEN_PATH}", flush=True)
+    bind = host if host is not None else bind_host()
+    server = ThreadingHTTPServer((bind, port), ChatBridgeHandler)
+    print(f"[chat-bridge] http://{bind}:{port}", flush=True)
+    if not chat_browser_enabled():
+        print(f"[chat-bridge] token at {TOKEN_PATH}", flush=True)
+    print_chat_urls()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1301,7 +1380,7 @@ def ensure_chat_bridge() -> subprocess.Popen | None:
     try:
         import urllib.request
 
-        urllib.request.urlopen(f"http://{HOST}:{PORT}/v1/health", timeout=0.2)
+        urllib.request.urlopen(f"{loopback_url()}/v1/health", timeout=0.2)
         return None
     except Exception:
         pass
@@ -1326,7 +1405,7 @@ def ensure_chat_bridge() -> subprocess.Popen | None:
         try:
             import urllib.request
 
-            urllib.request.urlopen(f"http://{HOST}:{PORT}/v1/health", timeout=0.2)
+            urllib.request.urlopen(f"{loopback_url()}/v1/health", timeout=0.2)
             break
         except Exception:
             time.sleep(0.05)

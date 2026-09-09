@@ -313,16 +313,31 @@ def begin_tts_playback() -> None:
         data["tts_play_depth"] = depth
         data["tts_playing"] = True
         _write(data)
+    try:
+        from voice_live import on_tts_playback_start
+
+        on_tts_playback_start()
+    except Exception:
+        pass
 
 
 def end_tts_playback() -> None:
     """Clear TTS activity when a synth/play scope exits."""
+    ended = False
     with _lock:
         data = _read()
         depth = max(0, int(data.get("tts_play_depth") or 0) - 1)
         data["tts_play_depth"] = depth
         data["tts_playing"] = depth > 0
         _write(data)
+        ended = depth == 0
+    if ended:
+        try:
+            from voice_live import on_tts_playback_end
+
+            on_tts_playback_end()
+        except Exception:
+            pass
 
 
 def tts_playing(data: dict[str, Any] | None = None) -> bool:

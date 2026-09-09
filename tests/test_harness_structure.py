@@ -146,6 +146,23 @@ class PromptExtractTests(unittest.TestCase):
         self.assertIn("refer to memory first", text)
         self.assertIn("read_memory", text)
 
+    def test_build_system_prompt_hides_computer_use(self) -> None:
+        from orchestrator_prompts import build_system_prompt
+
+        text = build_system_prompt(
+            skills="skills",
+            memories="memories",
+            displays="",
+            mcp="",
+            not_to_do="don't",
+            computer_use=False,
+        )
+        self.assertIn("start_task is not available", text)
+        self.assertNotIn(
+            "start_task — run the computer-use agent",
+            text,
+        )
+
     def test_local_datetime_line_is_readable(self) -> None:
         from orchestrator_prompts import local_datetime_line
 

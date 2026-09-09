@@ -15,7 +15,10 @@ import tools_registry as tr  # noqa: E402
 
 class ToolRegistryTests(unittest.TestCase):
     def test_orchestrator_has_start_task_not_computer(self) -> None:
-        with patch("mcp_client.mcp_openai_tools", return_value=[]):
+        with (
+            patch.dict("os.environ", {"COMPUTER_USE": "1"}, clear=False),
+            patch("mcp_client.mcp_openai_tools", return_value=[]),
+        ):
             names = [t.get("name") or t.get("type") for t in tr.orchestrator_tools()]
         self.assertIn("start_task", names)
         self.assertIn("give_response_to_user", names)
@@ -31,6 +34,16 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("send_chat_message", names)
         self.assertNotIn("computer", names)
         self.assertNotIn("mark_done", names)
+
+    def test_orchestrator_hides_start_task_when_computer_use_off(self) -> None:
+        with (
+            patch.dict("os.environ", {"COMPUTER_USE": "0"}, clear=False),
+            patch("mcp_client.mcp_openai_tools", return_value=[]),
+        ):
+            names = [t.get("name") or t.get("type") for t in tr.orchestrator_tools()]
+            self.assertNotIn("start_task", names)
+            self.assertIn("give_response_to_user", names)
+            self.assertFalse(tr.computer_use_enabled())
 
     def test_agent_has_computer_not_start_task(self) -> None:
         with patch("mcp_client.mcp_openai_tools", return_value=[]):

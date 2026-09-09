@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Raspberry Pi voice and LAN chat
+After=network-online.target pipewire.service wireplumber.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/computer-use-agent
+ExecStart=%h/computer-use-agent/.venv/bin/python orchestrator.py --auto --pi --env .env.pi
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=GPIOZERO_PIN_FACTORY=lgpio
+UMask=0077
+
+[Install]
+WantedBy=default.target

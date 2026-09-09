@@ -5,6 +5,7 @@ recordings/
 __pycache__/
 *.pyc
 .env
+.env.pi
 .DS_Store
 tts_latency.log
 stt_latency.log

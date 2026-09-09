@@ -24,6 +24,7 @@ Usage:
     export OPENAI_API_KEY=sk-...
     python orchestrator.py
     python orchestrator.py --auto
+    python orchestrator.py --auto --pi
     python orchestrator.py --max-steps 25
 """
 
@@ -132,7 +133,7 @@ from dictation import ensure_dictation_running, stop_dictation
 from stt import POST_TTS_COOLDOWN, NoSpeechError, ask_user, listen_once
 from task_spec import resolve_agent_task
 from task_feedback import collect_post_task_feedback, format_feedback_for_model
-from tools_registry import orchestrator_tools, run_tool
+from tools_registry import computer_use_enabled, orchestrator_tools, run_tool
 from barge_router import classify_barge_utterance
 from wake import (
     format_wake_phrases,
@@ -942,6 +943,11 @@ def _start_task_block_reason(
     *,
     sleeping: bool,
 ) -> str | None:
+    if not computer_use_enabled():
+        return (
+            "Computer-use is disabled in this mode. You cannot control a desktop. "
+            "Answer with speech, memory, timers, MCP, or chat instead."
+        )
     if sleeping:
         return "Sleep mode is on, so no new computer task was started."
     duplicate = _completed_task_match(task, task_history)
@@ -2296,6 +2302,7 @@ def _orchestrator_system_prompt(
         mcp_rule=mcp_rule,
         session_summary=session_summary,
         recent_turns=recent_turns,
+        computer_use=computer_use_enabled(),
     )
 
 
@@ -2910,6 +2917,21 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         f"[orchestrator] reasoning={orchestrator_provider()} model={MODEL}",
         flush=True,
     )
+    if not computer_use_enabled():
+        print("[orchestrator] computer-use (start_task) hidden", flush=True)
+    try:
+        from chat_overlay import (
+            chat_browser_enabled,
+            chat_overlay_env_enabled,
+            ensure_chat_bridge_and_app,
+        )
+        from app_status import set_chat_overlay_enabled
+
+        if chat_overlay_env_enabled() or chat_browser_enabled():
+            set_chat_overlay_enabled(True)
+            ensure_chat_bridge_and_app()
+    except Exception as e:
+        print(f"[orchestrator] chat start error: {e}", flush=True)
     audio = AudioSession(client, session=sess)
     bind_audio(audio)
     llm_tts = None
@@ -2927,11 +2949,17 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         print(f"[orchestrator] MCP start error: {e}", flush=True)
     mcp_rule = ""
     if mcp_openai_tools(for_agent=False):
-        mcp_rule = (
-            "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
-            "Linear, docs, APIs). Prefer this over start_task when it can complete "
-            "the request.\n"
-        )
+        if computer_use_enabled():
+            mcp_rule = (
+                "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
+                "Linear, docs, APIs). Prefer this over start_task when it can complete "
+                "the request.\n"
+            )
+        else:
+            mcp_rule = (
+                "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
+                "Linear, docs, APIs).\n"
+            )
 
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
@@ -2949,6 +2977,14 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     )
 
 
+def apply_pi_mode() -> None:
+    """Same orchestrator, no computer-use; serve the existing chat app in a browser."""
+    os.environ["COMPUTER_USE"] = "0"
+    os.environ["CHAT_BROWSER"] = "1"
+    os.environ["CHAT_OVERLAY"] = "1"
+    os.environ.setdefault("CHAT_BRIDGE_HOST", "0.0.0.0")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Voice desktop orchestrator")
     parser.add_argument(
@@ -2956,8 +2992,22 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Pass --auto to the computer-use agent (skip per-step confirms)",
     )
+    parser.add_argument(
+        "--pi",
+        action="store_true",
+        help="Hide computer-use and serve the chat app in a browser",
+    )
+    parser.add_argument(
+        "--env",
+        default=None,
+        help="Optional extra env file (loaded with override, e.g. .env.pi)",
+    )
     parser.add_argument("--max-steps", type=int, default=25)
     args = parser.parse_args(argv)
+    if args.env:
+        load_dotenv(args.env, override=True)
+    if args.pi:
+        apply_pi_mode()
 
     try:
         run_orchestrator(auto=args.auto, max_steps=args.max_steps)

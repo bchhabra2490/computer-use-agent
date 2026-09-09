@@ -24,7 +24,7 @@ adapted for Windows and Linux.
 - Route requests through fast/slow paths and specialist execution lanes.
 - Learn reusable skills and recipes from completed or observed workflows.
 - Store personal, application, and screen memories.
-- Stream STT/TTS, support barge-in, and identify enrolled speakers.
+- Stream STT/TTS, keep a live voice socket open after wake until idle or "stop listening", support barge-in, and identify enrolled speakers.
 - Save user-facing files under `~/Documents/Computer Use Agent/` by default.
 
 ## Architecture
@@ -84,6 +84,19 @@ the user's signed-in browser.
 
 ## Quick start
 
+### Raspberry Pi / headless (same orchestrator)
+
+Pi mode is `orchestrator.py` with computer-use hidden. The existing chat app is
+served in a browser (not a separate Pi page).
+
+```bash
+python orchestrator.py --auto --pi
+```
+
+Or `python pi_agent.py --env .env.pi` (same command). See [Raspberry Pi setup](RASPBERRY_PI.md).
+
+### Desktop
+
 ```bash
 git clone https://github.com/bchhabra2490/computer-use-agent.git
 cd computer-use-agent
@@ -124,10 +137,11 @@ cua status
 cua stop
 cua sleep on                      # temporarily ignore wake words
 cua sleep off
-cua chat on                       # open the Electron chat app
+cua chat on                       # open the chat app (Electron, or browser with --pi)
 cua face jarvis                   # select a face overlay
 
 python orchestrator.py --auto     # foreground voice mode
+python orchestrator.py --auto --pi  # same, no computer-use; chat in the browser
 python agent.py "Open Notes"      # typed task with confirmations
 python agent.py --auto "Open Notes and write today's date"
 ```

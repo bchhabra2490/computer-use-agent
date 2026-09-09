@@ -149,6 +149,13 @@ Available desktop skills the computer agent can load:
 {not_to_do}
 """
 
+NO_COMPUTER_USE_RULES = (
+    "- HARD RULE: start_task is not available. You cannot control a mouse, keyboard, "
+    "or desktop. Never claim you opened, clicked, typed, played, or changed anything "
+    "on a computer. If they ask for that, say so and help another way "
+    "(answer, memory, timers, MCP, chat).\n"
+)
+
 
 def local_datetime_line() -> str:
     """One-line clock context injected on every orchestrator user turn."""
@@ -171,6 +178,7 @@ def build_system_prompt(
     mcp_rule: str = "",
     session_summary: str = "",
     recent_turns: str = "",
+    computer_use: bool = True,
 ) -> str:
     """Assemble the orchestrator system prompt for one turn."""
     prompt = (
@@ -184,6 +192,18 @@ def build_system_prompt(
         .replace("__MCP__", mcp)
         .replace("__NOT_TO_DO__", not_to_do)
     )
+    if not computer_use:
+        prompt = prompt.replace(
+            "You are a voice desktop orchestrator",
+            "You are a voice orchestrator",
+            1,
+        )
+        prompt = prompt.replace(
+            "- start_task — run the computer-use agent for real mouse/keyboard/UI work\n",
+            "",
+            1,
+        )
+        prompt = prompt.replace("Rules:\n", "Rules:\n" + NO_COMPUTER_USE_RULES, 1)
     layout = (displays or "").strip()
     if layout:
         prompt += f"\n\n{layout}\n"

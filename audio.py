@@ -25,6 +25,7 @@ from bus import strip_wake_prefix
 from session import Session, get_session
 from stt import POST_TTS_COOLDOWN, ask_user, listen_for_utterance
 from tts import speak, speak_later
+from voice_live import LiveVoiceSession, live_voice_enabled
 from wake import (
     ensure_persistent_wake,
     format_wake_phrases,
@@ -51,6 +52,7 @@ class AudioSession:
         self.mic_owner: MicOwner = "none"
         self.cooldown_s = POST_TTS_COOLDOWN
         self.latency_trace_id: str | None = None
+        self.live: LiveVoiceSession | None = None
 
     def _phase(self, phase: str, detail: str = "", *, log: bool = False) -> None:
         sess = self.session if self.session is not None else get_session()
@@ -64,10 +66,20 @@ class AudioSession:
         return ensure_persistent_wake()
 
     def stop(self) -> None:
+        self._close_live()
         try:
             stop_persistent_wake()
         finally:
             self.mic_owner = "none"
+
+    def _close_live(self) -> None:
+        live = self.live
+        self.live = None
+        if live is not None:
+            try:
+                live.close()
+            except Exception:
+                pass
 
     def cooldown(self) -> None:
         time.sleep(self.cooldown_s)
@@ -92,6 +104,10 @@ class AudioSession:
 
     def listen_after_barge(self, *, prompt: str = "Listening…") -> str | None:
         """Capture a command after TTS barge-in (no second wake)."""
+        if self.live is not None and self.live.alive:
+            heard = self.live.wait_utterance()
+            command = strip_wake_prefix(heard or "").strip()
+            return command or None
         time.sleep(0.15)
         try:
             utterance = self.listen(prompt)
@@ -153,6 +169,13 @@ class AudioSession:
         if shortcut:
             return self._listen_shortcut(listen_prompt)
 
+        if live_voice_enabled() and self.live is not None and self.live.alive:
+            heard = self.live.wait_utterance(should_stop=_stop)
+            if heard:
+                return self._arm_voice_turn(heard)
+            self._close_live()
+            self.mic_owner = "wake"
+
         if not self.wait_for_wake(should_stop=_stop, prompt=wake_prompt):
             if consume_listen():
                 return self._listen_shortcut(listen_prompt)
@@ -166,6 +189,8 @@ class AudioSession:
         self.latency_trace_id = start_trace(source="voice", wake_label=heard)
         self._phase("listening", f"{heard} heard — listening", log=True)
         remainder = get_wake_remainder()
+        if live_voice_enabled():
+            return self._open_live(listen_prompt, remainder=remainder, should_stop=_stop)
         if remainder:
             try:
                 from speaker_id import clear_last_speaker
@@ -173,15 +198,7 @@ class AudioSession:
                 clear_last_speaker()
             except Exception:
                 pass
-            set_reply_sink("mac")
-            set_reply_tts(True)
-            set_turn_source("voice")
-            command = strip_wake_prefix(remainder).strip() or remainder
-            from latency_report import mark
-
-            mark(self.latency_trace_id, "speech_finished")
-            mark(self.latency_trace_id, "transcript_ready", metadata={"transcript_chars": len(command)})
-            return command
+            return self._arm_voice_turn(strip_wake_prefix(remainder).strip() or remainder)
         try:
             utterance = self.listen(listen_prompt or "Listening…")
         except Exception as e:
@@ -214,6 +231,51 @@ class AudioSession:
                 abandon_trace(self.latency_trace_id, reason="stt_failed")
                 self.latency_trace_id = None
                 return None
+        return self._arm_voice_turn(command)
+
+    def _open_live(
+        self,
+        listen_prompt: str | None,
+        *,
+        remainder: str | None,
+        should_stop: Callable[[], bool],
+    ) -> str | None:
+        self._close_live()
+        session = LiveVoiceSession(self.client)
+        try:
+            session.start()
+        except Exception as e:
+            print(f"[audio] live voice socket failed ({e}); falling back to one-shot listen", flush=True)
+            try:
+                session.close()
+            except Exception:
+                pass
+            self.live = None
+            if remainder:
+                return self._arm_voice_turn(strip_wake_prefix(remainder).strip() or remainder)
+            return self.listen(listen_prompt or "Listening…")
+        self.live = session
+        self.mic_owner = "stt"
+        if remainder:
+            command = strip_wake_prefix(remainder).strip() or remainder
+            if command:
+                from voice_live import is_live_shutdown
+
+                if is_live_shutdown(command):
+                    print("[audio] shutdown phrase after wake — not entering live voice", flush=True)
+                    self._close_live()
+                    return None
+                return self._arm_voice_turn(command)
+        heard = session.wait_utterance(should_stop=should_stop)
+        if not heard:
+            self._close_live()
+            return None
+        return self._arm_voice_turn(heard)
+
+    def _arm_voice_turn(self, command: str) -> str | None:
+        command = (command or "").strip()
+        if not command:
+            return None
         set_reply_sink("mac")
         set_reply_tts(True)
         set_turn_source("voice")
@@ -221,10 +283,13 @@ class AudioSession:
 
         mark(self.latency_trace_id, "speech_finished")
         mark(self.latency_trace_id, "transcript_ready", metadata={"transcript_chars": len(command)})
-        return command or None
+        return command
 
     def _listen_shortcut(self, listen_prompt: str | None = None) -> str | None:
         """Capture a normal Jarvis command without requiring a wake word."""
+        if live_voice_enabled():
+            self._phase("listening", "Keyboard shortcut heard — listening", log=True)
+            return self._open_live(listen_prompt, remainder=None, should_stop=lambda: False)
         self._phase("listening", "Keyboard shortcut heard — listening", log=True)
         try:
             utterance = self.listen(listen_prompt or "Listening…")
@@ -251,7 +316,7 @@ class AudioSession:
         if interrupted:
             self._phase("listening", "barge-in")
             return self.listen_after_barge()
-        self.mic_owner = "wake"
+        self.mic_owner = "stt" if self.live is not None and self.live.alive else "wake"
         return None
 
     def speak_later(self, text: str) -> None:

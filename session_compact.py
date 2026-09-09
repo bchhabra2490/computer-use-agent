@@ -44,7 +44,7 @@ class SessionCompactState:
     def begin_turn(self) -> None:
         self.overflow_recovery_used = False
 
-    def recent_turns_block(self, *, limit: int = 3, char_budget: int = 1800) -> str:
+    def recent_turns_block(self, *, limit: int = 5, char_budget: int = 2400) -> str:
         """Clipped last N voice turns for a fresh Responses thread."""
         rows = [row.strip() for row in self.turn_log[-max(1, limit) :] if row.strip()]
         if not rows:

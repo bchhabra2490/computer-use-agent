@@ -111,7 +111,6 @@ def finish_trace(
         if _CURRENT_ID == trace_id:
             _CURRENT_ID = None
         _append_trace(trace)
-        build_report()
         return dict(trace)
 
 
@@ -139,21 +138,51 @@ def _durations(milestones: dict[str, Any]) -> dict[str, int]:
     return {name: value for name, pair in pairs.items() if (value := delta(*pair)) is not None}
 
 
+_MAX_TRACE_READ_BYTES = 1_048_576
+
+
 def _append_trace(trace: dict[str, Any]) -> None:
     LATENCY_DIR.mkdir(parents=True, exist_ok=True)
     with TRACES_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(trace, ensure_ascii=False) + "\n")
 
 
+def _tail_lines(path: Path, limit: int, *, max_bytes: int = _MAX_TRACE_READ_BYTES) -> list[str]:
+    """Read the last ``limit`` lines without loading the whole file."""
+    want = max(1, int(limit))
+    cap = max(1, int(max_bytes))
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+    buf = b""
+    read = 0
+    pos = size
+    try:
+        with path.open("rb") as f:
+            while pos > 0 and read < cap and buf.count(b"\n") <= want:
+                step = min(8192, pos, cap - read)
+                pos -= step
+                f.seek(pos)
+                chunk = f.read(step)
+                buf = chunk + buf
+                read += len(chunk)
+    except OSError:
+        return []
+    text = buf.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if pos > 0 and lines:
+        lines = lines[1:]
+    return lines[-want:]
+
+
 def read_traces(*, limit: int = 200) -> list[dict[str, Any]]:
     if not TRACES_PATH.is_file():
         return []
     rows: list[dict[str, Any]] = []
-    try:
-        lines = TRACES_PATH.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    for line in lines[-max(1, limit) :]:
+    for line in _tail_lines(TRACES_PATH, max(1, int(limit))):
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
@@ -214,8 +243,8 @@ def _fmt_ms(value: int | None) -> str:
     return f"{value / 1000:.2f}s" if value >= 1000 else f"{value}ms"
 
 
-def build_report() -> Path:
-    payload = report_payload(limit=20)
+def build_report(*, payload: dict[str, Any] | None = None, limit: int = 20) -> Path:
+    payload = payload if payload is not None else report_payload(limit=limit)
     metrics = payload["metrics"]
     labels = {
         "voice_to_first_action": "Voice → first action",

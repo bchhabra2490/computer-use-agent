@@ -6,14 +6,20 @@ from datetime import datetime
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
-You receive transcribed speech from the user, and sometimes a photo from their
-phone camera (attached as an image on that turn). Each question also includes a
-live desktop snapshot: display layout, open windows, accessibility text for the
-frontmost app, and usually a screenshot — use these to answer in context of what
-the user is looking at (prefer give_response_to_user; do not start_task for
-read-only questions about on-screen content). Decide the next action with tools only
-— never reply with a plain assistant message (the user will not hear it, and the mic
-will not open):
+You receive transcribed speech or typed chat. Speech-to-text is lossy: city names,
+people, and short follow-ups are often misheard. When recent desktop chat or recent
+voice turns already name a specific place, person, or topic, and this utterance
+looks garbled, incomplete, or like a continuation, recover that entity from the
+conversation — not from older memories of a different city. Example: they asked
+for Kathmandu weather in chat, then speech comes back as another country or a
+nonsense name → still do Kathmandu weather. If they clearly name a new place,
+follow the new place. Sometimes a photo from their phone camera is attached.
+Each question also includes a live desktop snapshot: display layout, open windows,
+accessibility text for the frontmost app, and usually a screenshot — use these to
+answer in context of what the user is looking at (prefer give_response_to_user; do
+not start_task for read-only questions about on-screen content). Decide the next
+action with tools only — never reply with a plain assistant message (the user will
+not hear it, and the mic will not open):
 - give_response_to_user — speak an answer or acknowledgment that does not need a reply
 - who_am_i — read README.md when they ask who you are, what you can do, or about this agent
 - ask_user — ask one short clarifying question aloud, then listen for their answer
@@ -47,6 +53,11 @@ will not open):
   give_response_to_user once. Do not start_task or sleep.
 {mcp_rule}
 Rules:
+- Speech transcripts are guesses. Prefer recent desktop chat and recent voice turns
+  over the literal transcript when names/places conflict and the new utterance
+  looks like a follow-up or a mishear. Prefer that conversation over older
+  memories (a past Mohali/Delhi weather note does not override Kathmandu from
+  this chat). Only ask_user if history and transcript still cannot be reconciled.
 - For every user-facing file created, downloaded, exported, or generated, use the
   default output folder stated in the always-on policy below unless the user
   explicitly named another destination in the current request. This includes SVG,
@@ -168,6 +179,25 @@ def local_datetime_line() -> str:
     )
 
 
+def conversation_context_block(
+    *,
+    chat_history: str = "",
+    recent_turns: str = "",
+) -> str:
+    """User-turn snippet: typed chat if present, else recent voice turns."""
+    chat = (chat_history or "").strip()
+    voice = (recent_turns or "").strip()
+    body = chat or voice
+    if not body:
+        return ""
+    label = "Recent desktop chat" if chat else "Recent voice turns"
+    return (
+        f"{label} (speech-to-text is often wrong on names and places; "
+        f"if this utterance looks like a garbled follow-up, recover the "
+        f"place/person/topic from here):\n{body}"
+    )
+
+
 def build_system_prompt(
     *,
     skills: str,
@@ -178,6 +208,7 @@ def build_system_prompt(
     mcp_rule: str = "",
     session_summary: str = "",
     recent_turns: str = "",
+    chat_history: str = "",
     computer_use: bool = True,
 ) -> str:
     """Assemble the orchestrator system prompt for one turn."""
@@ -210,6 +241,9 @@ def build_system_prompt(
     summary = (session_summary or "").strip()
     if summary:
         prompt += f"\n\nEarlier in this voice session (summarized):\n{summary}\n"
+    chat = (chat_history or "").strip()
+    if chat:
+        prompt += f"\n\nRecent desktop chat:\n{chat}\n"
     recent = (recent_turns or "").strip()
     if recent:
         prompt += f"\n\nRecent voice turns:\n{recent}\n"

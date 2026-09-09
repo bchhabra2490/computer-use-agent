@@ -195,25 +195,17 @@ class LowLatencyTTS:
             return None
 
     def _acquire_interrupt(self):
-        """Wake, live-socket, and/or keyboard interrupt event + release callback."""
-        live_event = None
-        try:
-            from voice_live import interrupt_event as live_interrupt
-
-            live_event = live_interrupt()
-        except Exception:
-            live_event = None
-        wake_event = None if live_event is not None else self._wake_interrupt_event()
+        """Wake and/or keyboard interrupt event + release callback."""
+        wake_event = self._wake_interrupt_event()
         try:
             from keyboard_barge import acquire_tts_interrupt
 
-            return acquire_tts_interrupt(wake_event, live_event)
+            return acquire_tts_interrupt(wake_event)
         except Exception as exc:
             self._log("keyboard_barge_unavailable", detail=repr(exc))
-            event = live_event or wake_event
-            if event is None:
+            if wake_event is None:
                 return None, (lambda: None)
-            return event, (lambda: None)
+            return wake_event, (lambda: None)
 
     def _interrupt_session(self, response_id: str) -> None:
         """Stop remaining synthesis/playback after a wake-word barge-in."""
@@ -277,14 +269,6 @@ class LowLatencyTTS:
             self._sessions[response_id] = _Session(response_id=response_id)
             self._active_response_id = response_id
         self._log("response_stream_started", response_id=response_id)
-        try:
-            from voice_live import current
-
-            sess = current()
-            if sess is not None and sess.alive:
-                sess.begin_tts_stream()
-        except Exception:
-            pass
 
     def add_text_chunk(self, chunk: str) -> None:
         """Append plaintext to the active stream and queue speakable clauses."""
@@ -416,12 +400,6 @@ class LowLatencyTTS:
         if first_chunk:
             detail += " first=1"
         self._log("chunk_available", response_id=response_id, detail=detail)
-        try:
-            from voice_live import note_tts
-
-            note_tts(text)
-        except Exception:
-            pass
         try:
             self._synth_q.put((response_id, text))
         except Exception:

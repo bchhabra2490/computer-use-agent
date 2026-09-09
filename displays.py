@@ -265,6 +265,25 @@ def list_tabs_enabled() -> bool:
     }
 
 
+def tabs_wanted(task: str | None) -> bool:
+    """Whether to spend the osascript round-trip listing browser tabs.
+
+    ``task is None`` means the caller asked for a full listing (tools, observe).
+    A concrete task only lists tabs when it is about browsers, URLs, or the screen.
+    ``DESKTOP_LIST_TABS=always`` lists on every occupancy snapshot.
+    """
+    if not list_tabs_enabled():
+        return False
+    mode = os.environ.get("DESKTOP_LIST_TABS", "1").strip().lower()
+    if mode in {"always", "all"}:
+        return True
+    if task is None:
+        return True
+    from utterance import needs_browser_tabs
+
+    return needs_browser_tabs(task)
+
+
 def list_open_apps() -> list[str]:
     """User-facing running apps (regular activation policy), unique names."""
     if sys.platform != "darwin":
@@ -567,6 +586,7 @@ def format_monitor_occupancy(
     include_apps: bool = True,
     include_tabs: bool = True,
     tab_limit: int | None = None,
+    task: str | None = None,
 ) -> str:
     """Compact per-display window list, running apps, and browser tabs."""
     live = occupancy is None
@@ -580,11 +600,12 @@ def format_monitor_occupancy(
         frontmost = _frontmost_name()
     if include_apps and apps is None and live:
         apps = list_open_apps()
-    if include_tabs and tabs is None and live and list_tabs_enabled():
+    want_tabs = include_tabs and tabs_wanted(task)
+    if want_tabs and tabs is None and live:
         tabs = list_browser_tabs()
     if not include_apps:
         apps = None
-    if not include_tabs:
+    if not want_tabs:
         tabs = None
 
     lines = [f"Open windows by display ({len(monitors)} attached):"]

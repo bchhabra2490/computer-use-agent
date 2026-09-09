@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ PORT = int(os.environ.get("CHAT_BRIDGE_PORT", "8743"))
 TOKEN_PATH = RUNTIME_DIR / "chat.token"
 _INBOX_WORKER_STARTED = False
 _INBOX_WORKER_LOCK = threading.Lock()
+_BRIDGE_ID = uuid.uuid4().hex
 TOKEN_LEN = 24
 PID_KEY = "chat_bridge_pid"
 _OFF = {"0", "false", "no", "off"}
@@ -892,8 +894,8 @@ def post_assistant_message(
 def persist_chat_inbox() -> dict[str, Any]:
     """Drain spoken inbox into SQLite so replies survive a closed chat window.
 
-    The Electron UI used to be the only consumer of ``chat_inbox``; if the
-    window was closed mid-reply, lines were lost or never written to history.
+    The inbox worker is the only writer. Status GET is read-only and watches
+    SQLite ``inbox_rev`` / ``history_rev`` instead of draining on every poll.
     """
     items = consume_chat_inbox_items()
     if not items:
@@ -915,12 +917,32 @@ def persist_chat_inbox() -> dict[str, Any]:
         set_chat_stream(None)
     except Exception:
         pass
+    unique_ids = list(dict.fromkeys(appended_chat_ids))
     return {
         "ok": True,
         "appended": len(items),
-        "chat_id": appended_chat_ids[-1],
-        "chat_ids": list(dict.fromkeys(appended_chat_ids)),
+        "chat_id": unique_ids[-1],
+        "chat_ids": unique_ids,
     }
+
+
+def reset_inbox_persist_process() -> None:
+    """Simulate a new bridge process (tests / in-process restart)."""
+    global _BRIDGE_ID
+    _BRIDGE_ID = uuid.uuid4().hex
+
+
+def inbox_persist_view(*, since: int | None = None) -> dict[str, Any]:
+    """Per-chat history revisions for read-only status polls. Does not drain the inbox.
+
+    Revisions live in SQLite next to the messages, so the orchestrator and chat
+    bridge share one cursor. ``bridge_id`` still changes per process so the UI
+    can resync after a restart. Pass ``since`` (last seen ``history_rev``) to get
+    chats whose revision advanced after that cursor.
+    """
+    view = get_store().inbox_persist_view(since=since)
+    view["bridge_id"] = _BRIDGE_ID
+    return view
 
 
 def ensure_inbox_worker() -> None:
@@ -1014,8 +1036,16 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
             self._send(500, {"ok": False, "error": str(e)})
 
     def _get_status(self, store) -> None:
+        qs = parse_qs(urlparse(self.path).query)
+        since_raw = (qs.get("since") or [None])[0]
+        since = None
+        if since_raw not in (None, ""):
+            try:
+                since = int(since_raw)
+            except (TypeError, ValueError):
+                since = None
         snap = read_status()
-        persisted = persist_chat_inbox()
+        persisted = inbox_persist_view(since=since)
         stream = chat_stream_payload()
         self._send(
             200,
@@ -1029,9 +1059,15 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
                 "chat_tts_on": store.get_pref(PREF_CHAT_TTS, "1") != "0",
                 "face_preset": snap.get("face_preset"),
                 "inbox": [],
-                "assistant_appended": int(persisted.get("appended") or 0),
-                "active_chat_id": persisted.get("chat_id") or resolve_active_chat_id(store),
-                "appended_chat_ids": persisted.get("chat_ids") or [],
+                "history_rev": int(persisted.get("history_rev") or 0),
+                "assistant_rev": int(persisted.get("assistant_rev") or 0),
+                "assistant_appended": int(persisted.get("assistant_appended") or 0),
+                "active_chat_id": resolve_active_chat_id(store),
+                "appended_chat_ids": persisted.get("appended_chat_ids") or [],
+                "completed_chat_ids": persisted.get("completed_chat_ids") or [],
+                "chat_revs": persisted.get("chat_revs") or {},
+                "changed_chat_ids": persisted.get("changed_chat_ids") or [],
+                "bridge_id": persisted.get("bridge_id") or "",
                 "chat_stream": stream,
             },
         )
@@ -1057,8 +1093,9 @@ class ChatBridgeHandler(BaseHTTPRequestHandler):
     def _get_latency(self, _store) -> dict:
         from latency_report import build_report, report_payload
 
-        build_report()
-        return report_payload(limit=30)
+        payload = report_payload(limit=30)
+        build_report(payload=payload)
+        return payload
 
     def _get_avatars(self, _store) -> dict:
         from AppKit import NSApplication  # type: ignore

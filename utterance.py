@@ -41,6 +41,16 @@ _SCREEN_RE = re.compile(
 )
 
 
+_TAB_RE = re.compile(
+    r"\b("
+    r"tabs?|browser|chrome|safari|firefox|edge|brave|arc|"
+    r"url|link|web ?page|open pages?|"
+    r"youtube|gmail|google docs?"
+    r")\b|https?://",
+    re.IGNORECASE,
+)
+
+
 def is_garbage_utterance(text: str) -> bool:
     """True when STT is filler/repetition and should not start a billed LLM turn."""
     body = " ".join((text or "").split()).strip()
@@ -65,3 +75,13 @@ def needs_screen_pixels(text: str) -> bool:
     if not body:
         return False
     return bool(_SCREEN_RE.search(body))
+
+
+def needs_browser_tabs(text: str) -> bool:
+    """True when listing Chrome/Safari tabs is likely useful for this request."""
+    body = (text or "").strip()
+    if not body:
+        return False
+    if needs_screen_pixels(body):
+        return True
+    return bool(_TAB_RE.search(body))

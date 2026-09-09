@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from orchestrator import (  # noqa: E402
     _looks_like_claimed_action,
     _looks_like_question,
     _must_use_real_action_tool,
+    _recent_chat_history_block,
     _strip_wait_filler,
     _tts_word_count,
     _turn_already_spoke,
@@ -172,6 +174,44 @@ class UserTurnInputTests(unittest.TestCase):
         ):
             inp = _user_turn_input("what time is it?", [])
         self.assertIn("Current local date and time: TEST.", inp)
+
+    def test_injects_conversation_context(self) -> None:
+        with patch("orchestrator.reply_to_chat", return_value=False):
+            inp = _user_turn_input(
+                "cat man do weather",
+                [],
+                conversation_context=(
+                    "Recent desktop chat (speech-to-text is often wrong on names "
+                    "and places; if this utterance looks like a garbled follow-up, "
+                    "recover the place/person/topic from here):\n"
+                    "User: what's the weather in Kathmandu"
+                ),
+            )
+        self.assertIn("Kathmandu", inp)
+        self.assertIn("cat man do weather", inp)
+        self.assertIn("speech transcript, may be inaccurate", inp)
+
+    def test_chat_origin_does_not_label_as_transcript(self) -> None:
+        with patch("orchestrator.reply_to_chat", return_value=True):
+            inp = _user_turn_input("what's the weather in Kathmandu", [])
+        self.assertIn("User said: what's the weather in Kathmandu", inp)
+        self.assertNotIn("speech transcript", inp)
+
+    def test_recent_chat_history_block_uses_active_chat(self) -> None:
+        from chat_store import ChatStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(Path(tmp) / "t.sqlite3")
+            chat = store.create_chat(title="wx")
+            store.add_message(chat.id, "user", "what's the weather in Kathmandu")
+            store.set_active_chat_id(chat.id)
+            with (
+                patch("orchestrator.turn_chat_id", return_value=None),
+                patch("chat_store.get_store", return_value=store),
+            ):
+                block = _recent_chat_history_block("open nepal weather")
+        self.assertIn("Kathmandu", block)
+        self.assertNotIn("open nepal weather", block)
 
     def test_injects_execution_route(self) -> None:
         inp = _user_turn_input(

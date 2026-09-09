@@ -41,14 +41,6 @@ _SECRET_RE = re.compile(
 )
 _IMAGE_RE = re.compile(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+")
 
-_REGISTRY_TOOL_EXTRA = frozenset(
-    {
-        "schedule_task",
-        "list_scheduled_tasks",
-        "cancel_scheduled_task",
-    }
-)
-
 
 def tracing_enabled() -> bool:
     return os.environ.get("LLM_TRACE", "1").strip().lower() not in {
@@ -432,10 +424,11 @@ def traced_responses_create(client: Any, *, lane: str, **kwargs: Any) -> Any:
 
 def registry_traces_tool(name: str) -> bool:
     try:
-        from tools_registry import SHARED_TOOL_NAMES
+        from tools_registry import has_handler
+
+        return has_handler(name)
     except Exception:
-        SHARED_TOOL_NAMES = frozenset()
-    return name in SHARED_TOOL_NAMES or name in _REGISTRY_TOOL_EXTRA
+        return False
 
 
 class _ToolRec:

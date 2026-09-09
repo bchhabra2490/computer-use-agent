@@ -88,10 +88,12 @@ class ToolRuntimeTests(unittest.TestCase):
 
     def test_read_screen_in_shared(self) -> None:
         self.assertIn("read_screen", tr.SHARED_TOOL_NAMES)
-        with patch.object(
-            tr,
-            "_execute_read_screen",
-            return_value=tr.ToolOutcome(output="Screen read", screenshot_png=b"PNG"),
+        from context import TurnDesktopContext
+
+        screen = TurnDesktopContext(text="Screen read", screenshot_png=b"PNG")
+        with (
+            patch("context.read_screen", return_value=screen),
+            patch("context.read_screen_vision_input", return_value={"type": "input_image"}),
         ):
             out = tr.run_tool("read_screen", {"unused": False})
         self.assertEqual(out.output, "Screen read")
@@ -137,6 +139,7 @@ class PromptExtractTests(unittest.TestCase):
             mcp_rule="",
             session_summary="Earlier: opened maps",
             recent_turns="User: hi\nopened maps",
+            chat_history="User: what's the weather in Kathmandu\nAssistant: I'll check.",
         )
         self.assertIn("Chrome {tab}", text)
         self.assertIn("Earlier: opened maps", text)
@@ -145,6 +148,23 @@ class PromptExtractTests(unittest.TestCase):
         self.assertIn("skills", text)
         self.assertIn("refer to memory first", text)
         self.assertIn("read_memory", text)
+        self.assertIn("Recent desktop chat:", text)
+        self.assertIn("Kathmandu", text)
+        self.assertIn("Speech-to-text is lossy", text)
+
+    def test_conversation_context_prefers_chat_over_voice(self) -> None:
+        from orchestrator_prompts import conversation_context_block
+
+        text = conversation_context_block(
+            chat_history="User: weather in Kathmandu",
+            recent_turns="User: play music",
+        )
+        self.assertIn("Recent desktop chat", text)
+        self.assertIn("Kathmandu", text)
+        self.assertNotIn("play music", text)
+        voice_only = conversation_context_block(recent_turns="User: play music")
+        self.assertIn("Recent voice turns", voice_only)
+        self.assertIn("play music", voice_only)
 
     def test_build_system_prompt_hides_computer_use(self) -> None:
         from orchestrator_prompts import build_system_prompt

@@ -82,7 +82,7 @@ from status_tray import ensure_tray_running, stop_tray
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
-from tools_registry import SHARED_TOOL_NAMES, agent_tools, run_tool
+from tools_registry import agent_tools, has_handler, run_tool
 from recipes import RecipeHit, handoff_prompt, maybe_save_recipe, try_recipe
 from tts import speak, speak_later
 
@@ -447,14 +447,13 @@ def _handle_function_call(
     audio_client: OpenAI | None = None,
 ) -> dict:
     from llm_trace import traced_tool
-    from tools_registry import SHARED_TOOL_NAMES
 
     name = getattr(call, "name", "") or "tool"
     try:
         args = json.loads(call.arguments or "{}")
     except json.JSONDecodeError:
         args = {}
-    if name in SHARED_TOOL_NAMES:
+    if has_handler(name):
         return _handle_function_call_impl(
             client,
             call,
@@ -509,7 +508,7 @@ def _handle_function_call_impl(
         return _handle_read_ui_text(call, log)
     if call.name == "run_terminal":
         return _handle_run_terminal(call, log, auto=auto, client=speak_client, voice=voice)
-    if call.name in SHARED_TOOL_NAMES:
+    if has_handler(call.name):
         args = json.loads(call.arguments or "{}")
         outcome = run_tool(
             call.name,
@@ -1530,6 +1529,7 @@ def _run_agent_session(
             fallback_max_steps=max_steps,
             execution_path=getattr(execution_route, "path", None),
             specialist_lane=getattr(execution_route, "lane", None),
+            difficulty=getattr(execution_route, "difficulty", None),
         )
     model = route.model
     max_steps = route.max_steps
@@ -1673,9 +1673,9 @@ def _bootstrap_agent_run(
         memory_query=task,
         skill_detail="full",
         occupancy_detail="full",
+        task=task,
     )
     display_ctx = bundle.desktop_block()
-    skills = discover_skills()
     skill_catalog = bundle.skills
     memory_catalog = bundle.memories
     mcp_catalog = bundle.mcp
@@ -1694,12 +1694,13 @@ def _bootstrap_agent_run(
         task,
         {
             "display": display_ctx,
-            "skills": [s.name for s in skills],
+            "skills": list(bundle.skill_names),
             "voice": voice,
             "execution_route": (
                 {
                     "path": execution_route.path,
                     "lane": execution_route.lane,
+                    "difficulty": execution_route.difficulty,
                     "reason": execution_route.reason,
                 }
                 if execution_route is not None

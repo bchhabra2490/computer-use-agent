@@ -38,6 +38,26 @@ class DiscoverSkillsTests(unittest.TestCase):
             self.assertIn("Spotlight", found[0].description)
             self.assertIn("Cmd+Space", found[0].body)
 
+    def test_reuses_cached_snapshot_until_files_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_skill_md(root, "open-app", "Opens apps via Spotlight.", "## Steps\n\n1. Cmd+Space.\n")
+            first = sk.discover_skills(root)
+            second = sk.discover_skills(root)
+            self.assertEqual(len(first), 1)
+            self.assertIs(first[0], second[0])
+            _write_skill_md(root, "web-search", "Searches the web.", "## Steps\n\n1. Open Safari.\n")
+            third = sk.discover_skills(root)
+            self.assertEqual([s.name for s in third], ["open-app", "web-search"])
+
+    def test_skill_catalog_returns_parsed_metadata(self) -> None:
+        skills = [
+            sk.Skill("open-app", "Opens apps via Spotlight.", "body", Path("open-app/SKILL.md")),
+        ]
+        text, parsed = sk.skill_catalog(skills)
+        self.assertIn("open-app", text)
+        self.assertEqual([s.name for s in parsed], ["open-app"])
+
 
 class SkillCatalogTests(unittest.TestCase):
     def test_names_only_omits_descriptions(self) -> None:

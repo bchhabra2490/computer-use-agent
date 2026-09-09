@@ -88,6 +88,7 @@ from app_status import (
     speak_pending,
     consume_speak,
     take_turn_chat_screenshot,
+    turn_chat_id,
     unregister_orchestrator,
     utterance_pending,
 )
@@ -99,7 +100,7 @@ from bus import (
 from agent_jobs import AgentJob, start_agent_thread as _start_agent_thread
 from audio import AudioSession, bind_audio, get_audio
 from checkpoint import run_orchestrator_checkpoint
-from context import assemble_context, read_screen_vision_input
+from context import assemble_catalogs, read_screen_vision_input
 from events import emit
 from input_queues import (
     classify_utterance_for_agent,
@@ -116,7 +117,11 @@ from mcp_client import (
     start_mcp,
     stop_mcp,
 )
-from orchestrator_prompts import build_system_prompt, local_datetime_line
+from orchestrator_prompts import (
+    build_system_prompt,
+    conversation_context_block,
+    local_datetime_line,
+)
 from session import Session, bind_session, get_session
 from session_compact import (
     SessionCompactState,
@@ -130,7 +135,7 @@ from dictation import ensure_dictation_running, stop_dictation
 from stt import POST_TTS_COOLDOWN, NoSpeechError, ask_user, listen_once
 from task_spec import resolve_agent_task
 from task_feedback import collect_post_task_feedback, format_feedback_for_model
-from tools_registry import computer_use_enabled, orchestrator_tools, run_tool
+from tools_registry import computer_use_enabled, has_handler, orchestrator_tools, run_tool
 from barge_router import classify_barge_utterance
 from wake import (
     format_wake_phrases,
@@ -298,6 +303,7 @@ def _history_note(
     photo: bool = False,
     desktop_context: str = "",
     execution_route: str = "",
+    conversation_context: str = "",
 ) -> str:
     prefix = local_datetime_line() + "\n\n"
     if photo:
@@ -313,9 +319,17 @@ def _history_note(
     route_block = (execution_route or "").strip()
     if route_block:
         prefix += route_block + "\n\n"
+    convo = (conversation_context or "").strip()
+    if convo:
+        prefix += convo + "\n\n"
+    said = (
+        f"User said: {utterance}"
+        if reply_to_chat()
+        else f"User said (speech transcript, may be inaccurate): {utterance}"
+    )
     return (
         prefix
-        + f"User said: {utterance}\n\n"
+        + f"{said}\n\n"
         + f"Computer task history so far:\n"
         + _format_task_history(task_history, task_summary=task_summary)
     )
@@ -338,6 +352,7 @@ def _user_turn_input(
     desktop_context: str = "",
     desktop_screenshot_png: bytes | None = None,
     execution_route: str = "",
+    conversation_context: str = "",
 ) -> Any:
     """Build Responses API ``input`` for one user turn (optional phone + desktop images)."""
     note = _history_note(
@@ -347,6 +362,7 @@ def _user_turn_input(
         photo=bool(photo_jpeg),
         desktop_context=desktop_context,
         execution_route=execution_route,
+        conversation_context=conversation_context,
     )
     extras = list(pending_fn_outputs or [])
     images: list[tuple[str, bytes, str]] = []
@@ -928,7 +944,8 @@ def _launch_agent_job(
     job.execution_route = resolve_execution_route(spec.match_text or spec.goal)
     print(
         f"[orchestrator] route={job.execution_route.path}/"
-        f"{job.execution_route.lane} ({job.execution_route.reason})",
+        f"{job.execution_route.lane}/{job.execution_route.difficulty} "
+        f"({job.execution_route.reason})",
         flush=True,
     )
     from latency_report import current_trace_id, mark
@@ -1871,22 +1888,7 @@ def _handle_tool(
             )
             return None, False, job, None
 
-    elif call.name in {
-        "list_memories",
-        "read_memory",
-        "save_memory",
-        "save_screen_memory",
-        "who_am_i",
-        "mcp_call",
-        "list_open_apps",
-        "read_screen",
-        "set_timer",
-        "list_timers",
-        "cancel_timer",
-        "schedule_task",
-        "list_scheduled_tasks",
-        "cancel_scheduled_task",
-    }:
+    elif has_handler(call.name):
         outcome = run_tool(
             call.name,
             args,
@@ -2188,18 +2190,36 @@ def _shutdown_side_processes() -> None:
             pass
 
 
+def _recent_chat_history_block(utterance: str = "") -> str:
+    """Typed desktop-chat messages for STT repair (empty if none / store unavailable)."""
+    try:
+        from chat_store import format_recent_chat_block, get_store
+
+        store = get_store()
+        chat_id = (turn_chat_id() or "").strip() or store.active_chat_id()
+        if not chat_id:
+            return ""
+        return format_recent_chat_block(
+            store,
+            chat_id=chat_id,
+            current_utterance=utterance,
+        )
+    except Exception:
+        return ""
+
+
 def _orchestrator_system_prompt(
     mcp_rule: str,
     *,
     session_summary: str = "",
     memory_query: str | None = None,
     recent_turns: str = "",
+    chat_history: str = "",
     frontmost: str | None = None,
 ) -> str:
-    bundle = assemble_context(
+    bundle = assemble_catalogs(
         memory_query=memory_query,
         skill_detail="names",
-        occupancy_detail="omit",
         frontmost=frontmost,
     )
     return build_system_prompt(
@@ -2211,6 +2231,7 @@ def _orchestrator_system_prompt(
         mcp_rule=mcp_rule,
         session_summary=session_summary,
         recent_turns=recent_turns,
+        chat_history=chat_history,
         computer_use=computer_use_enabled(),
     )
 
@@ -2377,12 +2398,13 @@ def _run_one_voice_turn(
         metadata={
             "execution_path": execution_route.path,
             "specialist_lane": execution_route.lane,
+            "difficulty": execution_route.difficulty,
             "route_reason": execution_route.reason,
         },
     )
     print(
         f"[orchestrator] execution route → {execution_route.path}/"
-        f"{execution_route.lane} ({execution_route.reason})",
+        f"{execution_route.lane}/{execution_route.difficulty} ({execution_route.reason})",
         flush=True,
     )
     jpeg = None
@@ -2443,6 +2465,12 @@ def _run_one_voice_turn(
         desktop = cp.desktop
         desktop_context = desktop.text
         desktop_png = desktop.screenshot_png
+    chat_history = _recent_chat_history_block(utterance)
+    recent_turns = compact_state.recent_turns_block()
+    conversation_context = conversation_context_block(
+        chat_history=chat_history,
+        recent_turns=recent_turns,
+    )
     turn_input = _user_turn_input(
         utterance,
         task_history,
@@ -2452,6 +2480,7 @@ def _run_one_voice_turn(
         desktop_context=desktop_context,
         desktop_screenshot_png=desktop_png,
         execution_route=execution_route.prompt_block(),
+        conversation_context=conversation_context,
     )
     pending_fn_outputs = []
     turn = TurnTrace(utterance)
@@ -2459,7 +2488,8 @@ def _run_one_voice_turn(
         mcp_rule,
         session_summary=compact_state.session_summary,
         memory_query=utterance,
-        recent_turns=compact_state.recent_turns_block(),
+        recent_turns=recent_turns,
+        chat_history=chat_history,
         frontmost=getattr(cp.desktop, "frontmost", "") or None,
     )
 
@@ -2509,6 +2539,7 @@ def _run_one_voice_turn(
                     session_summary=compact_state.session_summary,
                     memory_query=utterance,
                     recent_turns=compact_state.recent_turns_block(),
+                    chat_history=chat_history,
                     frontmost=getattr(cp.desktop, "frontmost", "") or None,
                 )
                 if chat_shot:
@@ -2527,6 +2558,10 @@ def _run_one_voice_turn(
                     desktop_context=overflow_context,
                     desktop_screenshot_png=overflow_png,
                     execution_route=execution_route.prompt_block(),
+                    conversation_context=conversation_context_block(
+                        chat_history=chat_history,
+                        recent_turns=compact_state.recent_turns_block(),
+                    ),
                 )
                 return "continue", previous_id, task_history, pending_fn_outputs
             _announce_llm_failure(client, e)

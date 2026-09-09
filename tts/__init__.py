@@ -432,15 +432,6 @@ def speak(
     Phone-sink replies skip Mac playback and barge-in (the phone is the speaker).
     """
     tts_print(f"[tts] {text}")
-    try:
-        from voice_live import current, note_tts
-
-        sess = current()
-        if sess is not None and sess.alive:
-            sess.begin_tts_stream()
-        note_tts(text)
-    except Exception:
-        pass
     phone = _phone_reply_sink()
     enable = False if phone else (BARGE_IN_DEFAULT if barge_in is None else bool(barge_in))
     if enable:
@@ -456,14 +447,7 @@ def speak(
             pass
 
     monitor = None
-    live_event = None
-    try:
-        from voice_live import interrupt_event as live_interrupt
-
-        live_event = live_interrupt()
-    except Exception:
-        live_event = None
-    if enable and live_event is None:
+    if enable:
         try:
             from wake import ensure_persistent_wake
 
@@ -486,10 +470,10 @@ def speak(
         try:
             from keyboard_barge import acquire_tts_interrupt
 
-            interrupt_event, release = acquire_tts_interrupt(wake_event, live_event)
+            interrupt_event, release = acquire_tts_interrupt(wake_event)
         except Exception as exc:
             tts_print(f"[tts] keyboard barge unavailable ({exc})", force=True)
-            interrupt_event, release = wake_event or live_event, (lambda: None)
+            interrupt_event, release = wake_event, (lambda: None)
 
         if interrupt_event is None:
             play_wav(wav_bytes)

@@ -121,6 +121,58 @@ class ToolRegistryTests(unittest.TestCase):
     def test_unknown_shared_raises(self) -> None:
         with self.assertRaises(KeyError):
             tr.run_shared_tool("start_task", {"task": "x"})
+        out = tr.prepare_tool_call("start_task", {"task": "x"}, brain="orchestrator")
+        self.assertIsInstance(out, tr.ImmediateToolOutcome)
+
+    def test_registry_traces_handler_tools_only(self) -> None:
+        from llm_trace import registry_traces_tool
+
+        self.assertTrue(registry_traces_tool("schedule_task"))
+        self.assertTrue(registry_traces_tool("search_memories"))
+        self.assertFalse(registry_traces_tool("start_task"))
+        self.assertFalse(registry_traces_tool("give_response_to_user"))
+
+    def test_handlers_live_on_registry_entries(self) -> None:
+        self.assertTrue(tr.has_handler("list_open_apps"))
+        self.assertTrue(tr.has_handler("schedule_task"))
+        self.assertTrue(tr.has_handler("search_memories"))
+        self.assertTrue(tr.has_handler("send_chat_message"))
+        self.assertTrue(tr.has_handler("browser_data"))
+        self.assertTrue(tr.has_handler("browser_webmcp"))
+        self.assertTrue(tr.has_handler("mcp_call"))
+        for name in (
+            "start_task",
+            "ask_user",
+            "give_response_to_user",
+            "mark_done",
+            "list_skills",
+            "read_skill",
+            "read_ui_text",
+            "run_terminal",
+        ):
+            self.assertFalse(tr.has_handler(name), name)
+        self.assertIn("schedule_task", tr.SHARED_TOOL_NAMES)
+        self.assertNotIn("start_task", tr.SHARED_TOOL_NAMES)
+
+    def test_run_tool_records_outcome_once(self) -> None:
+        with patch("tools_registry._record_run") as record:
+            tr.run_tool(
+                "schedule_task",
+                {"task": "", "run_at_epoch": 1, "source": "user"},
+                brain="orchestrator",
+            )
+        record.assert_called_once()
+        with (
+            patch("displays.format_monitor_occupancy", return_value="ok"),
+            patch("tools_registry._record_run") as record,
+        ):
+            tr.run_tool("list_open_apps", {"unused": False}, brain="orchestrator")
+        record.assert_called_once()
+
+    def test_mcp_call_schema_not_duplicated(self) -> None:
+        with patch("mcp_client.mcp_openai_tools", return_value=[{"type": "function", "name": "mcp_call"}]):
+            names = [t.get("name") for t in tr.orchestrator_tools()]
+        self.assertEqual(names.count("mcp_call"), 1)
 
 
 if __name__ == "__main__":

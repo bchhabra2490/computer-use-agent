@@ -37,6 +37,18 @@ class ScreenPixelsTests(unittest.TestCase):
         self.assertFalse(ut.needs_screen_pixels("Send a middle finger emoji to basket."))
 
 
+class BrowserTabNeedTests(unittest.TestCase):
+    def test_browser_and_screen_requests(self) -> None:
+        self.assertTrue(ut.needs_browser_tabs("which chrome tab is that"))
+        self.assertTrue(ut.needs_browser_tabs("open https://example.com"))
+        self.assertTrue(ut.needs_browser_tabs("what is on my screen?"))
+
+    def test_unrelated_requests_skip(self) -> None:
+        self.assertFalse(ut.needs_browser_tabs("play old hindi songs"))
+        self.assertFalse(ut.needs_browser_tabs("open Notes"))
+        self.assertFalse(ut.needs_browser_tabs(""))
+
+
 class Utf8SanitizeTests(unittest.TestCase):
     def test_joins_surrogate_pair(self) -> None:
         raw = "\ud83d\udd95"

@@ -24,7 +24,7 @@ adapted for Windows and Linux.
 - Route requests through fast/slow paths and specialist execution lanes.
 - Learn reusable skills and recipes from completed or observed workflows.
 - Store personal, application, and screen memories.
-- Stream STT/TTS, keep a live voice socket open after wake until idle or "stop listening", support barge-in, and identify enrolled speakers.
+- Stream STT/TTS after a wake word, support barge-in, and identify enrolled speakers.
 - Save user-facing files under `~/Documents/Computer Use Agent/` by default.
 
 ## Architecture

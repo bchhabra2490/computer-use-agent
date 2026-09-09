@@ -200,6 +200,11 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(st.read_status().get("last_spoken"), "Ready.")
         self.assertEqual(st.consume_chat_inbox(), [])
 
+    def test_empty_consume_does_not_write_status(self) -> None:
+        with patch.object(st, "_write") as write:
+            self.assertEqual(st.consume_chat_inbox_items(), [])
+        write.assert_not_called()
+
     def test_concurrent_writes_use_unique_temp_files(self) -> None:
         import concurrent.futures
 

@@ -1,14 +1,17 @@
 """Single registry of function tools for the orchestrator and computer agent.
 
-Schemas live here once. ``openai_tools(brain)`` filters by who may call them.
-Shared handlers run through prepare → execute → finalize (harness-v2 §14).
-Brain-only tools (start_task, give_response, computer, …) stay in their loops.
+Each entry owns schema, brains, optional handler, and optional validator.
+``openai_tools(brain)`` filters schemas. ``run_tool`` is the one dispatch path
+for tools that have a handler. Lifecycle tools (start_task, give_response,
+ask_user, computer, mark_done, skills, terminal, …) keep handler=None and stay
+in their brain loops.
 """
 
 from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -636,25 +639,10 @@ DESKTOP_ACTIONS_TOOL = {
     },
 }
 
-SHARED_TOOL_NAMES = frozenset(
-    {
-        "who_am_i",
-        "list_memories",
-        "search_memories",
-        "read_memory",
-        "save_memory",
-        "save_screen_memory",
-        "send_chat_message",
-        "mcp_call",
-        "list_open_apps",
-        "read_screen",
-        "set_timer",
-        "list_timers",
-        "cancel_timer",
-        "browser_data",
-        "browser_webmcp",
-    }
-)
+MCP_CALL_TOOL = {"type": "function", "name": "mcp_call"}
+
+ToolHandler = Callable[..., "ToolOutcome"]
+ToolValidator = Callable[[dict[str, Any]], str | None]
 
 
 @dataclass(frozen=True)
@@ -662,6 +650,9 @@ class RegisteredTool:
     name: str
     schema: dict[str, Any]
     brains: frozenset[str]
+    handler: ToolHandler | None = field(default=None, hash=False, compare=False)
+    validator: ToolValidator | None = field(default=None, hash=False, compare=False)
+    expose_schema: bool = True
 
 
 @dataclass
@@ -725,50 +716,165 @@ def _finite_number(value: Any) -> float | None:
     return number
 
 
-def _validate_tool_args(name: str, args: dict[str, Any]) -> str | None:
-    if name == "schedule_task":
-        if not str(args.get("task") or "").strip():
-            return "Error: task is required"
-        epoch = args.get("run_at_epoch")
-        if epoch is None or epoch == "":
-            return "Error: run_at_epoch is required"
-        if _finite_number(epoch) is None:
-            return "Error: run_at_epoch must be a number"
-    if name == "cancel_scheduled_task":
-        has_id = bool(str(args.get("id") or "").strip())
-        has_task = bool(str(args.get("task") or "").strip())
-        if not has_id and not has_task:
-            return "Error: id or task required"
+def _validate_schedule_task(args: dict[str, Any]) -> str | None:
+    if not str(args.get("task") or "").strip():
+        return "Error: task is required"
+    epoch = args.get("run_at_epoch")
+    if epoch is None or epoch == "":
+        return "Error: run_at_epoch is required"
+    if _finite_number(epoch) is None:
+        return "Error: run_at_epoch must be a number"
     return None
 
 
-def _entry(schema: dict[str, Any], *brains: Brain) -> RegisteredTool:
-    return RegisteredTool(name=str(schema["name"]), schema=schema, brains=frozenset(brains))
+def _validate_cancel_scheduled_task(args: dict[str, Any]) -> str | None:
+    has_id = bool(str(args.get("id") or "").strip())
+    has_task = bool(str(args.get("task") or "").strip())
+    if not has_id and not has_task:
+        return "Error: id or task required"
+    return None
+
+
+def _handle_read_screen(_args: dict[str, Any], *, client: Any | None = None) -> ToolOutcome:
+    from context import read_screen, read_screen_vision_input
+
+    del client
+    screen = read_screen()
+    text = screen.text or "(No screen data captured.)"
+    extras: list[dict[str, Any]] = []
+    if screen.screenshot_png:
+        extras.append(read_screen_vision_input(screen.screenshot_png))
+    return ToolOutcome(output=text, extras=extras, screenshot_png=screen.screenshot_png)
+
+
+def _handle_send_chat_message(args: dict[str, Any], *, client: Any | None = None) -> ToolOutcome:
+    from chat_bridge import post_assistant_message
+
+    del client
+    message = str(args.get("message") or "").strip()
+    open_window = bool(args.get("open_window"))
+    result = post_assistant_message(message, open_window=open_window)
+    return ToolOutcome(
+        output=(
+            f"Posted message to chat {result['chat_id']}"
+            + (" and opened the chat window." if result["opened"] else ".")
+        )
+    )
+
+
+def _handle_list_open_apps(args: dict[str, Any], *, client: Any | None = None) -> ToolOutcome:
+    from displays import format_monitor_occupancy
+
+    del args, client
+    return ToolOutcome(output=format_monitor_occupancy(tab_limit=40))
+
+
+def _str_handler(
+    run: Callable[..., str] | tuple[str, str],
+    name: str | None = None,
+    *,
+    pass_client: bool = False,
+) -> ToolHandler:
+    """Wrap a str-returning tool. ``run`` may be ``(module, attr)`` for a lazy import."""
+
+    def handler(args: dict[str, Any], *, client: Any | None = None) -> ToolOutcome:
+        fn: Callable[..., str]
+        if isinstance(run, tuple):
+            module, attr = run
+            fn = getattr(__import__(module, fromlist=[attr]), attr)
+        else:
+            fn = run
+        if pass_client:
+            result = fn(name, args, client=client) if name is not None else fn(args, client=client)
+        else:
+            del client
+            result = fn(name, args) if name is not None else fn(args)
+        return _outcome_from_handler(result)
+
+    return handler
+
+
+def _entry(
+    schema: dict[str, Any],
+    *brains: Brain,
+    handler: ToolHandler | None = None,
+    validator: ToolValidator | None = None,
+    expose_schema: bool = True,
+) -> RegisteredTool:
+    return RegisteredTool(
+        name=str(schema["name"]),
+        schema=schema,
+        brains=frozenset(brains),
+        handler=handler,
+        validator=validator,
+        expose_schema=expose_schema,
+    )
 
 
 REGISTRY: tuple[RegisteredTool, ...] = (
-    _entry(WHO_AM_I_TOOL, ORCHESTRATOR, AGENT),
+    _entry(WHO_AM_I_TOOL, ORCHESTRATOR, AGENT, handler=_str_handler(run_whoami_tool, "who_am_i")),
     _entry(START_TASK_TOOL, ORCHESTRATOR),
     _entry(ASK_USER_TOOL, ORCHESTRATOR, AGENT),
     _entry(GIVE_RESPONSE_TOOL, ORCHESTRATOR),
-    _entry(SEND_CHAT_MESSAGE_TOOL, ORCHESTRATOR, AGENT),
-    *(_entry(tool, ORCHESTRATOR, AGENT) for tool in MEMORY_TOOLS),
-    _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT),
-    _entry(READ_SCREEN_TOOL, ORCHESTRATOR, AGENT),
-    _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT),
-    _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT),
-    _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT),
-    _entry(SCHEDULE_TASK_TOOL, ORCHESTRATOR, AGENT),
-    _entry(LIST_SCHEDULED_TASKS_TOOL, ORCHESTRATOR, AGENT),
-    _entry(CANCEL_SCHEDULED_TASK_TOOL, ORCHESTRATOR, AGENT),
-    _entry(BROWSER_DATA_TOOL, ORCHESTRATOR, AGENT),
-    _entry(WEBMCP_TOOL, ORCHESTRATOR, AGENT),
+    _entry(SEND_CHAT_MESSAGE_TOOL, ORCHESTRATOR, AGENT, handler=_handle_send_chat_message),
+    *(
+        _entry(
+            tool,
+            ORCHESTRATOR,
+            AGENT,
+            handler=_str_handler(run_memory_tool, str(tool["name"]), pass_client=True),
+        )
+        for tool in MEMORY_TOOLS
+    ),
+    _entry(LIST_OPEN_APPS_TOOL, ORCHESTRATOR, AGENT, handler=_handle_list_open_apps),
+    _entry(READ_SCREEN_TOOL, ORCHESTRATOR, AGENT, handler=_handle_read_screen),
+    _entry(SET_TIMER_TOOL, ORCHESTRATOR, AGENT, handler=_str_handler(("timers", "run_timer_tool"), "set_timer")),
+    _entry(LIST_TIMERS_TOOL, ORCHESTRATOR, AGENT, handler=_str_handler(("timers", "run_timer_tool"), "list_timers")),
+    _entry(CANCEL_TIMER_TOOL, ORCHESTRATOR, AGENT, handler=_str_handler(("timers", "run_timer_tool"), "cancel_timer")),
+    _entry(
+        SCHEDULE_TASK_TOOL,
+        ORCHESTRATOR,
+        AGENT,
+        handler=_str_handler(("scheduled_tasks", "run_scheduled_task_tool"), "schedule_task"),
+        validator=_validate_schedule_task,
+    ),
+    _entry(
+        LIST_SCHEDULED_TASKS_TOOL,
+        ORCHESTRATOR,
+        AGENT,
+        handler=_str_handler(("scheduled_tasks", "run_scheduled_task_tool"), "list_scheduled_tasks"),
+    ),
+    _entry(
+        CANCEL_SCHEDULED_TASK_TOOL,
+        ORCHESTRATOR,
+        AGENT,
+        handler=_str_handler(("scheduled_tasks", "run_scheduled_task_tool"), "cancel_scheduled_task"),
+        validator=_validate_cancel_scheduled_task,
+    ),
+    _entry(BROWSER_DATA_TOOL, ORCHESTRATOR, AGENT, handler=_str_handler(("browser_data", "run_browser_data_tool"))),
+    _entry(WEBMCP_TOOL, ORCHESTRATOR, AGENT, handler=_str_handler(("webmcp", "run_webmcp_tool"))),
+    _entry(
+        MCP_CALL_TOOL,
+        ORCHESTRATOR,
+        AGENT,
+        handler=_str_handler(("mcp_client", "run_mcp_tool"), "mcp_call"),
+        expose_schema=False,
+    ),
     _entry(LIST_SKILLS_TOOL, AGENT),
     _entry(READ_SKILL_TOOL, AGENT),
     _entry(READ_UI_TEXT_TOOL, AGENT),
     _entry(RUN_TERMINAL_TOOL, AGENT),
     _entry(MARK_DONE_TOOL, AGENT),
 )
+
+_BY_NAME: dict[str, RegisteredTool] = {item.name: item for item in REGISTRY}
+SHARED_TOOL_NAMES = frozenset(item.name for item in REGISTRY if item.handler is not None)
+
+
+def has_handler(name: str) -> bool:
+    """True when ``run_tool`` owns the implementation (not a brain-loop lifecycle tool)."""
+    item = _BY_NAME.get(name)
+    return item is not None and item.handler is not None
 
 
 def openai_tools(brain: Brain, *, provider: str = "openai") -> list[dict[str, Any]]:
@@ -784,6 +890,8 @@ def openai_tools(brain: Brain, *, provider: str = "openai") -> list[dict[str, An
     hide_computer = brain == ORCHESTRATOR and not computer_use_enabled()
     for item in REGISTRY:
         if brain not in item.brains:
+            continue
+        if not item.expose_schema:
             continue
         if hide_computer and item.name == "start_task":
             continue
@@ -809,8 +917,6 @@ def tool_names(brain: Brain, *, provider: str = "openai") -> set[str]:
             names.add("desktop_actions")
         else:
             names.add("computer")
-    names.add("mcp_call")
-    names.add("read_screen")
     return names
 
 
@@ -821,27 +927,16 @@ def prepare_tool_call(
     call_id: str = "",
     brain: Brain = ORCHESTRATOR,
 ) -> PreparedToolCall | ImmediateToolOutcome:
-    """Phase 1 — lookup + normalize args. No side effects."""
+    """Phase 1 — lookup + validate. No side effects."""
     args = dict(args or {})
-    known = tool_names(brain)
-    if name not in known and name not in SHARED_TOOL_NAMES:
+    entry = _BY_NAME.get(name)
+    if entry is None or brain not in entry.brains or entry.handler is None:
         return ImmediateToolOutcome(ToolOutcome(output=f"Unsupported tool: {name}", is_error=True))
-    invalid = _validate_tool_args(name, args)
-    if invalid:
-        return ImmediateToolOutcome(ToolOutcome(output=invalid, is_error=True))
+    if entry.validator is not None:
+        invalid = entry.validator(args)
+        if invalid:
+            return ImmediateToolOutcome(ToolOutcome(output=invalid, is_error=True))
     return PreparedToolCall(name=name, args=args, call_id=call_id or "")
-
-
-def _execute_read_screen(_args: dict[str, Any], *, client: Any | None = None) -> ToolOutcome:
-    from context import read_screen, read_screen_vision_input
-
-    del client
-    screen = read_screen()
-    text = screen.text or "(No screen data captured.)"
-    extras: list[dict[str, Any]] = []
-    if screen.screenshot_png:
-        extras.append(read_screen_vision_input(screen.screenshot_png))
-    return ToolOutcome(output=text, extras=extras, screenshot_png=screen.screenshot_png)
 
 
 def execute_prepared_tool(
@@ -849,59 +944,12 @@ def execute_prepared_tool(
     *,
     client: Any | None = None,
 ) -> ToolOutcome:
-    """Phase 2 — run the effect for shared / registered tools."""
-    name = prepared.name
-    args = prepared.args
+    """Phase 2 — run the registered handler."""
+    entry = _BY_NAME.get(prepared.name)
+    if entry is None or entry.handler is None:
+        return ToolOutcome(output=f"Unsupported tool: {prepared.name}", is_error=True)
     try:
-        if name == "read_screen":
-            return _execute_read_screen(args, client=client)
-        if name == "who_am_i":
-            return ToolOutcome(output=run_whoami_tool(name, args))
-        if name == "send_chat_message":
-            from chat_bridge import post_assistant_message
-
-            message = str(args.get("message") or "").strip()
-            open_window = bool(args.get("open_window"))
-            result = post_assistant_message(message, open_window=open_window)
-            return ToolOutcome(
-                output=(
-                    f"Posted message to chat {result['chat_id']}"
-                    + (" and opened the chat window." if result["opened"] else ".")
-                )
-            )
-        if name in {
-            "list_memories",
-            "search_memories",
-            "read_memory",
-            "save_memory",
-            "save_screen_memory",
-        }:
-            return _outcome_from_handler(run_memory_tool(name, args, client=client))
-        if name == "mcp_call":
-            from mcp_client import run_mcp_tool
-
-            return _outcome_from_handler(run_mcp_tool(name, args))
-        if name == "list_open_apps":
-            from displays import format_monitor_occupancy
-
-            return ToolOutcome(output=format_monitor_occupancy(tab_limit=40))
-        if name in {"set_timer", "list_timers", "cancel_timer"}:
-            from timers import run_timer_tool
-
-            return _outcome_from_handler(run_timer_tool(name, args))
-        if name in {"schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"}:
-            from scheduled_tasks import run_scheduled_task_tool
-
-            return _outcome_from_handler(run_scheduled_task_tool(name, args))
-        if name == "browser_data":
-            from browser_data import run_browser_data_tool
-
-            return _outcome_from_handler(run_browser_data_tool(args))
-        if name == "browser_webmcp":
-            from webmcp import run_webmcp_tool
-
-            return _outcome_from_handler(run_webmcp_tool(args))
-        return ToolOutcome(output=f"Unsupported tool: {name}", is_error=True)
+        return entry.handler(prepared.args, client=client)
     except ToolHandlerError as e:
         return ToolOutcome(output=f"Error: {e}", is_error=True)
     except Exception as e:
@@ -915,50 +963,17 @@ def finalize_tool_outcome(outcome: ToolOutcome) -> ToolOutcome:
     return outcome
 
 
-def run_tool(
-    name: str,
-    args: dict[str, Any] | None = None,
+def _record_run(
     *,
-    client: Any | None = None,
-    call_id: str = "",
-    brain: Brain = ORCHESTRATOR,
-) -> ToolOutcome:
-    """prepare → execute → finalize for shared tools."""
+    name: str,
+    args: dict[str, Any] | None,
+    outcome: ToolOutcome,
+    call_id: str,
+    lane: str,
+    started: float,
+) -> None:
     import time
 
-    from events import emit
-
-    lane = "agent" if brain == AGENT else "main"
-    started = time.perf_counter()
-    prepared = prepare_tool_call(name, args, call_id=call_id, brain=brain)
-    if isinstance(prepared, ImmediateToolOutcome):
-        outcome = finalize_tool_outcome(prepared.outcome)
-        try:
-            from llm_trace import record_registry_tool
-
-            record_registry_tool(
-                name=name,
-                args=args,
-                output=outcome.output,
-                call_id=call_id,
-                lane=lane,
-                is_error=outcome.is_error,
-                duration_ms=round((time.perf_counter() - started) * 1000),
-            )
-        except Exception:
-            pass
-        return outcome
-    emit("tool_start", lane=lane, name=name, call_id=call_id)
-    outcome = execute_prepared_tool(prepared, client=client)
-    outcome = finalize_tool_outcome(outcome)
-    emit(
-        "tool_result",
-        lane=lane,
-        name=name,
-        call_id=call_id,
-        chars=len(outcome.output or ""),
-        is_error=outcome.is_error,
-    )
     try:
         from llm_trace import record_registry_tool
 
@@ -973,6 +988,45 @@ def run_tool(
         )
     except Exception:
         pass
+
+
+def run_tool(
+    name: str,
+    args: dict[str, Any] | None = None,
+    *,
+    client: Any | None = None,
+    call_id: str = "",
+    brain: Brain = ORCHESTRATOR,
+) -> ToolOutcome:
+    """prepare → execute → finalize for registered handlers. Records the outcome once."""
+    import time
+
+    from events import emit
+
+    lane = "agent" if brain == AGENT else "main"
+    started = time.perf_counter()
+    prepared = prepare_tool_call(name, args, call_id=call_id, brain=brain)
+    if isinstance(prepared, ImmediateToolOutcome):
+        outcome = finalize_tool_outcome(prepared.outcome)
+    else:
+        emit("tool_start", lane=lane, name=name, call_id=call_id)
+        outcome = finalize_tool_outcome(execute_prepared_tool(prepared, client=client))
+        emit(
+            "tool_result",
+            lane=lane,
+            name=name,
+            call_id=call_id,
+            chars=len(outcome.output or ""),
+            is_error=outcome.is_error,
+        )
+    _record_run(
+        name=name,
+        args=args,
+        outcome=outcome,
+        call_id=call_id,
+        lane=lane,
+        started=started,
+    )
     return outcome
 
 

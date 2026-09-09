@@ -302,6 +302,28 @@ class RunningAppsAndTabsTests(unittest.TestCase):
             self.assertFalse(disp.list_tabs_enabled())
             self.assertEqual(disp.list_browser_tabs(), [])
 
+    def test_skips_tab_script_unless_task_needs_tabs(self) -> None:
+        single = [_monitor(0, "Built-in", main=True, x=0, y=0, width=1440, height=900)]
+        with (
+            patch.object(disp, "list_windows_by_monitor", return_value=[]),
+            patch.object(disp, "list_open_apps", return_value=["Notes"]),
+            patch.object(disp, "_frontmost_name", return_value="Notes"),
+            patch.object(disp, "list_browser_tabs", return_value=[]) as tabs,
+        ):
+            notes = disp.format_monitor_occupancy(monitors=single, task="open Notes")
+            tabs.assert_not_called()
+            self.assertNotIn("Browser tabs:", notes)
+
+            chrome = disp.format_monitor_occupancy(
+                monitors=single, task="which chrome tab is active"
+            )
+            tabs.assert_called_once()
+            self.assertIn("Browser tabs:", chrome)
+
+            tabs.reset_mock()
+            disp.format_monitor_occupancy(monitors=single)
+            tabs.assert_called_once()
+
 
 class LiveLayoutMemorySkipTests(unittest.TestCase):
     def test_condense_ignores_long_displays_note(self) -> None:

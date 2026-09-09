@@ -35,9 +35,11 @@ def test_voice_to_first_action_trace_and_report(tmp_path: Path) -> None:
         assert saved is not None
         assert saved["durations_ms"]["voice_to_first_action"] == 1_700
         assert saved["durations_ms"]["wake_to_transcript"] == 500
+        assert not report.is_file()
         payload = latency_report.report_payload()
         assert payload["completed_action_count"] == 1
         assert payload["metrics"]["voice_to_first_action"]["median_ms"] == 1_700
+        latency_report.build_report(payload=payload)
         assert report.is_file()
         assert "Voice → first action" in report.read_text(encoding="utf-8")
 
@@ -65,3 +67,18 @@ def test_corrupt_trace_lines_are_ignored(tmp_path: Path) -> None:
     ):
         rows = latency_report.read_traces()
         assert [row["id"] for row in rows] == ["ok"]
+
+
+def test_read_traces_tails_without_full_file(tmp_path: Path) -> None:
+    folder, traces, report = _paths(tmp_path)
+    folder.mkdir(parents=True)
+    body = "".join(f'{{"id":"{i}","durations_ms":{{}}}}\n' for i in range(50))
+    traces.write_text(body, encoding="utf-8")
+    with (
+        patch.object(latency_report, "LATENCY_DIR", folder),
+        patch.object(latency_report, "TRACES_PATH", traces),
+        patch.object(latency_report, "REPORT_PATH", report),
+        patch.object(Path, "read_text", side_effect=AssertionError("unbounded read")),
+    ):
+        rows = latency_report.read_traces(limit=3)
+    assert [row["id"] for row in rows] == ["47", "48", "49"]

@@ -1,41 +1,41 @@
 # Graph Report - computer-use-agent  (2026-09-09)
 
 ## Corpus Check
-- 258 files · ~229,566 words
+- 256 files · ~231,823 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 4086 nodes · 9104 edges · 235 communities (173 shown, 60 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 320 edges (avg confidence: 0.88)
+- 4123 nodes · 9134 edges · 229 communities (168 shown, 59 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 321 edges (avg confidence: 0.88)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4ded95dc`
+- Built from commit: `c315d00d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- speak
+- terminal.py
 - face_overlay.py
 - app.js
-- orchestrator.py
-- status_control.py
+- computer_use_enabled
+- app_status.py
 - timed
 - llm_trace.py
-- task_feedback.py
+- speak
 - log_overlay.py
 - wake.py
 - PhoneGatewayHttpTests
-- listen_realtime
+- judge.py
 - skills.py
-- _create_response
-- emit
+- OpenAI
+- _handle_tool
 - agent.py
-- running_pid
+- PhoneGatewayHandler
 - TrayController
-- speaker_id.py
-- _process_response
-- ChatStore
+- ChatBridgeHandler
+- _StreamSession
+- Any
 - audio.py
 - displays.py
 - LowLatencyTTS
@@ -44,16 +44,16 @@
 - Focus
 - browser_data.py
 - tts/__init__.py
-- recipes.py
+- task_feedback.py
 - resolve_execution_route
 - context.py
 - memory.py
 - llm_client.py
-- read_status
-- tools_registry.py
-- webmcp.py
 - try_recipe
-- voice_live.py
+- tools_registry.py
+- mcp_client.py
+- _bind_recipe
+- FanNoiseFilter
 - FlagTests
 - dictation_overlay.py
 - evaluator.py
@@ -64,85 +64,85 @@
 - test_actions.py
 - test_wake.py
 - latency_report.py
-- test_orchestrator_task_guard.py
+- TurnTrace
 - memory_graph.py
-- Session
+- resolve_agent_task
 - MainTests
-- Recipe
+- recipes.py
 - dictation.py
-- test_chat_llm.py
+- _connect
 - mcp_auth.py
 - FileTokenStorage
-- log
+- test_face_overlay.py
 - LiveStdioTests
 - accessibility.py
 - observe.py
-- OpenAI
-- test_low_latency_tts.py
-- judge.py
+- test_orchestrator_questions.py
+- low_latency.py
+- Session
 - _seed_dir
 - FaceOverlay
-- mcp_client.py
-- resolve_agent_task
-- capture_and_save_screen
-- AskUserBridge
+- emit
+- build_system_prompt
+- ._run_one
+- load_dotenv
 - phone_gateway.py
 - main.js
-- McpManager
+- session_compact.py
 - test_artifact_paths.py
 - DraftAcceptTests
 - LiveDictationPaster
 - stt_race.py
 - ConfigUpsertTests
-- kokoro.py
+- pid_alive
 - Observer
-- checkpoint.py
+- log
 - speaker_output.py
-- piper.py
+- Recipe
 - whoami.py
-- utterance_match.py
+- ScheduledTaskTests
 - WakeMonitor
-- test_face_overlay.py
+- test_barge_router.py
 - keyboard_barge.py
 - TurnDesktopContextTests
 - FnFlagTests
-- ndarray
+- collect_next_input
 - test_session_compact.py
-- ChatBridgeHandler
+- test_recipes.py
 - package.json
 - Personal Computer Use Agent
 - WhisperflowProviderTests
-- _connect
-- resolve_blobatar
+- test_harness_structure.py
+- current_blobatar
 - TimerToolTests
 - speaker_enroll.py
-- WindowBuffer
-- LogOverlay
-- app_status.py
+- test_observe.py
+- phonon.py
+- read_status
 - webmcp_chromium.mjs
 - ChatStreamTests
-- current_blobatar
+- blobatar_png_bytes
 - ToolRegistryTests
 - CallbackServer
 - SimpleNamespace
-- parse_json_dict
+- ChatBridgeQueueTests
 - open-meteo-current-weather-report/SKILL.md
 - echo_mcp_server.py
-- listen_end_spotter
-- terminal.py
+- checkpoint.py
+- ._conn
 - mcp_compat.py
 - test_mcp_compat.py
-- ensure_persistent_wake
+- PersistInboxTests
 - tts_print
-- load_dotenv
+- run_prelude
 - test_stt_phone.py
 - netflix-resume-continue-watching
 - organize-downloads-by-extension
-- Any
-- phonon.py
+- _process_response
+- ChatStore
 - detect-usb-serial-bridges/SKILL.md
 - LlmClientTests
-- ChatScreenshotTurnTests
+- BearerTokenAuth
 - Email snapshot schema
 - GraphMemoryTests
 - face_mood_for_state
@@ -157,7 +157,7 @@
 - web-form-fill-attach-resume-and-pause
 - test_chat_bridge_mcp.py
 - stt/__init__.py
-- PhoneTtsSinkTests
+- list_speaker_payload
 - Text-to-speech output from speakers re-triggers the microphone wake detector
 - diagramsnet-create-and-export-diagram
 - git-merge-branch-into-main-with-backup
@@ -182,7 +182,7 @@
 - instagram-send-dm-by-name
 - mac-clock-set-timer
 - live-device-scan-loop/SKILL.md
-- _supervise_agent
+- orchestrator.py
 - convert-chart-figures-to-usd/SKILL.md
 - cursor-generate-project-from-prompt/SKILL.md
 - disable-terminal-bell-and-system-ui-sounds/SKILL.md
@@ -200,7 +200,7 @@
 - inspect-suspicious-downloaded-installer/SKILL.md
 - restore-ui-exit-or-kill-fullscreen-or-hung-process/SKILL.md
 - rotate-and-clear-browser-sessions/SKILL.md
-- chat_store.py
+- .inbox_persist_view
 - status_tray_controller.py
 - open-diagrams-from-folder/SKILL.md
 - actions.py
@@ -210,93 +210,87 @@
 - upwork-evaluate-and-apply/SKILL.md
 - upwork-update-profile-from-resume/SKILL.md
 - SmartTurnClassifier
-- FacePayloadTests
+- MessageRow
 - mood_eye_pose
-- _apply_recipe_start
-- PersistInboxTests
 - WebMCPTests
+- type_text
+- _FakeResponsesClient
 - scheduled_tasks.py
-- ScreenshotDisplayPrefTests
-- ScheduledTaskTests
-- format_monitor_occupancy
-- test_recipes.py
+- test_chat_llm.py
+- chat_store.py
+- active_tts_voice
+- FacePayloadTests
 - x-open-linkedin-from-profile/SKILL.md
 - cua.py
 - google-maps-locate-news-event/SKILL.md
 - conftest.py
-- test_barge_router.py
-- type_text
-- timing.py
-- FanNoiseFilter
-- _FakeResponsesClient
-- ChatBridgeQueueTests
-- ._run_one
-- ToolHandlerError
-- ComputerUseGateTests
-- OverlayFrameTests
-- active_tts_voice
-- _MarkdownParser
-- test_harness_structure.py
+- PublicApiTests
+- test_pi_agent.py
 - MatchTemplateTests
-- enroll_speaker
-- google-maps-share-directions-to-desktop-chat/SKILL.md
+- ToolHandlerError
+- ScreenshotDisplayPrefTests
 - RendererHttpTests
+- cmd_sleep
 - UrlSafetyTests
-- list_speaker_payload
-- BearerTokenAuth
-- .on_fn_edge
+- _StatusLock
+- test_tts_local.py
+- PhoneTtsSinkTests
+- ChatScreenshotTurnTests
+- speaker_id.py
+- google-maps-share-directions-to-desktop-chat/SKILL.md
+- run_orchestrator
+- prepare_tool_call
 - chrome-extract-article-and-compare-to-agent-capabilities/SKILL.md
-- .save_screenshot
-- _transcription_session
+- timing.py
 
 ## God Nodes (most connected - your core abstractions)
 1. `read_status()` - 59 edges
 2. `TaskLog` - 55 edges
 3. `_read()` - 46 edges
-4. `TrayController` - 40 edges
-5. `_write()` - 37 edges
-6. `ChatBridgeHandler` - 33 edges
-7. `_process_response()` - 33 edges
-8. `LowLatencyTTS` - 33 edges
-9. `ChatStore` - 32 edges
+4. `ChatStore` - 42 edges
+5. `TrayController` - 40 edges
+6. `_write()` - 37 edges
+7. `ChatBridgeHandler` - 33 edges
+8. `_process_response()` - 33 edges
+9. `LowLatencyTTS` - 33 edges
 10. `pid_alive()` - 32 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `_print_and_log_messages()` --uses--> `TaskLog`  [INFERRED]
   agent.py → task_log.py
+- `_handle_ask_user()` --calls--> `is_mark_done_utterance()`  [INFERRED]
+  agent.py → status_control.py
 - `_handle_ask_user()` --uses--> `TaskLog`  [INFERRED]
   agent.py → task_log.py
 - `_handle_list_skills()` --uses--> `TaskLog`  [INFERRED]
   agent.py → task_log.py
 - `_handle_read_skill()` --uses--> `TaskLog`  [INFERRED]
   agent.py → task_log.py
-- `_handle_read_ui_text()` --uses--> `TaskLog`  [INFERRED]
-  agent.py → task_log.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (235 total, 60 thin omitted)
+## Communities (229 total, 59 thin omitted)
 
-### Community 0 - "speak"
-Cohesion: 0.13
-Nodes (23): ask_user(), choose_transcript(), _consume_phone_utterance(), listen_and_confirm(), listen_for_utterance(), listen_once(), _normalize_reply(), OpenAI (+15 more)
+### Community 0 - "terminal.py"
+Cohesion: 0.43
+Nodes (6): _decode(), _format_report(), Run local shell commands for the computer-use agent. Captures stdout/stderr…, Execute `command` via the user's shell and return a text report. Uses the shell…, run_command(), _truncate()
 
 ### Community 1 - "face_overlay.py"
-Cohesion: 0.24
-Nodes (17): cmd_face(), _extras_circle(), _feed(), _finalize(), format_blobatar_list(), _hashed_blobatar(), _i32(), _imul() (+9 more)
+Cohesion: 0.28
+Nodes (15): _extras_circle(), _feed(), _finalize(), _hashed_blobatar(), _i32(), _imul(), _int(), _jitter() (+7 more)
 
 ### Community 2 - "app.js"
 Cohesion: 0.06
-Nodes (85): acceptDrafts(), applyCustomFace(), applyDisplaysPayload(), applyFaceStatus(), applyObserveStatus(), autosize(), boot(), bufferToBase64() (+77 more)
+Nodes (86): acceptDrafts(), applyCustomFace(), applyDisplaysPayload(), applyFaceStatus(), applyObserveStatus(), autosize(), boot(), bufferToBase64() (+78 more)
 
-### Community 3 - "orchestrator.py"
-Cohesion: 0.07
-Nodes (48): phone_photo_pending(), bind_audio(), stop_dictation(), abandon_trace(), current_trace_id(), Persist an incomplete trace so failed voice turns remain observable., orchestrator_provider(), is_save_screen_utterance() (+40 more)
+### Community 3 - "computer_use_enabled"
+Cohesion: 0.20
+Nodes (10): Brain, ToolHandler, computer_use_enabled(), _entry(), False in Pi / headless mode: hide ``start_task`` from the orchestrator., Wrap a str-returning tool. ``run`` may be ``(module, attr)`` for a lazy import., RegisteredTool, _str_handler() (+2 more)
 
-### Community 4 - "status_control.py"
-Cohesion: 0.07
-Nodes (57): _cleanup_agent_run(), ModuleType, apply_control(), active_agents(), cancel_pending(), clear_cancel(), clear_mark_done(), clear_quit_request() (+49 more)
+### Community 4 - "app_status.py"
+Cohesion: 0.10
+Nodes (54): _cleanup_agent_run(), Shared live status + recent log lines for the macOS menu-bar tray. Orchestrator…, ModuleType, apply_control(), active_agents(), cancel_pending(), clear_cancel(), clear_mark_done() (+46 more)
 
 ### Community 5 - "timed"
 Cohesion: 0.18
@@ -304,75 +298,75 @@ Nodes (25): Log how long ``fn`` took. Timestamp is when the step finished., time
 
 ### Community 6 - "llm_trace.py"
 Cohesion: 0.05
-Nodes (83): _attach_llm_trace(), bind_events(), _default_logger(), Event, EventSink, get_events(), Any, BaseException (+75 more)
+Nodes (79): _attach_llm_trace(), bind_events(), _default_logger(), Event, EventSink, get_events(), Any, BaseException (+71 more)
 
-### Community 7 - "task_feedback.py"
-Cohesion: 0.15
-Nodes (21): classify_yes_no(), Return 'yes', 'no', 'quit', 'retry', or None if unclear., collect_post_task_feedback(), feedback_enabled(), format_feedback_for_model(), interpret_feedback_text(), load_task_actions(), Any (+13 more)
+### Community 7 - "speak"
+Cohesion: 0.05
+Nodes (57): ask_user(), choose_transcript(), classify_yes_no(), _consume_phone_utterance(), _dictation_provider(), _end_phrase_live_enabled(), listen_and_confirm(), listen_dictation() (+49 more)
 
 ### Community 8 - "log_overlay.py"
-Cohesion: 0.08
-Nodes (27): Ask the tray overlay to hide (True) or show (False) for a screenshot., set_overlay_hidden(), format_overlay_text(), overlay_enabled(), overlay_frame_top_left(), overlay_owner_alive(), overlay_should_show(), overlay_target_monitor() (+19 more)
+Cohesion: 0.07
+Nodes (28): format_overlay_text(), LogOverlay, overlay_enabled(), overlay_frame_top_left(), overlay_owner_alive(), overlay_should_show(), overlay_target_monitor(), pause_overlay_for_capture() (+20 more)
 
 ### Community 9 - "wake.py"
-Cohesion: 0.05
-Nodes (66): _strip_listen_wake(), _afplay(), _default_end_model_spec(), _default_phrase_for_models(), _default_wake_model(), _download_file(), _ensure_model(), format_end_listen_phrases() (+58 more)
+Cohesion: 0.04
+Nodes (72): Wake-word → Sarvam TTS speaker mapping., SpeakLaterTests, _afplay(), _default_end_model_spec(), _default_phrase_for_models(), _default_wake_model(), _download_file(), _ensure_model() (+64 more)
 
 ### Community 10 - "PhoneGatewayHttpTests"
 Cohesion: 0.05
 Nodes (8): AdvertiseUrlsTests, EnsureGatewayTests, PhoneAudioIngestTests, PhoneGatewayEnabledTests, PhoneGatewayHttpTests, PhoneGatewayTokenTests, PhonePhotoIngestTests, Phone gateway: env switch, auth, command queue (no live network bind required).
 
-### Community 11 - "listen_realtime"
-Cohesion: 0.09
-Nodes (26): _dictation_provider(), _EndPhraseWatcher, listen_realtime(), _listen_record_then_transcribe(), _listen_sarvam(), _listen_whisperflow(), One-shot file transcription (OpenAI, Sarvam, WhisperFlow, or Phonon)., On-device file STT (no OpenAI Realtime sidecar). (+18 more)
+### Community 11 - "judge.py"
+Cohesion: 0.20
+Nodes (22): _clip_text(), _format_artifact(), _format_llm_trace(), _format_steps(), _judge_max_chars(), JudgeVerdict, load_fixture(), _load_llm_trace() (+14 more)
 
 ### Community 12 - "skills.py"
-Cohesion: 0.11
-Nodes (39): cmd_condense_skills(), cmd_merge_skills(), _condense_one_skill(), condense_skills(), delete_skill_folder(), discover_skills(), format_skill_catalog(), _format_skills_for_merge() (+31 more)
+Cohesion: 0.10
+Nodes (45): _handle_read_skill(), _cache_key(), _condense_one_skill(), condense_skills(), delete_skill_folder(), _dir_stamp(), discover_skills(), format_skill_catalog() (+37 more)
 
-### Community 13 - "_create_response"
+### Community 13 - "OpenAI"
 Cohesion: 0.07
-Nodes (28): True when this turn was queued from the Electron chat app., reply_to_chat(), input_has_image(), merge_tool_followup_input(), ``function_call`` items immediately followed by their outputs (DeepSeek)., True if a Responses ``input`` tree contains an ``input_image`` part., _create_response(), _exception_blob() (+20 more)
+Nodes (40): _continue_response(), Follow-up Responses turn. DeepSeek must replay function_call items (stateless)., input_has_image(), merge_tool_followup_input(), model_for_request(), DeepSeek Responses is stateless and ignores ``previous_response_id``., ``function_call`` items immediately followed by their outputs (DeepSeek)., True if a Responses ``input`` tree contains an ``input_image`` part. (+32 more)
 
-### Community 14 - "emit"
-Cohesion: 0.08
-Nodes (24): AgentMessageInbox, AgentMessagePublisher, extract_jarvis_command(), ZeroMQ message bus: orchestrator → computer agent (while agent is running).…, Return the command after a leading wake phrase, or None if absent. Kept for…, Orchestrator side: enqueue user directives for a running agent., Agent side: non-blocking drain of queued orchestrator messages., Legacy: return steer + follow_up texts only (next_run excluded). (+16 more)
+### Community 14 - "_handle_tool"
+Cohesion: 0.18
+Nodes (19): chat_text_only(), log_llm(), Put an LLM reply in the status log (and ``last_llm``) for the phone / tray., Chat turn with speaker off — reply in the UI, not via TTS or status blurbs., reply_tts_enabled(), set_last_spoken(), _handle_tool(), _listen_for_answer() (+11 more)
 
 ### Community 15 - "agent.py"
 Cohesion: 0.07
-Nodes (60): DesktopController, Wraps pyautogui with coordinate remapping between screenshot space and actual…, _action_summary(), _agent_one_turn(), _agent_prompt_body(), _bootstrap_agent_run(), _collect_computer_outputs(), _collect_desktop_outputs() (+52 more)
+Nodes (58): DesktopController, Wraps pyautogui with coordinate remapping between screenshot space and actual…, _action_summary(), _agent_one_turn(), _agent_prompt_body(), _bootstrap_agent_run(), _collect_computer_outputs(), _collect_desktop_outputs() (+50 more)
 
-### Community 16 - "running_pid"
-Cohesion: 0.13
-Nodes (20): _cleanup_side_processes(), _clear_pid_file(), cmd_status(), cmd_stop(), find_agent_pids(), kill_agent_pids(), _orchestrator_pid_from_status(), _pgrep_pids() (+12 more)
+### Community 16 - "PhoneGatewayHandler"
+Cohesion: 0.17
+Nodes (12): enqueue_utterance(), Queue a text command (chat, phone, or API). Orchestrator consumes it like STT.…, ingest_phone_audio(), ingest_phone_photo(), phone_status_payload(), PhoneGatewayHandler, Any, BaseHTTPRequestHandler (+4 more)
 
 ### Community 17 - "TrayController"
+Cohesion: 0.15
+Nodes (4): NSObject, python_method, Main-thread entry for SIGTERM/SIGINT (see _signal_quit)., TrayController
+
+### Community 18 - "ChatBridgeHandler"
+Cohesion: 0.11
+Nodes (12): _chat_row(), ChatBridgeHandler, displays_payload(), inbox_persist_view(), _json_body(), _parse_display_indexes(), BaseHTTPRequestHandler, None = all displays. Empty list also means all. (+4 more)
+
+### Community 19 - "_StreamSession"
 Cohesion: 0.14
-Nodes (5): ack_overlay_hidden(), Tray confirms the panel is actually off-screen (or back)., NSObject, python_method, TrayController
+Nodes (7): _StreamSession, DecodedMessagePrefixTests, Unit tests for low-latency streaming TTS public API and helpers., decoded_message_prefix(), extract_message_field(), Best-effort final ``message`` from complete or nearly-complete tool JSON., Decode the valid prefix of a possibly incomplete JSON ``message`` value.
 
-### Community 18 - "speaker_id.py"
-Cohesion: 0.16
-Nodes (22): _accept_match(), identify(), _identify_wav_bytes(), list_profiles(), _profile_backend(), _profile_compatible(), Any, Local speaker enrollment and identification from short mic clips. Profiles live… (+14 more)
-
-### Community 19 - "_process_response"
-Cohesion: 0.04
-Nodes (40): registry_traces_tool(), User utterance plus each LLM step (replies, tool calls, results)., TurnTrace, _assistant_message_text(), _confirm_heard_enabled(), _give_response_closes_turn(), _looks_like_claimed_action(), _looks_like_question() (+32 more)
-
-### Community 20 - "ChatStore"
-Cohesion: 0.22
-Nodes (5): ChatRow, ChatStore, Thread-safe SQLite store for chats / messages / prefs., Remove chat, cascaded messages, and screenshot files for this chat., _utc_now()
+### Community 20 - "Any"
+Cohesion: 0.20
+Nodes (21): _as_mapping(), assign_windows_to_monitors(), _cg_window_list(), frontmost_window_info(), _keep_window(), list_windows_by_monitor(), monitor_containing_point(), monitor_for_app_window() (+13 more)
 
 ### Community 21 - "audio.py"
-Cohesion: 0.09
-Nodes (23): Whether the current turn should speak replies (vs chat text only)., Tag the current orchestrator turn (chat / voice / phone / …)., set_reply_tts(), set_turn_source(), AudioSession, OpenAI, Session, Single owner for wake, STT, TTS, and barge-in. The capture implementations stay… (+15 more)
+Cohesion: 0.06
+Nodes (54): Where the next TTS line should play: Mac speakers or the phone., Whether the current turn should speak replies (vs chat text only)., Tag the current orchestrator turn (chat / voice / phone / …)., set_reply_sink(), set_reply_tts(), set_turn_source(), speak_pending(), utterance_pending() (+46 more)
 
 ### Community 22 - "displays.py"
-Cohesion: 0.21
-Nodes (24): _as_mapping(), assign_windows_to_monitors(), _cg_window_list(), _clip_url(), format_browser_tabs(), frontmost_window_info(), _keep_window(), list_windows_by_monitor() (+16 more)
+Cohesion: 0.15
+Nodes (20): _clip_url(), format_browser_tabs(), format_monitor_occupancy(), format_running_apps(), _frontmost_name(), list_browser_tabs(), list_open_apps(), list_tabs_enabled() (+12 more)
 
 ### Community 23 - "LowLatencyTTS"
-Cohesion: 0.08
-Nodes (20): concat_wavs(), Join WAV blobs that share the same format (streaming TTS chunks)., Print a ``[tts-latency] …`` line when TTS_LATENCY_LOG=1., tts_latency_print(), LowLatencyTTS, OpenAI, Path, Non-blocking, chunked TTS pipeline used by the voice orchestrator. Public API… (+12 more)
+Cohesion: 0.10
+Nodes (13): LowLatencyTTS, Thread-safe two-stage (synthesis → playback) streaming TTS pipeline., Reuse the process-wide persistent wake monitor (never stop it here)., Wake and/or keyboard interrupt event + release callback., Stop remaining synthesis/playback after a wake-word barge-in., Begin a streaming TTS session for ``response_id`` (public API)., Append plaintext to the active stream and queue speakable clauses., Finalize the active stream: flush remaining text into the synth queue. (+5 more)
 
 ### Community 24 - "CondenseMemoryTests"
 Cohesion: 0.05
@@ -383,84 +377,84 @@ Cohesion: 0.12
 Nodes (10): CondenseParseTests, CondenseRunTests, CuaSkillsCommandTests, DiscoverSkillsTests, MergeParseTests, MergeRunTests, Path, Tests for skill discovery and cua skills condense. (+2 more)
 
 ### Community 26 - "Focus"
-Cohesion: 0.11
-Nodes (7): Focus, SessionBuffer, ExcludeAppTests, FocusedDisplayCaptureTests, ObserverFlushTests, Tests for the passive observer (session flush, drafts, accept)., SessionBufferTests
+Cohesion: 0.14
+Nodes (4): Focus, SessionBuffer, ObserverFlushTests, SessionBufferTests
 
 ### Community 27 - "browser_data.py"
-Cohesion: 0.15
-Nodes (29): _apply_operation(), BrowserDataError, _chromium_binary(), _decode(), discover_endpoints(), _discovery_terms(), _endpoint_score(), fetch_chromium() (+21 more)
+Cohesion: 0.08
+Nodes (47): _apply_operation(), BrowserDataError, _chromium_binary(), _decode(), discover_endpoints(), _discovery_terms(), _endpoint_score(), fetch_chromium() (+39 more)
 
 ### Community 28 - "tts/__init__.py"
 Cohesion: 0.15
 Nodes (23): _apply_fade(), _numpy(), _play_afplay(), _play_sounddevice(), OpenAI, Path, Text-to-speech for agent prompts via OpenAI or Sarvam + local playback.…, Rekha / Jarvis voice names for the active provider. Kokoro/Piper keep… (+15 more)
 
-### Community 29 - "recipes.py"
-Cohesion: 0.13
-Nodes (29): apply_params(), collect_logged_commands(), _computer_action_count(), _default_templates(), extract_media_query(), match_template(), _normalize_http_url(), open_app() (+21 more)
+### Community 29 - "task_feedback.py"
+Cohesion: 0.17
+Nodes (18): collect_post_task_feedback(), feedback_enabled(), interpret_feedback_text(), load_task_actions(), Any, OpenAI, Post-task user feedback: spoken prompt, persisted with goal and action log., Ask the user whether the task worked; persist with goal and actions. (+10 more)
 
 ### Community 30 - "resolve_execution_route"
-Cohesion: 0.23
-Nodes (12): ExecutionRoute, _matching_recipe_name(), Deterministic fast/slow routing and specialist execution lanes. The router…, Choose a cheap first approach and the specialist prompt lane., resolve_execution_route(), test_browser_submission_uses_slow_path(), test_dense_cad_routes_to_visual_slow_path(), test_git_routes_to_terminal_fast_path() (+4 more)
+Cohesion: 0.14
+Nodes (23): Difficulty, _difficulty_for(), ExecutionRoute, infer_difficulty(), _matching_recipe_name(), Deterministic fast/slow routing and specialist execution lanes. The router…, Map a known path/lane onto easy/medium/hard without an LLM call., Difficulty for a task, using path/lane hints when they are already known. (+15 more)
 
 ### Community 31 - "context.py"
-Cohesion: 0.15
-Nodes (22): assemble_context(), _ax_wanted(), _capture_desktop_context(), capture_turn_desktop_context(), _clip(), ContextBundle, _env_flag(), format_not_to_do() (+14 more)
+Cohesion: 0.12
+Nodes (27): assemble_catalogs(), assemble_context(), _ax_wanted(), _capture_desktop_context(), capture_turn_desktop_context(), _clip(), collect_desktop(), ContextBundle (+19 more)
 
 ### Community 32 - "memory.py"
-Cohesion: 0.08
-Nodes (68): list_memories_payload(), Replace a memory file's markdown contents (full-file edit)., write_memory_payload(), apply_condensed_memory_files(), apply_extracted_memory_items(), _canonical_kind(), _condense_memories_impl(), _condense_note_in_chunks() (+60 more)
+Cohesion: 0.06
+Nodes (93): list_memories_payload(), Replace a memory file's markdown contents (full-file edit)., write_memory_payload(), apply_condensed_memory_files(), apply_extracted_memory_items(), _canonical_kind(), capture_and_save_screen(), _capture_png() (+85 more)
 
 ### Community 33 - "llm_client.py"
-Cohesion: 0.13
-Nodes (25): _continue_response(), _initial_api_input(), Follow-up Responses turn. DeepSeek must replay function_call items (stateless)., _run_agent_session(), agent_provider(), fold_orphan_tool_outputs(), function_call_input_items(), _item_call_id() (+17 more)
+Cohesion: 0.09
+Nodes (31): BargeDecision, classify_barge_utterance(), _extract_json(), Any, OpenAI, Classify TTS barge-in: new computer task vs answer/clarification., Result of LLM barge-in routing., Ask a cheap model whether a barge-in replaces the current work with a new task.… (+23 more)
 
-### Community 34 - "read_status"
-Cohesion: 0.08
-Nodes (39): Snapshot for the tray (or callers)., Show or hide the desktop chat window (tray menu / cua chat)., read_status(), set_chat_app_pid(), set_chat_overlay_enabled(), ensure_chat_bridge(), Popen, Start the bridge subprocess if not already running. (+31 more)
+### Community 34 - "try_recipe"
+Cohesion: 0.16
+Nodes (19): _apply_recipe_start(), handoff_prompt(), leftover_is_screenshot_only(), leftover_text(), load_recipes(), _maybe_save_recipe_impl(), pick_matching_recipe(), Path (+11 more)
 
 ### Community 35 - "tools_registry.py"
-Cohesion: 0.12
-Nodes (35): Brain, Any, Follow-up user message so the model sees the read_screen PNG., read_screen_vision_input(), mcp_openai_tools(), agent_tools(), _entry(), execute_prepared_tool() (+27 more)
+Cohesion: 0.13
+Nodes (30): Explicit screen read for the read_screen tool — display layout, AX text, and…, Follow-up user message so the model sees the read_screen PNG., read_screen(), read_screen_vision_input(), mcp_openai_tools(), agent_tools(), execute_prepared_tool(), finalize_tool_outcome() (+22 more)
 
-### Community 36 - "webmcp.py"
-Cohesion: 0.21
-Nodes (16): _bridge(), _BridgeSession, call_webmcp_tool(), list_webmcp_tools(), _node_binary(), _persistent_bridge(), Any, RuntimeError (+8 more)
+### Community 36 - "mcp_client.py"
+Cohesion: 0.14
+Nodes (22): expand_env_value(), _expand_map(), _format_call_result(), get_manager(), _is_fatal(), _LiveServer, load_mcp_config(), _mcp_error_text() (+14 more)
 
-### Community 37 - "try_recipe"
-Cohesion: 0.15
-Nodes (20): fill_recipe_slots(), fill_recipe_slots_llm(), _looks_like_agent_brief(), maybe_save_recipe(), _maybe_save_recipe_impl(), params_grounded(), Any, Path (+12 more)
+### Community 37 - "_bind_recipe"
+Cohesion: 0.16
+Nodes (19): _bind_recipe(), extract_maps_place(), extract_media_query(), find_matching_recipe(), _has_map_word(), match_template(), _prelude_is_maps(), _prelude_is_youtube() (+11 more)
 
-### Community 38 - "voice_live.py"
-Cohesion: 0.07
-Nodes (28): _event_delta(), _event_transcript(), _event_type(), FakeConnection, FakeEvent, LiveVoiceTests, Persistent CLI live-voice session: wake keeps the Realtime socket open., current() (+20 more)
+### Community 38 - "FanNoiseFilter"
+Cohesion: 0.20
+Nodes (6): _EndPhraseWatcher, FanNoiseFilter, _float_to_pcm16_b64(), ndarray, High-pass + adaptive spectral gate tuned for steady laptop/room fan noise., Live STT sidecar: stop recording when the transcript ends with the closer.
 
 ### Community 39 - "FlagTests"
 Cohesion: 0.07
 Nodes (3): FlagTests, Tests for mark-done utterances and status flags., UtteranceTests
 
 ### Community 40 - "dictation_overlay.py"
-Cohesion: 0.11
-Nodes (17): dictation_overlay_enabled(), DictationDotsOverlay, dot_alphas(), hide_dictation_overlay(), init_dictation_overlay(), overlay_frame_near_point(), Any, Cursor overlay for Fn dictation: dots while holding, spinner after release. (+9 more)
+Cohesion: 0.08
+Nodes (19): dictation_overlay_enabled(), DictationDotsOverlay, dot_alphas(), hide_dictation_overlay(), init_dictation_overlay(), overlay_frame_near_point(), Any, Cursor overlay for Fn dictation: dots while holding, spinner after release. (+11 more)
 
 ### Community 41 - "evaluator.py"
-Cohesion: 0.12
-Nodes (30): AgentRoute, _client_for_model(), coach_agent(), _extract_json(), max_steps_for_difficulty(), model_for_recipe_handoff(), _progress_since_last_evaluation(), Any (+22 more)
+Cohesion: 0.11
+Nodes (32): AgentRoute, _client_for_model(), coach_agent(), _difficulty_for_task(), _extract_json(), max_steps_for_difficulty(), model_for_recipe_handoff(), _progress_since_last_evaluation() (+24 more)
 
 ### Community 42 - "tts_race.py"
-Cohesion: 0.22
-Nodes (19): _kokoro_voice(), _log(), main(), _openai_voice(), _piper_voice(), _play_results(), _provider_ready(), Path (+11 more)
+Cohesion: 0.07
+Nodes (52): PiperVoicePathTests, _audio_from_result(), _ensure_misaki_en(), _ensure_mlx_g2p_fallback(), _float_to_wav(), _lang_code(), _load_mlx(), _load_onnx() (+44 more)
 
 ### Community 43 - "chat_bridge.py"
-Cohesion: 0.08
-Nodes (52): Write a chat-attached PNG for the orchestrator; return basename for enqueue., save_chat_screenshot_png(), accept_observe_draft(), bind_host(), chat_bridge_enabled(), chat_browser_enabled(), delete_mcp_connection(), ensure_inbox_worker() (+44 more)
+Cohesion: 0.07
+Nodes (56): Write a chat-attached PNG for the orchestrator; return basename for enqueue., save_chat_screenshot_png(), accept_observe_draft(), bind_host(), cancel_scheduled_queue_item(), _capture_desktop_png(), chat_bridge_enabled(), chat_browser_enabled() (+48 more)
 
 ### Community 44 - "_Response"
 Cohesion: 0.16
 Nodes (5): _Headers, _Opener, dict, Tests for safe structured webpage retrieval., _Response
 
 ### Community 45 - "SpeakerIdTests"
-Cohesion: 0.17
-Nodes (5): AgentSpeakerContextTests, _alice_samples(), Speaker ID unit tests (no microphone)., _sine_wav(), SpeakerIdTests
+Cohesion: 0.13
+Nodes (8): AgentSpeakerContextTests, _alice_samples(), _mock_embed(), ndarray, Speaker ID unit tests (no microphone)., Deterministic fake embeddings: low freqs = speaker A, high = speaker B., _sine_wav(), SpeakerIdTests
 
 ### Community 46 - "test_actions.py"
 Cohesion: 0.08
@@ -471,48 +465,48 @@ Cohesion: 0.06
 Nodes (9): AfplayChimeTests, EndModelKeyTests, OverAndOutChimeTests, Wake-phrase stripping and listen-end spotting (no ONNX required)., ResumeWakeTests, StripTrailingTests, WakeDetectChimeTests, WakeIdentityTests (+1 more)
 
 ### Community 48 - "latency_report.py"
-Cohesion: 0.18
-Nodes (23): _append_trace(), build_report(), _durations(), finish_trace(), _fmt_ms(), mark(), _percentile(), Any (+15 more)
+Cohesion: 0.17
+Nodes (24): _append_trace(), build_report(), _durations(), finish_trace(), _fmt_ms(), _percentile(), Any, Path (+16 more)
 
-### Community 49 - "test_orchestrator_task_guard.py"
-Cohesion: 0.20
-Nodes (16): _completed_task_match(), _completed_tasks_in_turn(), _normalized_task_goal(), Stable form for rejecting accidental post-completion relaunches., Return a completed near-duplicate from this orchestrator session., Pair start_task/result trace steps from only the current user turn., _start_task_block_reason(), test_awake_duplicate_is_still_blocked() (+8 more)
+### Community 49 - "TurnTrace"
+Cohesion: 0.12
+Nodes (21): User utterance plus each LLM step (replies, tool calls, results)., TurnTrace, _completed_task_match(), _completed_tasks_in_turn(), _normalized_task_goal(), True if give_response_to_user spoke after `start_index` (this response only)., Stable form for rejecting accidental post-completion relaunches., Return a completed near-duplicate from this orchestrator session. (+13 more)
 
 ### Community 50 - "memory_graph.py"
 Cohesion: 0.16
 Nodes (26): datetime, apply_observation_graph(), _claim_id(), _clean_entity(), compact_graph(), _connect(), database_path(), export_graphify() (+18 more)
 
-### Community 51 - "Session"
-Cohesion: 0.08
-Nodes (20): Update high-level status shown in the menu bar., Set state and append the same message to the log ring., set_and_log(), set_state(), bind_session(), _canon(), _claim_session(), _emit_session_event() (+12 more)
+### Community 51 - "resolve_agent_task"
+Cohesion: 0.16
+Nodes (11): _looks_like_agent_brief(), AgentTaskSpec, is_procedure_brief(), Planner vs actor: start_task is a goal, not a UI screenplay. The orchestrator…, True when the text is a how-to screenplay instead of a user goal., What the actor should match on vs what it should optimize for., Recipes match ``match_text`` (the spoken request). The computer-use prompt uses…, resolve_agent_task() (+3 more)
 
 ### Community 52 - "MainTests"
 Cohesion: 0.08
 Nodes (5): MainTests, Tests for the cua daemon CLI helpers., RunningPidTests, ShimTests, StartStopTests
 
-### Community 53 - "Recipe"
-Cohesion: 0.21
-Nodes (19): _bind_recipe(), extract_maps_place(), find_matching_recipe(), format_recipe_catalog(), _has_map_word(), load_recipes(), pick_matching_recipe(), _prelude_is_maps() (+11 more)
+### Community 53 - "recipes.py"
+Cohesion: 0.16
+Nodes (23): _bind_without_template(), collect_logged_commands(), _computer_action_count(), _default_templates(), _normalize_http_url(), parameterize_opened_url(), propose_recipe_from_log(), Parameterized desktop recipes: stable prefix, optional computer-use handoff. A… (+15 more)
 
 ### Community 54 - "dictation.py"
-Cohesion: 0.13
-Nodes (19): cmd_start(), cmd_status(), cmd_stop(), dictation_enabled(), DictationDaemon, ensure_dictation_running(), _install_fn_tap(), _is_globe_fn_key() (+11 more)
+Cohesion: 0.10
+Nodes (26): cmd_start(), cmd_status(), cmd_stop(), dictation_enabled(), DictationDaemon, ensure_dictation_running(), _install_fn_tap(), _is_globe_fn_key() (+18 more)
 
-### Community 55 - "test_chat_llm.py"
-Cohesion: 0.12
-Nodes (11): command_for_orchestrator(), command_for_orchestrator(), User bubble text → utterance the orchestrator should hear., Compact relative time for sidebar rows (Just now, 5m ago, Yesterday)., relative_chat_time(), title_from_text(), ChatStoreTests, OrchestratorCommandTests (+3 more)
+### Community 55 - "_connect"
+Cohesion: 0.18
+Nodes (18): _archive_json_queue(), _connect(), _db_file(), _ensure_dir(), _import_json_queue(), _is_lock_error(), _json_migrated_path(), _json_queue_sources() (+10 more)
 
 ### Community 56 - "mcp_auth.py"
-Cohesion: 0.16
-Nodes (23): _dispatch_mcp(), build_oauth_provider(), cmd_mcp_login(), cmd_mcp_logout(), cmd_mcp_status(), format_apps_help(), format_status(), _gh_bin() (+15 more)
+Cohesion: 0.15
+Nodes (27): _dispatch_mcp(), build_oauth_provider(), cmd_mcp_login(), cmd_mcp_logout(), cmd_mcp_status(), format_apps_help(), format_status(), _gh_bin() (+19 more)
 
 ### Community 57 - "FileTokenStorage"
-Cohesion: 0.22
-Nodes (5): FileTokenStorage, oauth_httpx_auth(), Any, httpx Auth for a connected HTTP MCP server, or None., JSON token + client-info store (chmod 600).
+Cohesion: 0.27
+Nodes (3): FileTokenStorage, Any, JSON token + client-info store (chmod 600).
 
-### Community 58 - "log"
-Cohesion: 0.16
-Nodes (20): enqueue_speak(), log(), Append a line to the ring buffer shown on hover / in the menu., Queue a line for the orchestrator to speak (timer reminders, not user STT)., reply_sink(), Native timers: schedule, cancel, notify; speak queue is not user STT., cancel_timer(), _fire() (+12 more)
+### Community 58 - "test_face_overlay.py"
+Cohesion: 0.20
+Nodes (10): face_frame_top_center(), face_overlay_enabled(), face_should_show(), Any, True unless tray toggle / env turned the face off (default on)., Visible while the face toggle is on and not mid-screenshot hide. Does not…, Top-center of ``monitor`` in top-left desktop coordinates., FacePlacementTests (+2 more)
 
 ### Community 59 - "LiveStdioTests"
 Cohesion: 0.08
@@ -524,55 +518,55 @@ Nodes (19): accessibility_available(), _ax_frame(), _ax_get(), _ax_str(), _colle
 
 ### Community 61 - "observe.py"
 Cohesion: 0.10
-Nodes (45): accept_draft(), _append_events_log(), _archive_draft(), _capture_focused_display(), _capture_png(), _capture_png_bytes(), _capture_primary_png(), cmd_accept() (+37 more)
+Nodes (47): accept_draft(), _append_events_log(), _archive_draft(), _capture_focused_display(), _capture_png(), _capture_png_bytes(), _capture_primary_png(), cmd_accept() (+39 more)
 
-### Community 62 - "OpenAI"
-Cohesion: 0.09
-Nodes (44): chat_text_only(), log_llm(), Put an LLM reply in the status log (and ``last_llm``) for the phone / tray., Chat turn with speaker off — reply in the UI, not via TTS or status blurbs., reply_tts_enabled(), set_last_spoken(), get_audio(), _confirm_heard() (+36 more)
+### Community 62 - "test_orchestrator_questions.py"
+Cohesion: 0.07
+Nodes (22): _give_response_closes_turn(), _looks_like_claimed_action(), _looks_like_question(), _must_use_real_action_tool(), Typed desktop-chat messages for STT repair (empty if none / store unavailable)., Build Responses API ``input`` for one user turn (optional phone + desktop…, True when spoken text expects a reply (so we must open the mic)., True when the request is an effectful desktop/browser/media action. (+14 more)
 
-### Community 63 - "test_low_latency_tts.py"
-Cohesion: 0.33
-Nodes (5): DecodedMessagePrefixTests, _engine(), PublicApiTests, patch, Unit tests for low-latency streaming TTS public API and helpers.
+### Community 63 - "low_latency.py"
+Cohesion: 0.15
+Nodes (10): Any, concat_wavs(), Join WAV blobs that share the same format (streaming TTS chunks)., Print a ``[tts-latency] …`` line when TTS_LATENCY_LOG=1., tts_latency_print(), OpenAI, Path, Non-blocking, chunked TTS pipeline used by the voice orchestrator. Public API… (+2 more)
 
-### Community 64 - "judge.py"
-Cohesion: 0.17
-Nodes (25): _clip_text(), _format_artifact(), _format_llm_trace(), _format_steps(), _judge_max_chars(), JudgeVerdict, load_fixture(), _load_llm_trace() (+17 more)
+### Community 64 - "Session"
+Cohesion: 0.07
+Nodes (21): Update high-level status shown in the menu bar., Set state and append the same message to the log ring., set_and_log(), set_state(), bind_session(), _canon(), _claim_session(), _emit_session_event() (+13 more)
 
 ### Community 65 - "_seed_dir"
 Cohesion: 0.16
 Nodes (5): TestCase, GroundingTests, Path, RecipeRunTests, _seed_dir()
 
 ### Community 66 - "FaceOverlay"
-Cohesion: 0.20
-Nodes (5): __getattr__(), Lazily preserve ``face_overlay.FaceOverlay`` without an import cycle., FaceOverlay, Any, Animated face NSPanel. Construct only on the AppKit main thread.
-
-### Community 67 - "mcp_client.py"
-Cohesion: 0.22
-Nodes (15): expand_env_value(), _expand_map(), _format_call_result(), get_manager(), _LiveServer, load_mcp_config(), parse_mcp_arguments(), _parse_servers() (+7 more)
-
-### Community 68 - "resolve_agent_task"
 Cohesion: 0.18
-Nodes (10): AgentTaskSpec, is_procedure_brief(), Planner vs actor: start_task is a goal, not a UI screenplay. The orchestrator…, True when the text is a how-to screenplay instead of a user goal., What the actor should match on vs what it should optimize for., Recipes match ``match_text`` (the spoken request). The computer-use prompt uses…, resolve_agent_task(), ProcedureBriefTests (+2 more)
+Nodes (7): BlobatarSpec, __getattr__(), One selectable creature. ``extras`` are extra ovals (dx, dy, w, h) in body…, Lazily preserve ``face_overlay.FaceOverlay`` without an import cycle., FaceOverlay, Any, Animated face NSPanel. Construct only on the AppKit main thread.
 
-### Community 69 - "capture_and_save_screen"
-Cohesion: 0.33
-Nodes (6): capture_and_save_screen(), _capture_png(), capture_screen_png(), _frontmost_app_name(), Grab the display now. Returns (png_bytes, frontmost_app_name)., Screenshot the desktop, describe it with a vision LLM, save PNG + markdown.…
+### Community 67 - "emit"
+Cohesion: 0.05
+Nodes (36): AgentJob, Background computer-agent job supervisor. The orchestrator still decides *when*…, Background computer-agent run + ZeroMQ inbox handle., Start the computer-agent worker and register it in the tray., start_agent_thread(), AgentMessageInbox, AgentMessagePublisher, AskUserBridge (+28 more)
 
-### Community 70 - "AskUserBridge"
-Cohesion: 0.12
-Nodes (13): AgentJob, Background computer-agent job supervisor. The orchestrator still decides *when*…, Background computer-agent run + ZeroMQ inbox handle., Start the computer-agent worker and register it in the tray., start_agent_thread(), AskUserBridge, Blocking ask_user from the agent worker thread to the orchestrator main thread.…, Called from the agent worker thread. Blocks until orchestrator replies. (+5 more)
+### Community 68 - "build_system_prompt"
+Cohesion: 0.18
+Nodes (9): _orchestrator_system_prompt(), build_system_prompt(), conversation_context_block(), local_datetime_line(), Orchestrator system prompt (extracted from the turn loop)., One-line clock context injected on every orchestrator user turn., User-turn snippet: typed chat if present, else recent voice turns., Assemble the orchestrator system prompt for one turn. (+1 more)
+
+### Community 69 - "._run_one"
+Cohesion: 0.14
+Nodes (12): ActionStopped, _is_blocked_chord(), _mac_scroll_pixels(), normalize_key(), Exception, Post trackpad-like continuous pixel scroll events via Quartz. pyautogui's line-…, Scroll by approximate pixel deltas. dy>0 scrolls content up (wheel up)., Raised when should_stop() fires mid-batch (wake word / quit). (+4 more)
+
+### Community 70 - "load_dotenv"
+Cohesion: 0.17
+Nodes (13): _dispatch_skills(), configure_native_threads(), load_dotenv(), Path, Load a local .env into os.environ (no external dependency)., Cap BLAS/OpenMP threads before numpy/OpenBLAS loads. Unbounded OpenBLAS…, Parse KEY=VALUE lines from `.env` into the process environment. By default does…, main() (+5 more)
 
 ### Community 71 - "phone_gateway.py"
-Cohesion: 0.07
-Nodes (48): parse_reply_sink_param(), Parse optional API ``sink`` / ``speaker``. ``None`` / empty means this request…, read_phone_screen(), read_phone_speech(), advertise_urls(), audio_to_wav(), ensure_phone_gateway(), ingest_phone_audio() (+40 more)
+Cohesion: 0.09
+Nodes (39): parse_reply_sink_param(), Parse optional API ``sink`` / ``speaker``. ``None`` / empty means this request…, read_phone_screen(), read_phone_speech(), set_phone_gateway_pid(), advertise_urls(), audio_to_wav(), ensure_phone_gateway() (+31 more)
 
 ### Community 72 - "main.js"
 Cohesion: 0.19
 Nodes (16): { app, BrowserWindow, ipcMain, shell, session, systemPreferences }, applyOverlayBehavior(), BRIDGE_PORT, bridgeRequest(), CONTROL_PORT, createWindow(), fs, hideMainWindow() (+8 more)
 
-### Community 73 - "McpManager"
-Cohesion: 0.26
-Nodes (8): _is_fatal(), _mcp_error_text(), McpManager, BaseException, Long-lived MCP sessions on a background asyncio loop., Connect (or reconnect) a configured server. Returns an error string or None., start_mcp(), stop_mcp()
+### Community 73 - "session_compact.py"
+Cohesion: 0.29
+Nodes (14): _clip(), compact_session_thread(), fold_task_history(), _format_tasks_for_summary(), maybe_compact_checkpoint(), Any, Orchestrator session compaction: task history folding and thread summaries., Keep the last ``TASK_HISTORY_KEEP`` tasks; summarize older ones into… (+6 more)
 
 ### Community 74 - "test_artifact_paths.py"
 Cohesion: 0.29
@@ -590,61 +584,57 @@ Nodes (18): Transcribe a WAV clip with Phonon-1. May return empty (caller decide
 Cohesion: 0.13
 Nodes (4): ConfigUpsertTests, Tests for MCP browser-login helpers (no live OAuth)., ResolveAppTests, TokenStorageTests
 
-### Community 79 - "kokoro.py"
-Cohesion: 0.17
-Nodes (20): _audio_from_result(), _ensure_misaki_en(), _ensure_mlx_g2p_fallback(), _float_to_wav(), _lang_code(), _load_mlx(), _load_onnx(), _mlx_available() (+12 more)
+### Community 79 - "pid_alive"
+Cohesion: 0.19
+Nodes (14): _clear_pid_file(), cmd_status(), find_agent_pids(), kill_agent_pids(), _orchestrator_pid_from_status(), _pgrep_pids(), PID of a live orchestrator, if any (pid file or status.json)., PIDs whose command line matches any pattern (via ``pgrep -f``). (+6 more)
 
 ### Community 80 - "Observer"
 Cohesion: 0.21
 Nodes (5): computer_use_active(), exclude_app(), Observer, True while a computer-use job owns the pointer., ObserverAutoMemoryTests
 
-### Community 81 - "checkpoint.py"
+### Community 81 - "log"
 Cohesion: 0.16
-Nodes (21): CheckpointResult, Any, Orchestrator turn checkpoint (harness-v2 §4). Between turns the lane passes a…, Run one orchestrator checkpoint before (or after recovering) a model call.…, run_orchestrator_checkpoint(), _clip(), compact_session_thread(), fold_task_history() (+13 more)
+Nodes (20): enqueue_speak(), log(), _normalize_sink(), Append a line to the ring buffer shown on hover / in the menu., Queue a line for the orchestrator to speak (timer reminders, not user STT)., reply_sink(), Native timers: schedule, cancel, notify; speak queue is not user STT., cancel_timer() (+12 more)
 
 ### Community 82 - "speaker_output.py"
 Cohesion: 0.16
 Nodes (10): _prompt_side_blocks(), _app_playing(), media_playing(), _osascript(), Whether media is playing on the Mac — for the computer-use agent. Reports only…, True when Music or Spotify reports player state ``playing``., One-line status for the agent, or empty when disabled / unchanged., speaker_output_block() (+2 more)
 
-### Community 83 - "piper.py"
-Cohesion: 0.21
-Nodes (13): PiperVoicePathTests, _ensure_voice_files(), _load(), _load_piper(), _onnx_path(), _pcm_to_wav(), Path, Piper local TTS (ONNX, CPU). ``synthesize_wav`` → WAV bytes. (+5 more)
+### Community 83 - "Recipe"
+Cohesion: 0.32
+Nodes (11): parse_json_dict(), fill_recipe_slots(), fill_recipe_slots_llm(), format_recipe_catalog(), params_grounded(), propose_recipe_llm(), Any, Fill {{placeholders}}. Regex first; EVAL_MODEL only if bind fails. (+3 more)
 
 ### Community 84 - "whoami.py"
 Cohesion: 0.18
 Nodes (8): who_am_i reads README.md for self-description., WhoAmITests, format_whoami_output(), Path, who_am_i tool: load this project's README so the agent can describe itself., Return README markdown with HTML stripped (demo embeds, etc.)., read_project_readme(), run_whoami_tool()
 
-### Community 85 - "utterance_match.py"
-Cohesion: 0.36
-Nodes (9): _bind_without_template(), parameterize_opened_url(), Replace task-specific bits in an opened URL with placeholders., content_words(), _extract_urls(), match_phrases_for(), _norm(), _phrase_in() (+1 more)
-
 ### Community 86 - "WakeMonitor"
 Cohesion: 0.14
 Nodes (6): Background wake-word listener for barge-in / idle wait. By default runs until…, Release the mic so STT (or another capture) can use it., Resume wake listening after STT. Only drop a pending hit when we were actually…, Acknowledge a wake so listening can continue (persistent mode)., Block until woken (or should_stop / timeout). Assumes this monitor is already…, WakeMonitor
 
-### Community 87 - "test_face_overlay.py"
-Cohesion: 0.20
-Nodes (9): face_frame_top_center(), face_overlay_enabled(), face_should_show(), True unless tray toggle / env turned the face off (default on)., Visible while the face toggle is on and not mid-screenshot hide. Does not…, Top-center of ``monitor`` in top-left desktop coordinates., FacePlacementTests, FaceVisibilityTests (+1 more)
+### Community 87 - "test_barge_router.py"
+Cohesion: 0.22
+Nodes (3): BargeRouterParseTests, Barge-in classification and orchestrator redirect., ResolveBargeTests
 
 ### Community 88 - "keyboard_barge.py"
 Cohesion: 0.23
 Nodes (13): acquire_tts_interrupt(), _drain_stdin(), _ensure_listener_locked(), _enter_cbreak(), keyboard_barge_enabled(), _listener_loop(), Keyboard barge-in during TTS (terminal key → stop speech → listen). When the…, Return ``(event, release)`` set when any source or a barge key fires. Always… (+5 more)
 
 ### Community 89 - "TurnDesktopContextTests"
-Cohesion: 0.14
+Cohesion: 0.13
 Nodes (4): ContextBundleTests, NotToDoTests, Ephemeral context bundle (not durable memory)., TurnDesktopContextTests
 
-### Community 91 - "ndarray"
-Cohesion: 0.19
-Nodes (16): _audio_at_embed_rate(), _best_similarity(), cosine_similarity(), embed_wav_bytes(), _get_embedder(), _pairwise_min(), _prepare_audio_for_embed(), ndarray (+8 more)
+### Community 91 - "collect_next_input"
+Cohesion: 0.27
+Nodes (6): collect_next_input(), NextInput, Any, Choose the next orchestrator input without owning speech or tools. The voice…, InputRouterTests, Input router: scheduled / queue / timer / voice decision tree.
 
 ### Community 92 - "test_session_compact.py"
 Cohesion: 0.14
 Nodes (5): CheckpointTests, FoldTaskHistoryTests, FormatTaskHistoryTests, OverflowTests, Session compaction for orchestrator context limits.
 
-### Community 93 - "ChatBridgeHandler"
-Cohesion: 0.09
-Nodes (17): cancel_scheduled_queue_item(), _capture_desktop_png(), _chat_row(), ChatBridgeHandler, displays_payload(), _json_body(), _parse_display_indexes(), persist_chat_inbox() (+9 more)
+### Community 93 - "test_recipes.py"
+Cohesion: 0.21
+Nodes (4): _log(), ProposeTests, Parameterized recipes: match templates, bind slots, skip unsafe URLs., RecipeOvermatchTests
 
 ### Community 94 - "package.json"
 Cohesion: 0.17
@@ -658,49 +648,45 @@ Nodes (17): Durable memory store, Always-on computer-use policy, Isolated virtua
 Cohesion: 0.14
 Nodes (4): Local WhisperFlow STT provider dispatch., _silence_wav(), SttTimingTests, WhisperflowProviderTests
 
-### Community 97 - "_connect"
-Cohesion: 0.22
-Nodes (16): _archive_json_queue(), _connect(), _db_file(), _ensure_dir(), _import_json_queue(), _is_lock_error(), _json_migrated_path(), _json_queue_sources() (+8 more)
+### Community 97 - "test_harness_structure.py"
+Cohesion: 0.12
+Nodes (9): Live desktop snapshot attached to one orchestrator user turn., TurnDesktopContext, Clipped last N voice turns for a fresh Responses thread., SessionCompactState, CheckpointTests, EventSinkTests, InputQueueTests, Harness-inspired events, queues, checkpoint, and tool runtime. (+1 more)
 
-### Community 98 - "resolve_blobatar"
-Cohesion: 0.20
-Nodes (6): blobatar_ids(), _normalize_seed(), resolve_blobatar(), set_blobatar(), _valid_seed(), BlobatarPresetTests
+### Community 98 - "current_blobatar"
+Cohesion: 0.15
+Nodes (11): blobatar_ids(), cmd_face(), current_blobatar(), format_blobatar_list(), _normalize_seed(), Preset from status / runtime file / env, falling back to pebble., _read_preset_file(), resolve_blobatar() (+3 more)
 
 ### Community 100 - "speaker_enroll.py"
 Cohesion: 0.15
-Nodes (25): enroll_speaker_from_body(), _dispatch_speaker(), cmd_delete(), cmd_enroll(), cmd_list(), cmd_test(), main(), OpenAI (+17 more)
+Nodes (28): enroll_speaker_from_body(), _dispatch_speaker(), cmd_delete(), cmd_enroll(), cmd_list(), cmd_test(), main(), OpenAI (+20 more)
 
-### Community 101 - "WindowBuffer"
-Cohesion: 0.24
-Nodes (3): Accumulates closed sessions until OBSERVE_DRAFT_SECONDS have elapsed., WindowBuffer, WindowBufferTests
+### Community 101 - "test_observe.py"
+Cohesion: 0.09
+Nodes (8): Accumulates closed sessions until OBSERVE_DRAFT_SECONDS have elapsed., WindowBuffer, ComputerUseGateTests, ExcludeAppTests, FocusedDisplayCaptureTests, ParseExtractTests, Tests for the passive observer (session flush, drafts, accept)., WindowBufferTests
 
-### Community 102 - "LogOverlay"
-Cohesion: 0.31
-Nodes (3): LogOverlay, Click-through NSPanel. Construct only on the AppKit main thread., Take the panel off screen and release it (call on tray quit).
+### Community 102 - "phonon.py"
+Cohesion: 0.21
+Nodes (13): _fermion_importable(), _load_local_on_worker(), _openai_base_url(), _pool_worker(), Any, Local Phonon-1 speech-to-text (Fermion English ASR). Record-then-transcribe,…, Which engine ``transcribe_wav`` will use., resolve_backend() (+5 more)
 
-### Community 103 - "app_status.py"
-Cohesion: 0.07
-Nodes (62): begin_tts_playback(), chat_stream_payload(), claim_session(), clear_logs(), clear_phone_photo(), cmd_sleep(), consume_chat_inbox(), consume_chat_inbox_items() (+54 more)
+### Community 103 - "read_status"
+Cohesion: 0.05
+Nodes (59): ack_overlay_hidden(), begin_tts_playback(), chat_stream_payload(), claim_session(), clear_logs(), clear_phone_photo(), consume_chat_inbox(), consume_chat_inbox_items() (+51 more)
 
 ### Community 104 - "webmcp_chromium.mjs"
 Cohesion: 0.25
 Nodes (8): command(), deadlineMs, execute(), networkResponses, pending, run(), start(), startup
 
-### Community 106 - "current_blobatar"
-Cohesion: 0.26
-Nodes (12): blobatar_png_bytes(), BlobatarSpec, chat_avatar_pngs(), current_blobatar(), Any, Preset from status / runtime file / env, falling back to pebble., One selectable creature. ``extras`` are extra ovals (dx, dy, w, h) in body…, Draw the current (or given) blobatar into an ``NSImage`` for chat avatars. (+4 more)
+### Community 106 - "blobatar_png_bytes"
+Cohesion: 0.24
+Nodes (10): _face_option(), face_status_payload(), Face overlay on/off + curated blobatars (with optional PNG previews)., Toggle face overlay and/or switch blobatar preset / custom seed., update_face_payload(), blobatar_png_bytes(), chat_avatar_pngs(), face_overlay_env_enabled() (+2 more)
 
 ### Community 108 - "CallbackServer"
 Cohesion: 0.25
 Nodes (3): AbstractEventLoop, CallbackServer, Local HTTP listener for the OAuth redirect.
 
 ### Community 109 - "SimpleNamespace"
-Cohesion: 0.13
-Nodes (3): SimpleNamespace, BrowserDataTests, ChatTextOnlySpeakTests
-
-### Community 110 - "parse_json_dict"
-Cohesion: 0.24
-Nodes (10): BargeDecision, classify_barge_utterance(), _extract_json(), Any, OpenAI, Classify TTS barge-in: new computer task vs answer/clarification., Result of LLM barge-in routing., Ask a cheap model whether a barge-in replaces the current work with a new task.… (+2 more)
+Cohesion: 0.10
+Nodes (5): SimpleNamespace, BrowserDataTests, AssistantMessageTextTests, ChatTextOnlySpeakTests, KokoroSynthesizeTests
 
 ### Community 111 - "open-meteo-current-weather-report/SKILL.md"
 Cohesion: 0.40
@@ -710,33 +696,25 @@ Nodes (4): simple weather_code -> text (subset), Steps, Tips, Try current_weathe
 Cohesion: 0.32
 Nodes (7): add(), delete_item(), echo(), Minimal stdio MCP server used by tests/test_mcp.py., Return the same text., Delete an item by id (write)., tool
 
-### Community 113 - "listen_end_spotter"
-Cohesion: 0.14
-Nodes (13): _end_phrase_live_enabled(), _listen_end_hint(), format_listen_end_hint(), listen_end_enabled(), listen_end_spotter(), ndarray, Menu Send + end-listen phrase, for STT prompts., Run openWakeWord on PCM already captured for STT (no second mic). (+5 more)
-
-### Community 114 - "terminal.py"
-Cohesion: 0.43
-Nodes (6): _decode(), _format_report(), Run local shell commands for the computer-use agent. Captures stdout/stderr…, Execute `command` via the user's shell and return a text report. Uses the shell…, run_command(), _truncate()
+### Community 113 - "checkpoint.py"
+Cohesion: 0.17
+Nodes (12): CheckpointResult, Any, Orchestrator turn checkpoint (harness-v2 §4). Between turns the lane passes a…, Run one orchestrator checkpoint before (or after recovering) a model call.…, run_orchestrator_checkpoint(), bind_next_run_queue(), get_next_run_queue(), NextRunQueue (+4 more)
 
 ### Community 115 - "mcp_compat.py"
-Cohesion: 0.22
-Nodes (12): McpTool, _bearer_token(), list_tools_page(), _paginated_params(), Any, MCP SDK 1.x / 2.x shims. mcp 1.x: ``streamablehttp_client(url, headers=,…, Return ``(factory, is_legacy)`` for the installed MCP HTTP transport., Yield ``(read, write)`` against a Streamable HTTP MCP server. (+4 more)
+Cohesion: 0.20
+Nodes (13): McpTool, tool_is_read_only(), _bearer_token(), list_tools_page(), _paginated_params(), Any, MCP SDK 1.x / 2.x shims. mcp 1.x: ``streamablehttp_client(url, headers=,…, Return ``(factory, is_legacy)`` for the installed MCP HTTP transport. (+5 more)
 
 ### Community 116 - "test_mcp_compat.py"
 Cohesion: 0.17
 Nodes (4): FactoryTests, ListToolsTests, MCP 1.x / 2.x transport shims., SessionTests
 
-### Community 117 - "ensure_persistent_wake"
-Cohesion: 0.50
-Nodes (3): Any, ensure_persistent_wake(), Start (or return) the process-wide wake monitor. Call before the first TTS so…
-
 ### Community 118 - "tts_print"
 Cohesion: 0.25
 Nodes (10): get_client(), Shared SarvamAI client (STT + TTS)., Print a ``[tts] …`` line when TTS_LOG=1 (or ``force`` for real errors)., _speak_later_worker(), tts_print(), _pcm_to_wav(), Sarvam AI Bulbul text-to-speech (HTTP streaming → WAV)., Stream speech via Sarvam ``convert_stream`` (linear16) and return a WAV. Uses… (+2 more)
 
-### Community 119 - "load_dotenv"
-Cohesion: 0.14
-Nodes (11): configure_native_threads(), load_dotenv(), Path, Load a local .env into os.environ (no external dependency)., Cap BLAS/OpenMP threads before numpy/OpenBLAS loads. Unbounded OpenBLAS…, Parse KEY=VALUE lines from `.env` into the process environment. By default does…, main(), Pi launcher: same orchestrator as desktop, without computer-use. Chat is the… (+3 more)
+### Community 119 - "run_prelude"
+Cohesion: 0.29
+Nodes (11): apply_params(), open_app(), open_url(), placeholders_in(), Exception, Prelude failed; caller should fall through to computer-use., RecipeError, run_prelude() (+3 more)
 
 ### Community 120 - "test_stt_phone.py"
 Cohesion: 0.29
@@ -750,13 +728,13 @@ Nodes (4): Netflix Continue Watching, netflix-resume-continue-watching, Most-rec
 Cohesion: 0.33
 Nodes (6): Metadata-preserving category move, move-downloads-categories-to-desktop, Safe extension-based Desktop organization, organize-desktop-by-extension, Safe extension-based Downloads organization, organize-downloads-by-extension
 
-### Community 123 - "Any"
-Cohesion: 0.16
-Nodes (19): parse_json_object(), Parse a JSON value, including one buried in surrounding prose., _extract_run_memories_impl(), maybe_extract_run_memories(), memory_extract_enabled(), parse_condensed_memory_files(), parse_extracted_memory_items(), _personal_append_body() (+11 more)
+### Community 123 - "_process_response"
+Cohesion: 0.12
+Nodes (20): phone_photo_jpeg(), Return the latest phone JPEG if it is still fresh, else None., current_trace_id(), _assistant_message_text(), _process_response(), Exception, Drain tool calls on `response` until the model stops calling tools. start_task…, Returns (action, previous_id, task_history, pending_fn_outputs). action is… (+12 more)
 
-### Community 124 - "phonon.py"
-Cohesion: 0.21
-Nodes (13): _fermion_importable(), _load_local_on_worker(), _openai_base_url(), _pool_worker(), Any, Local Phonon-1 speech-to-text (Fermion English ASR). Record-then-transcribe,…, Which engine ``transcribe_wav`` will use., resolve_backend() (+5 more)
+### Community 124 - "ChatStore"
+Cohesion: 0.24
+Nodes (4): ChatStore, Thread-safe SQLite store for chats / messages / prefs., Write PNG under screenshots/; return relative path stored in DB., ChatStoreTests
 
 ### Community 128 - "Email snapshot schema"
 Cohesion: 0.60
@@ -803,12 +781,12 @@ Cohesion: 0.50
 Nodes (4): Pre-submission review gate, web-form-fill-attach-resume-and-pause, web-form-submit-capture-confirmation, Submission confirmation evidence
 
 ### Community 141 - "stt/__init__.py"
-Cohesion: 0.08
-Nodes (48): _cancel_pending(), _cancel_requested(), _capture_sample_rate(), _cue_listen_start(), _emit_partial(), _float_to_wav(), _input_device_info(), listen_dictation() (+40 more)
+Cohesion: 0.07
+Nodes (56): _cancel_pending(), _cancel_requested(), _capture_sample_rate(), _cue_listen_start(), _emit_partial(), _event_delta(), _event_transcript(), _event_type() (+48 more)
 
-### Community 142 - "PhoneTtsSinkTests"
-Cohesion: 0.31
-Nodes (3): PhoneTtsSinkTests, Phone reply sink: synthesize on Mac, skip afplay, publish WAV., _silence_wav()
+### Community 142 - "list_speaker_payload"
+Cohesion: 0.50
+Nodes (3): list_speaker_payload(), Speaker list payload for the Electron manage-speakers page., SpeakerPayloadTests
 
 ### Community 143 - "Text-to-speech output from speakers re-triggers the microphone wake detector"
 Cohesion: 0.67
@@ -846,9 +824,9 @@ Nodes (3): Gross Value Added at basic prices, Ministry of Statistics and Program
 Cohesion: 0.67
 Nodes (3): manga-chapter-spoiler-verify-and-summarize, Independent-source spoiler cross-checking, medium-trending-extract-top-articles
 
-### Community 168 - "_supervise_agent"
-Cohesion: 0.11
-Nodes (23): speak_pending(), utterance_pending(), collect_next_input(), NextInput, Any, Choose the next orchestrator input without owning speech or tools. The voice…, _claim_due_scheduled_utterance(), _collect_next_utterance() (+15 more)
+### Community 168 - "orchestrator.py"
+Cohesion: 0.07
+Nodes (42): phone_photo_pending(), True when this turn was queued from the Electron chat app., reply_to_chat(), bind_audio(), stop_dictation(), is_save_screen_utterance(), True when the user wants the current display stored as memory., apply_pi_mode() (+34 more)
 
 ### Community 169 - "convert-chart-figures-to-usd/SKILL.md"
 Cohesion: 0.33
@@ -870,125 +848,121 @@ Nodes (3): PhononProviderTests, Phonon-1 STT provider dispatch., _silence_wav()
 Cohesion: 0.13
 Nodes (7): _cg_window(), LiveLayoutMemorySkipTests, _monitor(), OccupancyFormatTests, Per-monitor window occupancy without requiring Quartz., RunningAppsAndTabsTests, WindowGeometryTests
 
-### Community 186 - "chat_store.py"
-Cohesion: 0.28
-Nodes (6): _connect(), _init_schema(), MessageRow, Connection, Path, Local SQLite chat history + screenshot files for the desktop chat UI.
-
 ### Community 187 - "status_tray_controller.py"
-Cohesion: 0.08
-Nodes (28): set_tray_pid(), _add_memory_from_tray(), _make_template_icon(), AppKit tray controller. Imported only from status_tray.main (macOS)., Main-thread entry for SIGTERM/SIGINT (see _signal_quit)., _glyph_for(), _iter_orphan_tray_pids(), _kill_pid() (+20 more)
+Cohesion: 0.11
+Nodes (25): set_tray_pid(), Tray poll: ensure an enabled chat exists; disabled chats stay warm., sync_chat_app(), _add_memory_from_tray(), _make_template_icon(), AppKit tray controller. Imported only from status_tray.main (macOS)., _glyph_for(), _iter_orphan_tray_pids() (+17 more)
 
 ### Community 189 - "actions.py"
 Cohesion: 0.15
 Nodes (21): capture_all_displays_enabled(), _capture_cg_display(), capture_displays_png(), capture_monitor_image(), desktop_logical_bounds(), desktop_logical_size(), format_display_context(), list_monitors() (+13 more)
 
 ### Community 190 - "TaskLog"
-Cohesion: 0.10
-Nodes (12): _jsonable(), Any, Path, Compact transcript for skill-proposal and memory-extract prompts., Append-only log for a single agent run., TaskLog, _client(), PostRunJudgeTests (+4 more)
+Cohesion: 0.09
+Nodes (16): post_run_enabled(), Start a daemon scorer. Never raises into the agent worker., schedule_post_run_judge(), _jsonable(), Any, Path, Per-task run logging: records agent messages, tool calls, and computer actions., Compact transcript for skill-proposal and memory-extract prompts. (+8 more)
 
 ### Community 191 - "test_prompt_budget.py"
-Cohesion: 0.12
-Nodes (6): GarbageUtteranceTests, Prompt-budget helpers: garbage STT, screen questions, UTF-8 surrogates., ScreenPixelsTests, Utf8SanitizeTests, Make model/STT strings safe to encode as UTF-8., Voice/chat utterance filters (garbage STT, on-screen questions).
+Cohesion: 0.11
+Nodes (7): BrowserTabNeedTests, GarbageUtteranceTests, Prompt-budget helpers: garbage STT, screen questions, UTF-8 surrogates., ScreenPixelsTests, Utf8SanitizeTests, Make model/STT strings safe to encode as UTF-8., Voice/chat utterance filters (garbage STT, on-screen questions).
 
 ### Community 195 - "SmartTurnClassifier"
 Cohesion: 0.13
 Nodes (12): _get_smart_turn_classifier(), Return the shared local classifier, or None so transcript-idle can take over., ensure_model(), ndarray, Path, Optional local Smart Turn v3 endpoint classifier. The classifier is…, Run Smart Turn ONNX inference on mono float PCM., Return the last eight seconds as 16 kHz PCM, left-padded with silence. (+4 more)
 
+### Community 196 - "MessageRow"
+Cohesion: 0.24
+Nodes (6): _message_from_row(), MessageRow, Path, Row, Remove chat, cascaded messages, and screenshot files for this chat., Newest ``limit`` messages, returned oldest-first for display.
+
 ### Community 197 - "mood_eye_pose"
-Cohesion: 0.17
-Nodes (8): blob_outline_points(), hsl_to_rgb(), mood_eye_pose(), H in degrees, S/L in 0–1 → RGB in 0–1., Closed pebble silhouette (polar radii, start at top)., Capsule-eye pose for a blobatar-style expression. No mouth., AppKit window and animation controller for the face overlay. The blobatar…, BlobatarStyleTests
+Cohesion: 0.16
+Nodes (10): blob_outline_points(), hsl_to_rgb(), mood_eye_pose(), H in degrees, S/L in 0–1 → RGB in 0–1., Closed pebble silhouette (polar radii, start at top)., Capsule-eye pose for a blobatar-style expression. No mouth., Draw the current (or given) blobatar into an ``NSImage`` for chat avatars., render_blobatar_avatar() (+2 more)
 
-### Community 198 - "_apply_recipe_start"
-Cohesion: 0.29
-Nodes (8): _apply_recipe_start(), handoff_prompt(), leftover_is_screenshot_only(), leftover_text(), True when leftover work is empty or only a screenshot of the opened page., True when leftover is capture-the-window, not zoom/play/click., _recipe_already_covers_task(), RecipeHit
-
-### Community 200 - "WebMCPTests"
+### Community 198 - "WebMCPTests"
 Cohesion: 0.25
 Nodes (3): discovery(), WebMCP discovery, validation, and mutation-boundary tests., WebMCPTests
 
-### Community 201 - "scheduled_tasks.py"
-Cohesion: 0.21
-Nodes (21): Row, cancel_scheduled_task(), claim_due_task(), _clean_optional(), format_scheduled_tasks(), _from_dict(), _iso(), list_scheduled_tasks() (+13 more)
-
-### Community 204 - "format_monitor_occupancy"
-Cohesion: 0.17
-Nodes (13): format_monitor_occupancy(), format_running_apps(), _frontmost_name(), list_browser_tabs(), list_open_apps(), list_tabs_enabled(), parse_browser_tabs_payload(), User-facing running apps (regular activation policy), unique names. (+5 more)
-
-### Community 205 - "test_recipes.py"
-Cohesion: 0.21
-Nodes (4): _log(), ProposeTests, Parameterized recipes: match templates, bind slots, skip unsafe URLs., RecipeOvermatchTests
-
-### Community 207 - "cua.py"
-Cohesion: 0.13
-Nodes (31): ArgumentParser, _build_parser(), _cmd_chat(), _cmd_face(), cmd_help(), cmd_install(), cmd_queue_cancel(), cmd_queue_list() (+23 more)
-
-### Community 210 - "test_barge_router.py"
-Cohesion: 0.22
-Nodes (3): BargeRouterParseTests, Barge-in classification and orchestrator redirect., ResolveBargeTests
-
-### Community 211 - "type_text"
+### Community 199 - "type_text"
 Cohesion: 0.22
 Nodes (10): _mac_type_paste(), _mac_type_unicode(), Paste via clipboard — fallback when Unicode injection fails in a field., Inject text into the focused control., How to inject text for computer-use ``type`` actions., Release common modifiers so the next keys go to the focused field, not…, Type via Unicode events — avoids virtual-key shortcuts (dictation, emoji…, release_stuck_modifiers() (+2 more)
 
-### Community 212 - "timing.py"
-Cohesion: 0.67
-Nodes (3): log_timing(), Wall-clock + duration lines so STT steps can be compared. Lines look like::…, wall_clock()
+### Community 201 - "scheduled_tasks.py"
+Cohesion: 0.19
+Nodes (23): _claim_due_scheduled_utterance(), Promote one due scheduled task into the normal utterance path., cancel_scheduled_task(), claim_due_task(), _clean_optional(), format_scheduled_tasks(), _from_dict(), _iso() (+15 more)
 
-### Community 213 - "FanNoiseFilter"
-Cohesion: 0.36
-Nodes (4): FanNoiseFilter, _float_to_pcm16_b64(), ndarray, High-pass + adaptive spectral gate tuned for steady laptop/room fan noise.
+### Community 202 - "test_chat_llm.py"
+Cohesion: 0.15
+Nodes (10): command_for_orchestrator(), command_for_orchestrator(), User bubble text → utterance the orchestrator should hear., Compact relative time for sidebar rows (Just now, 5m ago, Yesterday)., relative_chat_time(), title_from_text(), OrchestratorCommandTests, Chat store + Electron launcher helpers (no AppKit / no network). (+2 more)
 
-### Community 216 - "._run_one"
-Cohesion: 0.14
-Nodes (12): ActionStopped, _is_blocked_chord(), _mac_scroll_pixels(), normalize_key(), Exception, Post trackpad-like continuous pixel scroll events via Quartz. pyautogui's line-…, Scroll by approximate pixel deltas. dy>0 scrolls content up (wheel up)., Raised when should_stop() fires mid-batch (wake word / quit). (+4 more)
+### Community 203 - "chat_store.py"
+Cohesion: 0.27
+Nodes (11): _clip(), _connect(), _ensure_inbox_schema(), format_recent_chat_block(), _init_schema(), _iso_age_hours(), _migrate_inbox_prefs(), Connection (+3 more)
 
-### Community 217 - "ToolHandlerError"
+### Community 204 - "active_tts_voice"
+Cohesion: 0.39
+Nodes (5): ActiveTtsVoiceTests, patch, active_tts_voice(), Voice for this turn from the last wake word. Sarvam: Rekha → Priya, Jarvis →…, _wake_blob()
+
+### Community 207 - "cua.py"
+Cohesion: 0.10
+Nodes (38): ArgumentParser, _build_parser(), _cleanup_side_processes(), _cmd_chat(), _cmd_face(), cmd_help(), cmd_install(), cmd_queue_cancel() (+30 more)
+
+### Community 210 - "PublicApiTests"
+Cohesion: 0.52
+Nodes (3): _engine(), PublicApiTests, patch
+
+### Community 211 - "test_pi_agent.py"
+Cohesion: 0.29
+Nodes (3): IsolationTests, LauncherTests, Pi launcher: same orchestrator path, no isolated HTTP runtime.
+
+### Community 213 - "ToolHandlerError"
 Cohesion: 0.67
 Nodes (3): Exception, Handler failed; the registry converts this into ``ToolOutcome(is_error=True)``., ToolHandlerError
 
-### Community 220 - "active_tts_voice"
-Cohesion: 0.11
-Nodes (18): KokoroSynthesizeTests, LocalVoiceMappingTests, PiperSynthesizeTests, dict, patch, Local Piper / Kokoro TTS adapters., _read_wav_frames(), ActiveTtsVoiceTests (+10 more)
-
-### Community 222 - "test_harness_structure.py"
-Cohesion: 0.09
-Nodes (13): Live desktop snapshot attached to one orchestrator user turn., TurnDesktopContext, build_system_prompt(), local_datetime_line(), Orchestrator system prompt (extracted from the turn loop)., One-line clock context injected on every orchestrator user turn., Assemble the orchestrator system prompt for one turn., CheckpointTests (+5 more)
-
-### Community 224 - "enroll_speaker"
+### Community 216 - "cmd_sleep"
 Cohesion: 0.40
-Nodes (6): enroll_speaker(), load_profile(), _profile_path(), Path, Save WAV samples + averaged embedding profile for ``display_name``., _threshold_from_pairwise()
+Nodes (6): cmd_sleep(), Enable/disable Sleep (ignore wake). Returns the new value., Flip Sleep mode; returns True when Sleep is now on., ``cua sleep`` / ``on`` / ``off`` / ``toggle``., set_sleep_mode(), toggle_sleep_mode()
 
-### Community 229 - "list_speaker_payload"
-Cohesion: 0.50
-Nodes (3): list_speaker_payload(), Speaker list payload for the Electron manage-speakers page., SpeakerPayloadTests
+### Community 220 - "test_tts_local.py"
+Cohesion: 0.24
+Nodes (6): LocalVoiceMappingTests, PiperSynthesizeTests, dict, patch, Local Piper / Kokoro TTS adapters., _read_wav_frames()
 
-### Community 231 - ".on_fn_edge"
-Cohesion: 0.50
-Nodes (3): Switch dots ↔ spinner without hiding. No-op if the overlay is down., set_dictation_overlay_style(), Handle Fn alone edge. Returns True if the event should be swallowed.
+### Community 221 - "PhoneTtsSinkTests"
+Cohesion: 0.31
+Nodes (3): PhoneTtsSinkTests, Phone reply sink: synthesize on Mac, skip afplay, publish WAV., _silence_wav()
 
-### Community 234 - "_transcription_session"
+### Community 224 - "speaker_id.py"
+Cohesion: 0.11
+Nodes (36): _accept_match(), _audio_at_embed_rate(), _best_similarity(), cosine_similarity(), embed_wav_bytes(), _get_embedder(), identify(), _identify_wav_bytes() (+28 more)
+
+### Community 227 - "run_orchestrator"
+Cohesion: 0.08
+Nodes (29): Show or hide the desktop chat window (tray menu / cua chat)., set_chat_overlay_enabled(), chat_browser_enabled(), chat_overlay_enabled(), chat_overlay_env_enabled(), chat_should_show(), cmd_chat(), _control_chat_app() (+21 more)
+
+### Community 228 - "prepare_tool_call"
 Cohesion: 0.33
-Nodes (6): _model_supports_turn_detection(), _noise_reduction_session_value(), Model-specific transcription fields for session.update., Build a Realtime `session.update` body for transcription-only mode., _transcription_config(), _transcription_session()
+Nodes (6): ImmediateToolOutcome, prepare_tool_call(), PreparedToolCall, Phase 1 result — clearance complete, effect not started., Phase 1 rejected the call (unknown tool or invalid args). Skip execute., Phase 1 — lookup + validate. No side effects.
+
+### Community 233 - "timing.py"
+Cohesion: 0.67
+Nodes (3): log_timing(), Wall-clock + duration lines so STT steps can be compared. Lines look like::…, wall_clock()
 
 ## Knowledge Gaps
 - **128 isolated node(s):** `{ app, BrowserWindow, ipcMain, shell, session, systemPreferences }`, `fs`, `path`, `http`, `BRIDGE_PORT` (+123 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1445 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **60 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1466 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **59 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `read_status()` connect `read_status` to `face_overlay.py`, `orchestrator.py`, `status_control.py`, `app_status.py`, `log_overlay.py`, `wake.py`, `current_blobatar`, `chat_bridge.py`, `phone_gateway.py`, `cua.py`, `running_pid`, `Observer`, `TrayController`, `observe.py`, `dictation.py`, `test_face_overlay.py`, `status_tray_controller.py`, `ChatBridgeHandler`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
+- **Why does `read_status()` connect `read_status` to `face_overlay.py`, `app_status.py`, `log_overlay.py`, `wake.py`, `PhoneGatewayHandler`, `TrayController`, `ChatBridgeHandler`, `orchestrator.py`, `chat_bridge.py`, `dictation.py`, `test_face_overlay.py`, `status_tray_controller.py`, `observe.py`, `phone_gateway.py`, `test_chat_llm.py`, `pid_alive`, `cua.py`, `Observer`, `current_blobatar`, `run_orchestrator`, `blobatar_png_bytes`?**
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
 - **Why does `load_dotenv()` connect `load_dotenv` to `orchestrator.py`, `tts_race.py`, `chat_bridge.py`, `skills.py`, `stt_race.py`, `cua.py`, `agent.py`, `dictation.py`, `status_tray_controller.py`, `observe.py`?**
-  _High betweenness centrality (0.030) - this node is a cross-community bridge._
-- **Why does `speak()` connect `speak` to `orchestrator.py`, `speaker_enroll.py`, `voice_live.py`, `task_feedback.py`, `app_status.py`, `wake.py`, `stt/__init__.py`, `agent.py`, `active_tts_voice`, `audio.py`, `tts_print`, `LowLatencyTTS`, `keyboard_barge.py`, `ensure_persistent_wake`, `log`, `tts/__init__.py`, `OpenAI`?**
-  _High betweenness centrality (0.018) - this node is a cross-community bridge._
+  _High betweenness centrality (0.028) - this node is a cross-community bridge._
 - **Are the 29 inferred relationships involving `TaskLog` (e.g. with `_extract_memories_from_log()` and `_handle_ask_user()`) actually correct?**
   _`TaskLog` has 29 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 45 inferred relationships involving `ValueError` (e.g. with `._run_one()` and `save_chat_screenshot_png()`) actually correct?**
   _`ValueError` has 45 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 2 inferred relationships involving `TrayController` (e.g. with `LogOverlay` and `main()`) actually correct?**
-  _`TrayController` has 2 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 5 inferred relationships involving `ChatStore` (e.g. with `ScreenshotDisplayPrefTests` and `PersistInboxTests`) actually correct?**
+  _`ChatStore` has 5 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `{ app, BrowserWindow, ipcMain, shell, session, systemPreferences }`, `fs`, `path` to the rest of the system?**
   _128 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `app.js` be split into smaller, more focused modules?**
+  _Cohesion score 0.061213579256883185 - nodes in this community are weakly interconnected._

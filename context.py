@@ -1,14 +1,15 @@
 """Per-turn ephemeral context (not durable memory).
 
-Live desktop occupancy, skill/MCP catalogs, and the memory *index* are rebuilt
-each turn with a character budget. Facts the user would edit stay in
+Live desktop occupancy is collected separately from skill/MCP catalogs and the
+memory index. Orchestrator turns reuse one desktop snapshot and assemble
+catalogs without recapturing occupancy. Facts the user would edit stay in
 ``memory/``; the last occupancy snapshot is only written under ``.runtime/``.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,6 +36,20 @@ class ContextBundle:
     mcp: str
     geometry: str = ""
     not_to_do: str = ""
+    frontmost: str = ""
+    skill_names: list[str] = field(default_factory=list)
+
+    def desktop_block(self) -> str:
+        parts = [p for p in (self.geometry, self.displays) if p.strip()]
+        return "\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class DesktopSnapshot:
+    """Live occupancy for one turn — no skill / memory / MCP catalogs."""
+
+    displays: str = ""
+    geometry: str = ""
     frontmost: str = ""
 
     def desktop_block(self) -> str:
@@ -86,6 +101,81 @@ def persist_ephemeral_desktop(
         return None
 
 
+def collect_desktop(
+    *,
+    monitors: list[dict] | None = None,
+    screenshot_size: tuple[int, int] | None = None,
+    include_geometry: bool = False,
+    persist: bool = True,
+    runtime_dir: Path | None = None,
+    occupancy: list[dict[str, Any]] | None = None,
+    frontmost: str | None = None,
+    occupancy_detail: Literal["full", "short", "omit"] = "full",
+    include_tabs: bool | None = None,
+    task: str | None = None,
+) -> DesktopSnapshot:
+    """Collect occupancy, geometry, and frontmost app. Does not load catalogs."""
+    from actions import format_display_context
+    from displays import format_monitor_occupancy
+
+    geometry = ""
+    if include_geometry:
+        geometry = format_display_context(monitors, screenshot_size=screenshot_size)
+    displays = ""
+    resolved_frontmost = (frontmost or "").strip()
+    if occupancy_detail != "omit":
+        want_tabs = occupancy_detail == "full" if include_tabs is None else include_tabs
+        displays = format_monitor_occupancy(
+            monitors=monitors,
+            occupancy=occupancy,
+            frontmost=frontmost,
+            include_apps=occupancy_detail == "full",
+            include_tabs=want_tabs,
+            task=task,
+        )
+        if not resolved_frontmost:
+            for line in displays.splitlines():
+                if line.startswith("Frontmost app:"):
+                    resolved_frontmost = line.split(":", 1)[1].strip()
+                    break
+    if persist:
+        persist_ephemeral_desktop(displays, runtime_dir=runtime_dir)
+    return DesktopSnapshot(
+        displays=_clip(displays, BUDGET_DISPLAYS),
+        geometry=_clip(geometry, BUDGET_DISPLAYS) if geometry else "",
+        frontmost=resolved_frontmost,
+    )
+
+
+def assemble_catalogs(
+    *,
+    memory_query: str | None = None,
+    skill_detail: Literal["full", "names"] = "full",
+    frontmost: str | None = None,
+) -> ContextBundle:
+    """Skill, memory, MCP, and not-to-do text. Does not recapture the desktop."""
+    from mcp_client import format_mcp_catalog
+    from memory import format_memory_catalog, format_relevant_memories
+    from skills import skill_catalog
+
+    resolved = (frontmost or "").strip()
+    text, parsed = skill_catalog(names_only=skill_detail == "names")
+    return ContextBundle(
+        displays="",
+        skills=_clip(text, BUDGET_SKILLS),
+        memories=_clip(
+            format_relevant_memories(memory_query, frontmost=resolved or None)
+            if memory_query
+            else format_memory_catalog(),
+            BUDGET_MEMORIES,
+        ),
+        mcp=_clip(format_mcp_catalog(), BUDGET_MCP),
+        not_to_do=_clip(format_not_to_do(), BUDGET_NOT_TO_DO),
+        frontmost=resolved,
+        skill_names=[s.name for s in parsed],
+    )
+
+
 def assemble_context(
     *,
     monitors: list[dict] | None = None,
@@ -98,56 +188,32 @@ def assemble_context(
     memory_query: str | None = None,
     skill_detail: Literal["full", "names"] = "full",
     occupancy_detail: Literal["full", "short", "omit"] = "full",
+    snapshot: DesktopSnapshot | None = None,
+    include_tabs: bool | None = None,
+    task: str | None = None,
 ) -> ContextBundle:
-    """Build the catalogs injected into orchestrator / agent prompts."""
-    from actions import format_display_context
-    from displays import format_monitor_occupancy
-    from mcp_client import format_mcp_catalog
-    from memory import format_memory_catalog, format_relevant_memories
-    from skills import format_skill_catalog
-
-    geometry = ""
-    if include_geometry:
-        geometry = format_display_context(monitors, screenshot_size=screenshot_size)
-    displays = ""
-    resolved_frontmost = (frontmost or "").strip()
-    if occupancy_detail != "omit":
-        displays = format_monitor_occupancy(
-            monitors=monitors,
-            occupancy=occupancy,
-            frontmost=frontmost,
-            include_apps=occupancy_detail == "full",
-            include_tabs=occupancy_detail == "full",
-        )
-        if not resolved_frontmost:
-            for line in displays.splitlines():
-                if line.startswith("Frontmost app:"):
-                    resolved_frontmost = line.split(":", 1)[1].strip()
-                    break
-    if persist:
-        persist_ephemeral_desktop(displays, runtime_dir=runtime_dir)
-
-    bundle = ContextBundle(
-        displays=_clip(displays, BUDGET_DISPLAYS),
-        skills=_clip(
-            format_skill_catalog(names_only=skill_detail == "names"),
-            BUDGET_SKILLS,
-        ),
-        memories=_clip(
-            format_relevant_memories(
-                memory_query,
-                frontmost=resolved_frontmost or None,
-            )
-            if memory_query
-            else format_memory_catalog(),
-            BUDGET_MEMORIES,
-        ),
-        mcp=_clip(format_mcp_catalog(), BUDGET_MCP),
-        geometry=_clip(geometry, BUDGET_DISPLAYS) if geometry else "",
-        not_to_do=_clip(format_not_to_do(), BUDGET_NOT_TO_DO),
-        frontmost=resolved_frontmost,
+    """Build prompt context. Pass ``snapshot`` to reuse a turn's desktop capture."""
+    snap = snapshot or collect_desktop(
+        monitors=monitors,
+        screenshot_size=screenshot_size,
+        include_geometry=include_geometry,
+        persist=persist,
+        runtime_dir=runtime_dir,
+        occupancy=occupancy,
+        frontmost=frontmost,
+        occupancy_detail=occupancy_detail,
+        include_tabs=include_tabs,
+        task=task if task is not None else memory_query,
     )
-    return bundle
+    catalogs = assemble_catalogs(
+        memory_query=memory_query,
+        skill_detail=skill_detail,
+        frontmost=snap.frontmost or frontmost,
+    )
+    catalogs.displays = snap.displays
+    catalogs.geometry = snap.geometry
+    catalogs.frontmost = snap.frontmost or catalogs.frontmost
+    return catalogs
 
 
 @dataclass(frozen=True)
@@ -200,6 +266,8 @@ def _capture_desktop_context(
     enable_ax: bool,
     header: str,
     log_prefix: str = "orchestrator",
+    task: str | None = "",
+    include_tabs: bool | None = None,
 ) -> TurnDesktopContext:
     monitors: list[dict] | None = None
     screenshot_png: bytes | None = None
@@ -219,16 +287,17 @@ def _capture_desktop_context(
     desktop_text = ""
     frontmost = ""
     try:
-        bundle = assemble_context(
+        snap = collect_desktop(
             monitors=monitors,
             screenshot_size=screenshot_size,
             include_geometry=True,
             persist=False,
             occupancy_detail="full",
-            skill_detail="names",
+            include_tabs=include_tabs,
+            task=task,
         )
-        desktop_text = bundle.desktop_block()
-        frontmost = bundle.frontmost
+        desktop_text = snap.desktop_block()
+        frontmost = snap.frontmost
     except Exception as e:
         desktop_text = f"(display context unavailable: {e})"
 
@@ -276,6 +345,8 @@ def read_screen() -> TurnDesktopContext:
         enable_ax=True,
         header="Screen read (read_screen):",
         log_prefix="read_screen",
+        task=None,
+        include_tabs=True,
     )
 
 
@@ -318,4 +389,5 @@ def capture_turn_desktop_context(*, utterance: str = "") -> TurnDesktopContext:
         enable_ax=_ax_wanted(utterance),
         header="Desktop snapshot for this question (what the user is looking at on the Mac now):",
         log_prefix="orchestrator",
+        task=utterance,
     )

@@ -1,8 +1,7 @@
 # Raspberry Pi / headless
 
 Pi mode is the **same** `orchestrator.py` as desktop. It hides `start_task`
-(computer-use) and serves the existing chat app in a browser. Wake word,
-live voice, barge-in, TTS, memory, timers, MCP, and the phone gateway stay.
+(computer-use) and serves the existing chat app in a browser. Wake word, STT, barge-in, TTS, memory, timers, MCP, and the phone gateway stay.
 
 ```bash
 python orchestrator.py --auto --pi

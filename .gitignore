@@ -13,6 +13,7 @@ stt_race.log
 tts_race.log
 memory/personal/*.md
 memory/apps/*.md
+memory/**/*.lock
 memory/screens/*
 !memory/screens/.gitkeep
 *.sqlite3

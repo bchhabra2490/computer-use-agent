@@ -1005,12 +1005,6 @@ def wait_for_wake(
 
     sleeping_announced = False
     while True:
-        if should_stop is not None:
-            try:
-                if should_stop():
-                    return False
-            except Exception:
-                return False
         if _sleep_mode_on():
             if not sleeping_announced:
                 print(
@@ -1029,8 +1023,19 @@ def wait_for_wake(
                 time.sleep(0.15)
             sleeping_announced = False
             continue
-
         mon = get_persistent_wake()
+        if (
+            mon is not None
+            and not mon._paused.is_set()
+            and mon.woken.is_set()
+        ):
+            return True
+        if should_stop is not None:
+            try:
+                if should_stop():
+                    return False
+            except Exception:
+                return False
         if (
             mon is not None
             and not mon._paused.is_set()
@@ -1231,9 +1236,9 @@ class WakeMonitor:
             if should_stop is not None:
                 try:
                     if should_stop():
-                        return False
+                        return self.woken.is_set()
                 except Exception:
-                    return False
+                    return self.woken.is_set()
             if timeout is not None and (time.monotonic() - started) >= timeout:
                 return False
             time.sleep(0.05)

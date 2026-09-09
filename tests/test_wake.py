@@ -165,6 +165,26 @@ class ResumeWakeTests(unittest.TestCase):
         self.assertFalse(mon.woken.is_set())
         self.assertFalse(mon._paused.is_set())
 
+    def test_wait_treats_late_wake_as_success_not_stop(self) -> None:
+        mon = wake.WakeMonitor()
+        calls = {"n": 0}
+
+        def stop_then_wake() -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                mon.woken.set()
+                return True
+            return False
+
+        self.assertTrue(mon.wait(should_stop=stop_then_wake, timeout=1.0))
+
+    def test_wait_for_wake_returns_true_if_hit_already_pending(self) -> None:
+        mon = wake.WakeMonitor()
+        mon.woken.set()
+        mon._paused.clear()
+        with patch.object(wake, "get_persistent_wake", return_value=mon):
+            self.assertTrue(wake.wait_for_wake(should_stop=lambda: True, prompt=None))
+
 
 class WakeSpotterTests(unittest.TestCase):
     def test_feed_triggers_on_threshold(self) -> None:

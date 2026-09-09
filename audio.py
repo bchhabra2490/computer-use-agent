@@ -126,13 +126,6 @@ class AudioSession:
                 return True
             if speak_pending():
                 return True
-            try:
-                from wake import wake_hit_pending
-
-                if wake_hit_pending():
-                    return True
-            except Exception:
-                pass
             if quit_check is not None:
                 try:
                     if quit_check():
@@ -161,9 +154,16 @@ class AudioSession:
             return self._listen_shortcut(listen_prompt)
 
         if not self.wait_for_wake(should_stop=_stop, prompt=wake_prompt):
-            if consume_listen():
-                return self._listen_shortcut(listen_prompt)
-            return consume_utterance()
+            try:
+                from wake import wake_hit_pending
+
+                pending_wake = wake_hit_pending()
+            except Exception:
+                pending_wake = False
+            if not pending_wake:
+                if consume_listen():
+                    return self._listen_shortcut(listen_prompt)
+                return consume_utterance()
         if quit_check is not None and quit_check():
             return None
         hit = get_last_wake()

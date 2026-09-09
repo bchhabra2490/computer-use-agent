@@ -106,6 +106,14 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+`requirements.txt` pulls core plus optional providers. For a smaller install:
+
+```bash
+pip install -r requirements-core.txt
+# then, as needed:
+pip install -r requirements-optional.txt
+```
+
 Add at least `OPENAI_API_KEY` to `.env`, then start the background orchestrator:
 
 ```bash

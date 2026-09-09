@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -123,6 +124,46 @@ class OverAndOutChimeTests(unittest.TestCase):
         with patch.object(wake, "play_wake_chime") as mocked:
             wake.play_over_and_out_chime()
             mocked.assert_called_once()
+
+
+class WakeDetectChimeTests(unittest.TestCase):
+    def test_notify_plays_nonblocking_tink(self) -> None:
+        with patch.object(wake, "play_wake_chime") as mocked:
+            wake.notify_wake_detected()
+        mocked.assert_called_once_with(blocking=False)
+
+    def test_wake_chime_on_by_default(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=False),
+            patch.object(wake, "_afplay", return_value=True) as afplay,
+        ):
+            os.environ.pop("WAKE_CHIME", None)
+            wake.play_wake_chime(blocking=False)
+        afplay.assert_called_once()
+
+    def test_wake_chime_can_be_disabled(self) -> None:
+        with (
+            patch.dict("os.environ", {"WAKE_CHIME": "0"}),
+            patch.object(wake, "_afplay", return_value=True) as afplay,
+        ):
+            wake.play_wake_chime(blocking=False)
+        afplay.assert_not_called()
+
+
+class ResumeWakeTests(unittest.TestCase):
+    def test_resume_preserves_pending_hit_when_not_paused(self) -> None:
+        mon = wake.WakeMonitor()
+        mon.woken.set()
+        mon.resume()
+        self.assertTrue(mon.woken.is_set())
+
+    def test_resume_clears_hit_after_pause(self) -> None:
+        mon = wake.WakeMonitor()
+        mon.woken.set()
+        mon._paused.set()
+        mon.resume()
+        self.assertFalse(mon.woken.is_set())
+        self.assertFalse(mon._paused.is_set())
 
 
 class WakeSpotterTests(unittest.TestCase):

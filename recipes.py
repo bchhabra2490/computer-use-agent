@@ -448,8 +448,10 @@ def _has_map_word(text: str) -> bool:
 
 def recipe_covers_request(recipe: Recipe, utterance: str) -> bool:
     """False when this recipe would swallow a larger task (fall through to skills)."""
-    if _prelude_is_maps(recipe) and recipe.params == ["place"]:
-        if _MAPS_PLACE_TOO_NARROW.search(utterance or ""):
+    if _prelude_is_maps(recipe):
+        if not (extract_maps_place(utterance) or _has_map_word(utterance)):
+            return False
+        if recipe.params == ["place"] and _MAPS_PLACE_TOO_NARROW.search(utterance or ""):
             return False
     return True
 
@@ -552,7 +554,7 @@ def _looks_like_agent_brief(text: str) -> bool:
 
 
 def _bind_recipe(recipe: Recipe, utterance: str) -> tuple[dict[str, str], str] | None:
-    if _prelude_is_maps(recipe) and "place" in (recipe.params or ["place"]):
+    if _prelude_is_maps(recipe) and "place" in recipe.params:
         place = extract_maps_place(utterance)
         if place and _valid_slot("place", place):
             leftover = _vision_leftover(utterance) if _task_needs_vision(utterance) else ""
@@ -578,6 +580,8 @@ def _bind_recipe(recipe: Recipe, utterance: str) -> tuple[dict[str, str], str] |
 
 
 def _bind_without_template(recipe: Recipe, utterance: str) -> tuple[dict[str, str], str] | None:
+    if recipe.match and not all(_phrase_in(utterance, phrase) for phrase in recipe.match):
+        return None
     values: dict[str, str] = {}
     urls = _extract_urls(utterance)
     leftover = _norm(utterance)
@@ -629,7 +633,11 @@ def find_matching_recipe(
         bound = _bind_recipe(recipe, utterance)
         if bound is None:
             continue
-        if recipe.match_templates or _prelude_is_maps(recipe):
+        if not recipe_covers_request(recipe, utterance):
+            continue
+        if recipe.match_templates:
+            score = 1.0
+        elif _prelude_is_maps(recipe):
             score = 1.0
         else:
             score = score_recipe(recipe, utterance)
@@ -799,6 +807,15 @@ def fill_recipe_slots(
         except Exception as e:
             print(f"[recipe] LLM fill failed ({e})", flush=True)
     return None
+
+
+def _recipe_already_covers_task(hit: tuple[Recipe, dict[str, str], str]) -> bool:
+    """True when leftover work is empty or only a screenshot of the opened page."""
+    recipe, params, leftover = hit
+    extra = leftover_text(recipe, leftover, params).strip()
+    if not extra:
+        return True
+    return leftover_is_screenshot_only(extra)
 
 
 def leftover_text(recipe: Recipe, leftover: str, params: dict[str, str]) -> str:
@@ -1192,7 +1209,8 @@ def _maybe_save_recipe_impl(
     if not RECIPE_RECORD:
         return None
     existing = load_recipes(recipes_dir)
-    if find_matching_recipe(task, existing) is not None:
+    hit = find_matching_recipe(task, existing)
+    if hit is not None and _recipe_already_covers_task(hit):
         print("[recipe] existing recipe already matches this task; skip save.")
         return None
     recipe = None

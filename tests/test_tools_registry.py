@@ -98,6 +98,26 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("abc", outcome.output)
         post.assert_called_once_with("Put this in chat", open_window=False)
 
+    def test_schedule_error_is_machine_readable(self) -> None:
+        outcome = tr.run_tool(
+            "schedule_task",
+            {"task": "", "run_at_epoch": 1, "source": "user", "parent_task_id": None, "note": None},
+            brain="orchestrator",
+        )
+        self.assertTrue(outcome.is_error)
+        self.assertTrue(str(outcome.output).startswith("Error:"))
+
+    def test_schedule_rejects_malformed_epoch(self) -> None:
+        cases = ([1, 2], {"at": 1}, float("inf"), float("nan"), "inf", True)
+        for value in cases:
+            outcome = tr.run_tool(
+                "schedule_task",
+                {"task": "later", "run_at_epoch": value, "source": "user"},
+                brain="orchestrator",
+            )
+            self.assertTrue(outcome.is_error, value)
+            self.assertIn("run_at_epoch", str(outcome.output))
+
     def test_unknown_shared_raises(self) -> None:
         with self.assertRaises(KeyError):
             tr.run_shared_tool("start_task", {"task": "x"})

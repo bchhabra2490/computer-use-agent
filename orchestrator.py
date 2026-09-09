@@ -60,7 +60,6 @@ from llm_client import (
     supports_previous_response_id,
 )
 
-import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
     active_agents,
@@ -76,7 +75,6 @@ from app_status import (
     phone_photo_pending,
     quit_requested,
     register_orchestrator,
-    remove_agent,
     request_mark_done,
     reply_sink,
     reply_to_chat,
@@ -91,15 +89,14 @@ from app_status import (
     consume_speak,
     take_turn_chat_screenshot,
     unregister_orchestrator,
-    upsert_agent,
     utterance_pending,
 )
 from bus import (
-    AgentMessageInbox,
     AgentMessagePublisher,
     AskUserBridge,
     strip_wake_prefix,
 )
+from agent_jobs import AgentJob, start_agent_thread as _start_agent_thread
 from audio import AudioSession, bind_audio, get_audio
 from checkpoint import run_orchestrator_checkpoint
 from context import assemble_context, read_screen_vision_input
@@ -240,35 +237,6 @@ _phone_photo_in_session = False
 
 class VoiceTurnCancelled(Exception):
     """The user discarded the current voice turn with the global shortcut."""
-
-
-class AgentJob:
-    """Background computer-agent run + ZeroMQ inbox handle."""
-
-    def __init__(
-        self,
-        task: str,
-        call_id: str,
-        *,
-        match_text: str | None = None,
-        speaker_context: str = "",
-    ):
-        self.task = task
-        self.match_text = (match_text or task).strip() or task
-        self.speaker_context = (speaker_context or "").strip()
-        self.call_id = call_id
-        self.done = threading.Event()
-        self.result: str | None = None
-        self.error: BaseException | None = None
-        self.thread: threading.Thread | None = None
-        self.redirected_from_barge = False
-        self.log_dir: str | None = None
-        self.reply_sink: str = "mac"
-        self.feedback_payload: dict[str, Any] | None = None
-
-    @property
-    def alive(self) -> bool:
-        return self.thread is not None and self.thread.is_alive()
 
 
 def _format_task_history(
@@ -838,65 +806,6 @@ def _execute_create_response(
     except Exception as e:
         return session.on_error(e, client, kwargs)
     return session.finish(client, kwargs)
-
-
-
-def _start_agent_thread(
-    job: AgentJob,
-    *,
-    auto: bool,
-    max_steps: int,
-    ask_bridge: AskUserBridge,
-) -> None:
-    upsert_agent(
-        job.call_id,
-        task=job.task,
-        kind="computer-agent",
-        status="running",
-    )
-
-    def _target() -> None:
-        inbox = AgentMessageInbox()
-
-        def _on_log_dir(path: str) -> None:
-            job.log_dir = path
-
-        try:
-            job.result = computer_agent.run(
-                job.task,
-                auto=auto,
-                max_steps=max_steps,
-                voice=False,
-                message_inbox=inbox,
-                ask_user_bridge=ask_bridge,
-                status_agent_id=job.call_id,
-                user_said=job.match_text,
-                speaker_context=job.speaker_context,
-                on_log_dir=_on_log_dir,
-                latency_trace_id=getattr(job, "latency_trace_id", None),
-                execution_route=getattr(job, "execution_route", None),
-            )
-        except BaseException as e:  # noqa: BLE001 — capture for main thread
-            job.error = e
-            job.result = f"failed\nError: {e}"
-        finally:
-            from latency_report import finish_trace
-
-            finish_trace(
-                getattr(job, "latency_trace_id", None),
-                status="failed" if job.error is not None else "completed",
-                task=job.task,
-                metadata={"result": (job.result or "")[:160]},
-            )
-            remove_agent(job.call_id)
-            job.done.set()
-
-    job.thread = threading.Thread(
-        target=_target,
-        name="computer-agent",
-        daemon=True,
-    )
-    job.thread.start()
 
 
 def _task_context_snippet(task_history: list[dict[str, str]]) -> str:
@@ -2319,33 +2228,40 @@ def _collect_next_utterance(pending, client, sess):
 
     action is quit, continue, or ready.
     """
-    if pending is not None:
-        return "ready", pending, None, None
-    scheduled_utterance, scheduled_task_id = _claim_due_scheduled_utterance()
-    if scheduled_utterance:
-        print(f'\n[user] "{scheduled_utterance}" (scheduled)')
-        status_log(f'[user] "{scheduled_utterance}" (scheduled)')
-        return "ready", scheduled_utterance, scheduled_task_id, None
-    next_batch = get_next_run_queue().drain()
-    if next_batch:
-        utterance = " ".join(m.text for m in next_batch if m.text).strip()
-        print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
-        return "ready", utterance, None, None
-    if speak_pending():
-        return "continue", None, None, _service_timer_speech(client)
-    utterance = _listen_command(
-        client,
-        should_stop=quit_requested,
-        wake_prompt=f"Waiting for {format_wake_phrases()}…",
-        listen_prompt="Listening…",
-    )
-    if quit_requested():
+    from app_status import speak_pending
+    from input_queues import get_next_run_queue
+    from input_router import collect_next_input
+    from status_control import quit_requested
+
+    def _on_quit() -> None:
         print("[orchestrator] quit requested from menu bar.")
         sess.enter_and_log("done", "Quit from menu bar")
-        return "quit", None, None, None
-    if utterance is None:
-        return "continue", None, None, None
-    return "ready", utterance, None, None
+
+    def _log_scheduled(utterance: str) -> None:
+        print(f'\n[user] "{utterance}" (scheduled)')
+        status_log(f'[user] "{utterance}" (scheduled)')
+
+    def _log_next_run(utterance: str) -> None:
+        print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
+
+    result = collect_next_input(
+        pending,
+        claim_scheduled=_claim_due_scheduled_utterance,
+        drain_next_run=lambda: get_next_run_queue().drain(),
+        speak_pending=speak_pending,
+        service_timer_speech=lambda: _service_timer_speech(client),
+        listen=lambda: _listen_command(
+            client,
+            should_stop=quit_requested,
+            wake_prompt=f"Waiting for {format_wake_phrases()}…",
+            listen_prompt="Listening…",
+        ),
+        quit_requested=quit_requested,
+        on_quit=_on_quit,
+        log_scheduled=_log_scheduled,
+        log_next_run=_log_next_run,
+    )
+    return result.action, result.utterance, result.scheduled_id, result.pending
 
 
 def _handle_voice_shortcut(utterance: str, *, client, llm, sess, scheduled_id):

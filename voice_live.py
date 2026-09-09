@@ -64,7 +64,7 @@ _SHUT_PHRASES = frozenset(
 
 
 def live_voice_enabled() -> bool:
-    return os.environ.get("VOICE_LIVE", "1").strip().lower() not in {
+    return os.environ.get("VOICE_LIVE", "0").strip().lower() not in {
         "0",
         "false",
         "no",

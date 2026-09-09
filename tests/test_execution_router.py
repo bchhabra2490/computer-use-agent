@@ -3,6 +3,14 @@ from unittest.mock import patch
 from execution_router import resolve_execution_route
 
 
+def test_weather_does_not_claim_a_maps_recipe() -> None:
+    route = resolve_execution_route(
+        "Open Google Chrome and search current weather for Mulki, Karnataka, India."
+    )
+    assert route.recipe != "open-google-maps"
+    assert route.lane == "integration"
+
+
 def test_recipe_routes_to_fast_browser_lane() -> None:
     fake = (type("Recipe", (), {"name": "open-google-maps"})(), {}, "")
     with patch("recipes.find_matching_recipe", return_value=fake):

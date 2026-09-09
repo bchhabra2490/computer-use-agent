@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -83,6 +84,109 @@ class ScheduledTaskTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].task, "Check the deployment again")
         self.assertEqual(rows[0].parent_task_id, "job123")
+
+    def test_invalid_schedule_is_error_outcome(self) -> None:
+        outcome = tr.run_tool(
+            "schedule_task",
+            {"task": "too soon", "run_at_epoch": time.time() - 5, "source": "user"},
+            brain="orchestrator",
+        )
+        self.assertTrue(outcome.is_error)
+        self.assertTrue(outcome.output.startswith("Error:"))
+
+    def test_concurrent_schedules_keep_both_tasks(self) -> None:
+        import subprocess
+
+        repo = str(ROOT)
+        runtime = str(self.runtime)
+        self.assertFalse((self.runtime / "scheduled-tasks.db").exists())
+        code = (
+            "import os, sys, time\n"
+            "os.environ['AGENT_RUNTIME_DIR'] = sys.argv[1]\n"
+            "sys.path.insert(0, sys.argv[2])\n"
+            "import scheduled_tasks as sq\n"
+            "sq.schedule_task(sys.argv[3], run_at=time.time() + 90, source='user')\n"
+        )
+        names = ("alpha-task", "beta-task", "gamma-task", "delta-task")
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", code, runtime, repo, name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for name in names
+        ]
+        for proc in procs:
+            stdout, stderr = proc.communicate(timeout=30)
+            self.assertEqual(proc.returncode, 0, stderr or stdout)
+        listed = {row.task for row in sq.list_scheduled_tasks()}
+        self.assertEqual(listed, set(names))
+
+    def test_migrates_legacy_json_queue(self) -> None:
+        now = time.time()
+        payload = [
+            {
+                "id": "legacyjson01",
+                "task": "From JSON",
+                "run_at": now + 120,
+                "created_at": now,
+                "source": "user",
+                "status": "queued",
+            }
+        ]
+        self.queue_path.write_text(json.dumps(payload), encoding="utf-8")
+        listed = sq.list_scheduled_tasks()
+        self.assertEqual([row.task for row in listed], ["From JSON"])
+        self.assertFalse(self.queue_path.is_file())
+        self.assertTrue(self.queue_path.with_suffix(".json.migrated").is_file())
+
+    def test_migrate_keeps_json_if_commit_fails(self) -> None:
+        now = time.time()
+        payload = [
+            {
+                "id": "legacyjson02",
+                "task": "Keep me",
+                "run_at": now + 120,
+                "created_at": now,
+                "source": "user",
+                "status": "queued",
+            }
+        ]
+        self.queue_path.write_text(json.dumps(payload), encoding="utf-8")
+        real_import = sq._import_json_queue
+
+        def boom(conn, path):
+            real_import(conn, path)
+            raise RuntimeError("imported then crash")
+
+        with patch.object(sq, "_import_json_queue", side_effect=boom):
+            with self.assertRaises(RuntimeError):
+                sq.list_scheduled_tasks()
+        self.assertTrue(self.queue_path.is_file())
+        self.assertFalse(self.queue_path.with_suffix(".json.migrated").is_file())
+        listed = sq.list_scheduled_tasks()
+        self.assertEqual([row.task for row in listed], ["Keep me"])
+        self.assertFalse(self.queue_path.is_file())
+
+    def test_recovers_stranded_migrated_json(self) -> None:
+        now = time.time()
+        payload = [
+            {
+                "id": "strandedjson1",
+                "task": "Stranded",
+                "run_at": now + 120,
+                "created_at": now,
+                "source": "user",
+                "status": "queued",
+            }
+        ]
+        migrated = self.queue_path.with_suffix(".json.migrated")
+        migrated.write_text(json.dumps(payload), encoding="utf-8")
+        listed = sq.list_scheduled_tasks()
+        self.assertEqual([row.task for row in listed], ["Stranded"])
+        again = sq.list_scheduled_tasks()
+        self.assertEqual([row.task for row in again], ["Stranded"])
 
 
 if __name__ == "__main__":

@@ -468,8 +468,13 @@ class CondenseMemoryTests(unittest.TestCase):
             ]
         }
         files = mem.parse_condensed_memory_files(payload)
-        written = mem.apply_condensed_memory_files(files, memory_dir=self.root)
+        notes = [n for n in mem.list_memories("app", memory_dir=self.root) if n.name == "youtube"]
+        _refreshed, hashes = mem._snapshot_notes(notes)
+        written, conflicted = mem.apply_condensed_memory_files(
+            files, memory_dir=self.root, snapshots=hashes
+        )
         self.assertEqual(written, ["apps/youtube.md"])
+        self.assertEqual(conflicted, [])
         body = mem.read_memory("app", "youtube", memory_dir=self.root)
         self.assertIn("Played A", body)
         self.assertEqual(mem._dated_heading_count(body), 0)
@@ -537,6 +542,273 @@ class CondenseMemoryTests(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
             self.assertTrue(started.wait(timeout=1.0))
             release.set()
+
+    def test_condense_keeps_facts_written_during_llm(self) -> None:
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Likes tea",
+            memory_dir=self.root,
+            condense=False,
+        )
+        memory_dir = self.root
+
+        class _Resp:
+            def __init__(self, text: str) -> None:
+                self.output_text = text
+                self.output = []
+
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+                self.calls = 0
+
+            def create(self, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    mem.save_memory(
+                        "personal",
+                        "profile",
+                        "- Likes oat milk",
+                        memory_dir=memory_dir,
+                        condense=False,
+                    )
+                    payload = {
+                        "files": [
+                            {
+                                "kind": "personal",
+                                "name": "profile",
+                                "text": "# personal / profile\n\n- Likes tea",
+                            }
+                        ]
+                    }
+                else:
+                    payload = {
+                        "files": [
+                            {
+                                "kind": "personal",
+                                "name": "profile",
+                                "text": (
+                                    "# personal / profile\n\n"
+                                    "- Likes tea\n- Likes oat milk"
+                                ),
+                            }
+                        ]
+                    }
+                return _Resp(json.dumps(payload))
+
+        mem._condense_memories_impl(
+            _Client(),
+            memory_dir=self.root,
+            force_kinds=frozenset({"personal"}),
+        )
+        body = mem.read_memory("personal", memory_dir=self.root)
+        self.assertIn("oat milk", body)
+
+    def test_condense_rejects_stale_prompt_after_append(self) -> None:
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Likes tea",
+            memory_dir=self.root,
+            condense=False,
+        )
+        notes = [
+            n
+            for n in mem.list_memories("all", memory_dir=self.root)
+            if n.kind == "personal"
+        ]
+        refreshed, hashes = mem._snapshot_notes(notes)
+        snapshot_hash = hashes["personal:profile"]
+        self.assertEqual(snapshot_hash, mem._hash_bytes(refreshed[0].text.encode("utf-8")))
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Likes oat milk",
+            memory_dir=self.root,
+            condense=False,
+        )
+        self.assertNotEqual(snapshot_hash, mem._file_sha256(notes[0].path))
+        written, conflicted = mem.apply_condensed_memory_files(
+            [
+                {
+                    "kind": "personal",
+                    "name": "profile",
+                    "text": "# personal / profile\n\n- Likes tea",
+                }
+            ],
+            memory_dir=self.root,
+            snapshots=hashes,
+        )
+        self.assertEqual(written, [])
+        self.assertTrue(conflicted)
+        body = mem.read_memory("personal", memory_dir=self.root)
+        self.assertIn("oat milk", body)
+
+    def test_format_sends_long_notes_as_overflow(self) -> None:
+        text = ("- filler line that takes space\n" * 400) + "- UNIQUE_TAIL_FACT likes rye"
+        self.assertGreater(len(text), mem._CONDENSE_NOTE_CHARS)
+        note = mem.MemoryNote(
+            kind="personal",
+            name="profile",
+            path=self.root / "profile.md",
+            text=text,
+        )
+        blob, included, overflow = mem._format_notes_for_condense([note])
+        self.assertEqual(included, set())
+        self.assertEqual(len(overflow), 1)
+        self.assertNotIn("truncated", blob)
+        self.assertNotIn("UNIQUE_TAIL_FACT", blob)
+
+    def test_condense_keeps_facts_beyond_note_cutoff(self) -> None:
+        filler = "".join(f"- filler item {i}\n" for i in range(500))
+        tail_fact = "- UNIQUE_TAIL_FACT likes rye bread"
+        body = f"# personal / profile\n\n{filler}{tail_fact}\n"
+        self.assertGreater(len(body), mem._CONDENSE_NOTE_CHARS)
+        mem.ensure_memory_dirs(self.root)
+        mem.personal_memory_path(memory_dir=self.root).write_text(body, encoding="utf-8")
+
+        class _Resp:
+            def __init__(self, text: str) -> None:
+                self.output_text = text
+                self.output = []
+
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+                self.prompts: list[str] = []
+
+            def create(self, **kwargs):
+                prompt = str(kwargs.get("input") or "")
+                self.prompts.append(prompt)
+                facts = ["- condensed chunk"]
+                if "UNIQUE_TAIL_FACT" in prompt:
+                    facts.append("- UNIQUE_TAIL_FACT likes rye bread")
+                payload = {
+                    "files": [
+                        {
+                            "kind": "personal",
+                            "name": "profile",
+                            "text": "# personal / profile\n\n" + "\n".join(facts),
+                        }
+                    ]
+                }
+                return _Resp(json.dumps(payload))
+
+        client = _Client()
+        mem._condense_memories_impl(
+            client,
+            memory_dir=self.root,
+            force_kinds=frozenset({"personal"}),
+        )
+        result = mem.read_memory("personal", memory_dir=self.root)
+        self.assertIn("UNIQUE_TAIL_FACT", result)
+        self.assertTrue(any("UNIQUE_TAIL_FACT" in prompt for prompt in client.prompts))
+
+    def test_chunked_condense_ignores_mismatched_note(self) -> None:
+        filler = "".join(f"- filler item {i}\n" for i in range(500))
+        original_fact = "- PROFILE_ONLY_FACT likes tea"
+        body = f"# personal / profile\n\n{filler}{original_fact}\n"
+        self.assertGreater(len(body), mem._CONDENSE_NOTE_CHARS)
+        mem.ensure_memory_dirs(self.root)
+        mem.personal_memory_path(memory_dir=self.root).write_text(body, encoding="utf-8")
+
+        class _Resp:
+            output_text = json.dumps(
+                {
+                    "files": [
+                        {
+                            "kind": "app",
+                            "name": "unrelated",
+                            "text": "# app / unrelated\n\n- hijacked unrelated fact",
+                        }
+                    ]
+                }
+            )
+            output = []
+
+        class _Client:
+            def __init__(self) -> None:
+                self.responses = self
+
+            def create(self, **_kwargs):
+                return _Resp()
+
+        mem._condense_memories_impl(
+            _Client(),
+            memory_dir=self.root,
+            force_kinds=frozenset({"personal"}),
+        )
+        result = mem.read_memory("personal", memory_dir=self.root)
+        self.assertIn("PROFILE_ONLY_FACT", result)
+        self.assertNotIn("hijacked unrelated fact", result)
+
+        note = mem.MemoryNote(
+            kind="personal",
+            name="profile",
+            path=mem.personal_memory_path(memory_dir=self.root),
+            text="- likes tea",
+        )
+        kept = mem._request_chunk_text(_Client(), note, "- likes tea", index=1, total=1)
+        self.assertEqual(kept, "- likes tea")
+
+    def test_apply_skips_notes_not_fully_sent(self) -> None:
+        mem.save_memory(
+            "personal",
+            "profile",
+            "- Likes tea\n- UNIQUE_TAIL_FACT likes rye",
+            memory_dir=self.root,
+            condense=False,
+        )
+        notes = mem.list_memories("personal", memory_dir=self.root)
+        _refreshed, hashes = mem._snapshot_notes(notes)
+        written, conflicted = mem.apply_condensed_memory_files(
+            [
+                {
+                    "kind": "personal",
+                    "name": "profile",
+                    "text": "# personal / profile\n\n- Likes tea",
+                }
+            ],
+            memory_dir=self.root,
+            snapshots=hashes,
+            allowed_keys=set(),
+        )
+        self.assertEqual(written, [])
+        self.assertEqual(conflicted, [])
+        body = mem.read_memory("personal", memory_dir=self.root)
+        self.assertIn("UNIQUE_TAIL_FACT", body)
+
+    def test_apply_rejects_note_absent_from_snapshot(self) -> None:
+        mem.save_memory(
+            "app", "youtube", "- Played A", memory_dir=self.root, condense=False
+        )
+        mem.save_memory(
+            "app", "gmail", "- Keep this inbox fact", memory_dir=self.root, condense=False
+        )
+        youtube = [n for n in mem.list_memories("app", memory_dir=self.root) if n.name == "youtube"]
+        _refreshed, hashes = mem._snapshot_notes(youtube)
+        written, conflicted = mem.apply_condensed_memory_files(
+            [
+                {
+                    "kind": "app",
+                    "name": "gmail",
+                    "text": "# app / gmail\n\n- invented",
+                },
+                {
+                    "kind": "app",
+                    "name": "youtube",
+                    "text": "# app / youtube\n\n- Played A",
+                },
+            ],
+            memory_dir=self.root,
+            snapshots=hashes,
+        )
+        self.assertEqual(written, ["apps/youtube.md"])
+        self.assertEqual(conflicted, [])
+        gmail = mem.read_memory("app", "gmail", memory_dir=self.root)
+        self.assertIn("Keep this inbox fact", gmail)
+        self.assertNotIn("invented", gmail)
 
     def test_disabled(self) -> None:
         with patch.dict("os.environ", {"MEMORY_CONDENSE": "0"}):

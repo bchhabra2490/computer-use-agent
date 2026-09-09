@@ -17,14 +17,16 @@ Files: ``memory/personal/profile.md``, ``memory/apps/<slug>.md``,
 from __future__ import annotations
 
 import base64
+import hashlib
 import math
 import os
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from llm_client import parse_json_object as _parse_json_object
 from llm_client import response_output_text as _response_text
@@ -35,6 +37,9 @@ _CONDENSE_STATE_LOCK = threading.Lock()
 _condense_running = False
 _condense_pending = False
 _condense_force_kinds: set[str] = set()
+_CONDENSE_MAX_ATTEMPTS = 3
+_CONDENSE_NOTE_CHARS = 8_000
+_CONDENSE_BATCH_CHARS = 24_000
 # All personal facts share this single note.
 PERSONAL_FILE_SLUG = "profile"
 MEMORY_VISION_MODEL = (
@@ -319,7 +324,7 @@ def save_memory(
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     block = f"## {stamp}\n\n{body}\n"
 
-    with _MEMORY_WRITE_LOCK:
+    with _memory_file_lock(path):
         if how == "replace" or not path.exists():
             header = f"# {canon} / {slug}\n\n"
             path.write_text(header + block, encoding="utf-8")
@@ -801,12 +806,74 @@ def parse_condensed_memory_files(payload: Any) -> list[dict[str, str]]:
     return files
 
 
+def _hash_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.is_file():
+        return _hash_bytes(b"")
+    return _hash_bytes(path.read_bytes())
+
+
+def _read_note_snapshot(path: Path) -> tuple[str, str]:
+    """Read a note once and derive text plus hash from the same bytes."""
+    raw = path.read_bytes() if path.is_file() else b""
+    return raw.decode("utf-8", errors="replace"), _hash_bytes(raw)
+
+
+@contextmanager
+def _memory_file_lock(path: Path) -> Iterator[None]:
+    """Exclusive lock for one memory file (threads and cooperating processes)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with _MEMORY_WRITE_LOCK:
+        fh = open(lock_path, "a+")
+        try:
+            try:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass
+            yield
+        finally:
+            try:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            fh.close()
+
+
+def _note_condense_key(kind: str, name: str) -> str:
+    canon = _canonical_kind(kind)
+    slug = PERSONAL_FILE_SLUG if canon == "personal" else sanitize_memory_name(name)
+    return f"{canon}:{slug}"
+
+
+def _snapshot_notes(notes: list[MemoryNote]) -> tuple[list[MemoryNote], dict[str, str]]:
+    """Refresh note text and hashes from one locked read per file."""
+    refreshed: list[MemoryNote] = []
+    hashes: dict[str, str] = {}
+    for note in notes:
+        with _memory_file_lock(note.path):
+            text, digest = _read_note_snapshot(note.path)
+        refreshed.append(
+            MemoryNote(kind=note.kind, name=note.name, path=note.path, text=text)
+        )
+        hashes[_note_condense_key(note.kind, note.name)] = digest
+    return refreshed, hashes
+
+
 def write_condensed_memory(
     kind: str,
     name: str,
     text: str,
     *,
     memory_dir: Path | None = None,
+    expected_hash: str | None = None,
 ) -> Path:
     """Overwrite a note with compact markdown (no extra dated section)."""
     ensure_memory_dirs(memory_dir)
@@ -818,7 +885,11 @@ def write_condensed_memory(
     if not body.lstrip().startswith("#"):
         body = f"# {canon} / {slug}\n\n{body}"
     path = _subdir(canon, memory_dir) / f"{slug}.md"
-    with _MEMORY_WRITE_LOCK:
+    with _memory_file_lock(path):
+        if expected_hash is not None:
+            _current, current_hash = _read_note_snapshot(path)
+            if current_hash != expected_hash:
+                raise ValueError("source changed during condense")
         path.write_text(body.rstrip() + "\n", encoding="utf-8")
     return path
 
@@ -827,17 +898,36 @@ def apply_condensed_memory_files(
     files: list[dict[str, str]],
     *,
     memory_dir: Path | None = None,
-) -> list[str]:
+    snapshots: dict[str, str],
+    allowed_keys: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
     written: list[str] = []
+    conflicted: list[str] = []
+    permitted = set(snapshots)
+    if allowed_keys is not None:
+        permitted &= allowed_keys
     for item in files:
+        key = _note_condense_key(str(item.get("kind") or ""), str(item.get("name") or ""))
+        if key not in permitted:
+            print(f"[memory] condense skip {key} (not in snapshot)", flush=True)
+            continue
+        expected = snapshots[key]
         try:
             path = write_condensed_memory(
                 item["kind"],
                 item["name"],
                 item["text"],
                 memory_dir=memory_dir,
+                expected_hash=expected,
             )
-        except (ValueError, OSError) as e:
+        except ValueError as e:
+            if "source changed" in str(e):
+                conflicted.append(key)
+                print(f"[memory] condense skipped {key} (changed during LLM)", flush=True)
+                continue
+            print(f"[memory] condense skip {item.get('kind')}/{item.get('name')}: {e}", flush=True)
+            continue
+        except OSError as e:
             print(f"[memory] condense skip {item.get('kind')}/{item.get('name')}: {e}", flush=True)
             continue
         try:
@@ -846,24 +936,163 @@ def apply_condensed_memory_files(
             shown = path.name
         written.append(shown)
         print(f"[memory] condensed → {shown}", flush=True)
-    return written
+    return written, conflicted
 
 
-def _format_notes_for_condense(notes: list[MemoryNote], *, max_chars: int = 24_000) -> str:
+def _split_markdown_chunks(text: str, *, max_chars: int) -> list[str]:
+    """Split a note into complete pieces that each fit ``max_chars``."""
+    body = (text or "").strip()
+    if not body:
+        return []
+    if len(body) <= max_chars:
+        return [body]
+    sections: list[str] = []
+    buf: list[str] = []
+    for line in body.splitlines(keepends=True):
+        if line.startswith("## ") and buf:
+            sections.append("".join(buf))
+            buf = [line]
+        else:
+            buf.append(line)
+    if buf:
+        sections.append("".join(buf))
+    chunks: list[str] = []
+    current = ""
+    for section in sections:
+        if current and len(current) + len(section) > max_chars:
+            chunks.append(current.rstrip())
+            current = ""
+        if len(section) > max_chars:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            for i in range(0, len(section), max_chars):
+                piece = section[i : i + max_chars].strip()
+                if piece:
+                    chunks.append(piece)
+        else:
+            current += section
+    if current.strip():
+        chunks.append(current.rstrip())
+    return chunks or [body[:max_chars]]
+
+
+def _format_notes_for_condense(
+    notes: list[MemoryNote],
+    *,
+    max_chars: int = _CONDENSE_BATCH_CHARS,
+    note_chars: int = _CONDENSE_NOTE_CHARS,
+) -> tuple[str, set[str], list[MemoryNote]]:
+    """Pack complete notes only. Oversized or leftover notes are returned for chunking."""
     parts: list[str] = []
     used = 0
+    included: set[str] = set()
+    overflow: list[MemoryNote] = []
     for note in notes:
         if note.kind == "screen" or _is_live_layout_memory(note.kind, note.name):
             continue
-        chunk = f"### {note.rel}\n{note.text.strip()}\n"
-        if len(chunk) > 8000:
-            chunk = chunk[:8000] + "\n… (truncated)\n"
-        if used + len(chunk) > max_chars:
-            parts.append("… (further files omitted)")
-            break
+        body = note.text.strip()
+        chunk = f"### {note.rel}\n{body}\n"
+        if len(chunk) > note_chars or used + len(chunk) > max_chars:
+            overflow.append(note)
+            continue
         parts.append(chunk)
         used += len(chunk)
-    return "\n".join(parts).strip() or "(none)"
+        included.add(_note_condense_key(note.kind, note.name))
+    return "\n".join(parts).strip(), included, overflow
+
+
+def _merge_condensed_chunks(kind: str, name: str, parts: list[str]) -> str:
+    canon = _canonical_kind(kind)
+    slug = PERSONAL_FILE_SLUG if canon == "personal" else sanitize_memory_name(name)
+    bodies: list[str] = []
+    for part in parts:
+        text = (part or "").strip()
+        if not text:
+            continue
+        lines = text.splitlines()
+        if lines and lines[0].startswith("#"):
+            lines = lines[1:]
+        body = "\n".join(lines).strip()
+        if body:
+            bodies.append(body)
+    merged = "\n\n".join(bodies).strip()
+    if not merged:
+        raise ValueError("Memory text is empty.")
+    if not merged.lstrip().startswith("#"):
+        merged = f"# {canon} / {slug}\n\n{merged}"
+    return merged
+
+
+def _request_condensed_files(client: Any, blob: str) -> list[dict[str, str]]:
+    prompt = _CONDENSE_PROMPT.replace("<<<FILES>>>", blob or "(none)")
+    response = client.responses.create(
+        model=MEMORY_CONDENSE_MODEL,
+        input=prompt,
+    )
+    raw = _response_output_text(response)
+    payload = _parse_json_object(raw)
+    return parse_condensed_memory_files(payload)
+
+
+def _request_chunk_text(
+    client: Any,
+    note: MemoryNote,
+    chunk: str,
+    *,
+    index: int,
+    total: int,
+) -> str:
+    prompt = (
+        _CONDENSE_CHUNK_PROMPT.replace("{index}", str(index))
+        .replace("{total}", str(total))
+        .replace("{rel}", note.rel)
+        .replace("<<<FILES>>>", f"### {note.rel}\n{chunk}\n")
+    )
+    try:
+        response = client.responses.create(
+            model=MEMORY_CONDENSE_MODEL,
+            input=prompt,
+        )
+        raw = _response_output_text(response)
+        payload = _parse_json_object(raw)
+        files = parse_condensed_memory_files(payload)
+    except Exception as e:
+        print(f"[memory] condense chunk failed {note.rel}: {e}", flush=True)
+        return chunk
+    key = _note_condense_key(note.kind, note.name)
+    for item in files:
+        if _note_condense_key(item["kind"], item["name"]) == key and (item.get("text") or "").strip():
+            return item["text"]
+    print(f"[memory] condense chunk skipped {note.rel} (mismatched note key)", flush=True)
+    return chunk
+
+
+def _condense_note_in_chunks(
+    client: Any,
+    note: MemoryNote,
+    *,
+    memory_dir: Path | None,
+    expected_hash: str,
+) -> tuple[list[str], list[str]]:
+    key = _note_condense_key(note.kind, note.name)
+    chunks = _split_markdown_chunks(note.text, max_chars=_CONDENSE_NOTE_CHARS)
+    if not chunks:
+        return [], []
+    parts = [
+        _request_chunk_text(client, note, chunk, index=i, total=len(chunks))
+        for i, chunk in enumerate(chunks, start=1)
+    ]
+    try:
+        merged = _merge_condensed_chunks(note.kind, note.name, parts)
+    except ValueError:
+        return [], []
+    return apply_condensed_memory_files(
+        [{"kind": note.kind, "name": note.name, "text": merged}],
+        memory_dir=memory_dir,
+        snapshots={key: expected_hash},
+        allowed_keys={key},
+    )
 
 
 _CONDENSE_PROMPT = """You condense voice-assistant memory files to save tokens.
@@ -891,12 +1120,30 @@ For personal, ``name`` must always be ``profile``.
 If nothing needs rewriting, return {"files": []}.
 """
 
+_CONDENSE_CHUNK_PROMPT = """You condense one chunk of a voice-assistant memory file.
+
+Rules:
+- Keep every distinct durable fact in this chunk (prefs, usernames, repos, songs, issue/PR ids).
+- Drop repeated bullets and restated dated sections in this chunk.
+- Do not invent facts. Do not include passwords, API keys, or tokens.
+- Rewrite as compact markdown: one title line, then bullets. No dated ## timestamps.
+- Personal facts always live in kind=personal, name=profile.
+
+This is chunk {index} of {total} of {rel}.
+<<<FILES>>>
+
+Respond with JSON only (no markdown fences):
+{"files": [{"kind": "personal" or "app", "name": "slug", "text": "# kind / slug\\n\\n- fact", "reason": "why"}]}
+Always return this chunk as one file. Do not omit it.
+"""
+
 
 def _condense_memories_impl(
     client: Any,
     *,
     memory_dir: Path | None = None,
     force_kinds: frozenset[str] | set[str] | None = None,
+    _attempts_left: int = _CONDENSE_MAX_ATTEMPTS,
 ) -> list[str]:
     notes = [
         n
@@ -916,21 +1163,46 @@ def _condense_memories_impl(
             elif notes_need_condense([note]):
                 selected.append(note)
         notes = selected or notes
-    blob = _format_notes_for_condense(notes)
-    prompt = _CONDENSE_PROMPT.replace("<<<FILES>>>", blob)
+    notes, snapshots = _snapshot_notes(notes)
+    blob, included, overflow = _format_notes_for_condense(notes)
     print("[memory] condensing memories…", flush=True)
     try:
-        response = client.responses.create(
-            model=MEMORY_CONDENSE_MODEL,
-            input=prompt,
-        )
-        raw = _response_output_text(response)
-        payload = _parse_json_object(raw)
-        files = parse_condensed_memory_files(payload)
-        if not files:
-            print("[memory] condense left files unchanged", flush=True)
-            return []
-        return apply_condensed_memory_files(files, memory_dir=memory_dir)
+        written: list[str] = []
+        conflicted: list[str] = []
+        if included:
+            files = _request_condensed_files(client, blob)
+            if not files:
+                print("[memory] condense left files unchanged", flush=True)
+            else:
+                batch_written, batch_conflicted = apply_condensed_memory_files(
+                    files,
+                    memory_dir=memory_dir,
+                    snapshots={k: snapshots[k] for k in included},
+                )
+                written.extend(batch_written)
+                conflicted.extend(batch_conflicted)
+        for note in overflow:
+            key = _note_condense_key(note.kind, note.name)
+            if key not in snapshots:
+                print(f"[memory] condense skip {key} (not in snapshot)", flush=True)
+                continue
+            chunk_written, chunk_conflicted = _condense_note_in_chunks(
+                client,
+                note,
+                memory_dir=memory_dir,
+                expected_hash=snapshots[key],
+            )
+            written.extend(chunk_written)
+            conflicted.extend(chunk_conflicted)
+        if conflicted and _attempts_left > 1:
+            print("[memory] condense retry (source changed during LLM)", flush=True)
+            return _condense_memories_impl(
+                client,
+                memory_dir=memory_dir,
+                force_kinds=force_kinds,
+                _attempts_left=_attempts_left - 1,
+            )
+        return written
     except Exception as e:
         print(f"[memory] condense failed: {e}", flush=True)
         return []

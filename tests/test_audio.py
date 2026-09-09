@@ -39,7 +39,6 @@ class AudioSessionTests(unittest.TestCase):
 
     def test_listen_command_uses_wake_then_stt(self) -> None:
         with (
-            patch("audio.live_voice_enabled", return_value=False),
             patch("audio.wait_for_wake", return_value=True),
             patch("audio.get_last_wake", return_value=MagicMock(label="Hey Jarvis")),
             patch("audio.get_wake_remainder", return_value=None),
@@ -76,7 +75,6 @@ class AudioSessionTests(unittest.TestCase):
 
     def test_listen_shortcut_bypasses_wake_word(self) -> None:
         with (
-            patch("audio.live_voice_enabled", return_value=False),
             patch("audio.consume_utterance", return_value=None),
             patch("audio.consume_listen", return_value=True),
             patch.object(self.audio, "listen", return_value="open notes") as listen,
@@ -88,67 +86,6 @@ class AudioSessionTests(unittest.TestCase):
         listen.assert_called_once_with("Listening…")
         wake.assert_not_called()
         sink.assert_called_with("mac")
-
-    def test_wake_opens_live_socket(self) -> None:
-        live = MagicMock()
-        live.alive = True
-        live.wait_utterance.return_value = "open notes"
-        with (
-            patch("audio.live_voice_enabled", return_value=True),
-            patch("audio.consume_utterance", return_value=None),
-            patch("audio.consume_listen", return_value=False),
-            patch("audio.utterance_pending", return_value=False),
-            patch("audio.speak_pending", return_value=False),
-            patch("audio.wait_for_wake", return_value=True),
-            patch("audio.get_last_wake", return_value=MagicMock(label="Hey Jarvis")),
-            patch("audio.get_wake_remainder", return_value=None),
-            patch("audio.LiveVoiceSession", return_value=live),
-            patch("audio.set_reply_sink") as sink,
-        ):
-            cmd = self.audio.listen_command()
-        live.start.assert_called_once()
-        live.wait_utterance.assert_called_once()
-        self.assertEqual(cmd, "open notes")
-        self.assertIs(self.audio.live, live)
-        sink.assert_called_with("mac")
-
-    def test_live_session_reused_until_idle(self) -> None:
-        live = MagicMock()
-        live.alive = True
-        live.wait_utterance.return_value = "next task"
-        self.audio.live = live
-        with (
-            patch("audio.live_voice_enabled", return_value=True),
-            patch("audio.consume_utterance", return_value=None),
-            patch("audio.consume_listen", return_value=False),
-            patch("audio.utterance_pending", return_value=False),
-            patch("audio.speak_pending", return_value=False),
-            patch("audio.wait_for_wake") as wake,
-            patch("audio.set_reply_sink"),
-        ):
-            cmd = self.audio.listen_command()
-        self.assertEqual(cmd, "next task")
-        live.start.assert_not_called()
-        wake.assert_not_called()
-
-    def test_live_idle_closes_and_returns_to_wake(self) -> None:
-        live = MagicMock()
-        live.alive = True
-        live.wait_utterance.return_value = None
-        self.audio.live = live
-        with (
-            patch("audio.live_voice_enabled", return_value=True),
-            patch("audio.consume_utterance", return_value=None),
-            patch("audio.consume_listen", return_value=False),
-            patch("audio.utterance_pending", return_value=False),
-            patch("audio.speak_pending", return_value=False),
-            patch("audio.wait_for_wake", return_value=False) as wake,
-        ):
-            cmd = self.audio.listen_command()
-        live.close.assert_called()
-        wake.assert_called()
-        self.assertIsNone(cmd)
-        self.assertIsNone(self.audio.live)
 
 
 if __name__ == "__main__":

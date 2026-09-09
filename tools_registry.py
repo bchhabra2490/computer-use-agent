@@ -7,6 +7,7 @@ Brain-only tools (start_task, give_response, computer, …) stay in their loops.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -20,6 +21,7 @@ _OFF = {"0", "false", "no", "off"}
 def computer_use_enabled() -> bool:
     """False in Pi / headless mode: hide ``start_task`` from the orchestrator."""
     return os.environ.get("COMPUTER_USE", "1").strip().lower() not in _OFF
+
 
 Brain = Literal["orchestrator", "agent"]
 
@@ -182,8 +184,7 @@ SET_TIMER_TOOL = {
             "message": {
                 "type": ["string", "null"],
                 "description": (
-                    "What to say (and show) when it fires if speak is true. "
-                    "Pass null to use '{label} is done.'"
+                    "What to say (and show) when it fires if speak is true. " "Pass null to use '{label} is done.'"
                 ),
             },
         },
@@ -215,8 +216,7 @@ CANCEL_TIMER_TOOL = {
     "type": "function",
     "name": "cancel_timer",
     "description": (
-        "Cancel a native timer by id (from set_timer / list_timers) or by label. "
-        "Pass null for the unused field."
+        "Cancel a native timer by id (from set_timer / list_timers) or by label. " "Pass null for the unused field."
     ),
     "parameters": {
         "type": "object",
@@ -298,9 +298,7 @@ LIST_SCHEDULED_TASKS_TOOL = {
 CANCEL_SCHEDULED_TASK_TOOL = {
     "type": "function",
     "name": "cancel_scheduled_task",
-    "description": (
-        "Cancel a queued future task by id, or by exact task text if id is not known."
-    ),
+    "description": ("Cancel a queued future task by id, or by exact task text if id is not known."),
     "parameters": {
         "type": "object",
         "properties": {
@@ -686,11 +684,62 @@ class ToolOutcome:
     terminate: bool = False
 
 
-@dataclass
+@dataclass(frozen=True)
 class ImmediateToolOutcome:
-    """Phase 1 short-circuit (unknown tool, bad args, blocked)."""
+    """Phase 1 rejected the call (unknown tool or invalid args). Skip execute."""
 
     outcome: ToolOutcome
+
+
+class ToolHandlerError(Exception):
+    """Handler failed; the registry converts this into ``ToolOutcome(is_error=True)``."""
+
+
+def _looks_like_handler_error(text: str) -> bool:
+    stripped = (text or "").lstrip()
+    return stripped.startswith("Error:") or stripped.lower().startswith("error:")
+
+
+def _outcome_from_handler(output: str, **kwargs: Any) -> ToolOutcome:
+    text = output or ""
+    return ToolOutcome(output=text, is_error=_looks_like_handler_error(text), **kwargs)
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or isinstance(value, (dict, list, tuple, set)):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _validate_tool_args(name: str, args: dict[str, Any]) -> str | None:
+    if name == "schedule_task":
+        if not str(args.get("task") or "").strip():
+            return "Error: task is required"
+        epoch = args.get("run_at_epoch")
+        if epoch is None or epoch == "":
+            return "Error: run_at_epoch is required"
+        if _finite_number(epoch) is None:
+            return "Error: run_at_epoch must be a number"
+    if name == "cancel_scheduled_task":
+        has_id = bool(str(args.get("id") or "").strip())
+        has_task = bool(str(args.get("task") or "").strip())
+        if not has_id and not has_task:
+            return "Error: id or task required"
+    return None
 
 
 def _entry(schema: dict[str, Any], *brains: Brain) -> RegisteredTool:
@@ -776,9 +825,10 @@ def prepare_tool_call(
     args = dict(args or {})
     known = tool_names(brain)
     if name not in known and name not in SHARED_TOOL_NAMES:
-        return ImmediateToolOutcome(
-            ToolOutcome(output=f"Unsupported tool: {name}", is_error=True)
-        )
+        return ImmediateToolOutcome(ToolOutcome(output=f"Unsupported tool: {name}", is_error=True))
+    invalid = _validate_tool_args(name, args)
+    if invalid:
+        return ImmediateToolOutcome(ToolOutcome(output=invalid, is_error=True))
     return PreparedToolCall(name=name, args=args, call_id=call_id or "")
 
 
@@ -826,11 +876,11 @@ def execute_prepared_tool(
             "save_memory",
             "save_screen_memory",
         }:
-            return ToolOutcome(output=run_memory_tool(name, args, client=client))
+            return _outcome_from_handler(run_memory_tool(name, args, client=client))
         if name == "mcp_call":
             from mcp_client import run_mcp_tool
 
-            return ToolOutcome(output=run_mcp_tool(name, args))
+            return _outcome_from_handler(run_mcp_tool(name, args))
         if name == "list_open_apps":
             from displays import format_monitor_occupancy
 
@@ -838,20 +888,22 @@ def execute_prepared_tool(
         if name in {"set_timer", "list_timers", "cancel_timer"}:
             from timers import run_timer_tool
 
-            return ToolOutcome(output=run_timer_tool(name, args))
+            return _outcome_from_handler(run_timer_tool(name, args))
         if name in {"schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"}:
             from scheduled_tasks import run_scheduled_task_tool
 
-            return ToolOutcome(output=run_scheduled_task_tool(name, args))
+            return _outcome_from_handler(run_scheduled_task_tool(name, args))
         if name == "browser_data":
             from browser_data import run_browser_data_tool
 
-            return ToolOutcome(output=run_browser_data_tool(args))
+            return _outcome_from_handler(run_browser_data_tool(args))
         if name == "browser_webmcp":
             from webmcp import run_webmcp_tool
 
-            return ToolOutcome(output=run_webmcp_tool(args))
+            return _outcome_from_handler(run_webmcp_tool(args))
         return ToolOutcome(output=f"Unsupported tool: {name}", is_error=True)
+    except ToolHandlerError as e:
+        return ToolOutcome(output=f"Error: {e}", is_error=True)
     except Exception as e:
         return ToolOutcome(output=f"Error: {e}", is_error=True)
 

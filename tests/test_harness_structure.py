@@ -151,6 +151,8 @@ class PromptExtractTests(unittest.TestCase):
         self.assertIn("Recent desktop chat:", text)
         self.assertIn("Kathmandu", text)
         self.assertIn("Speech-to-text is lossy", text)
+        self.assertIn("Ashtavakra Gita", text)
+        self.assertIn("do not ask_user to confirm", text.lower())
 
     def test_conversation_context_prefers_chat_over_voice(self) -> None:
         from orchestrator_prompts import conversation_context_block
@@ -165,6 +167,7 @@ class PromptExtractTests(unittest.TestCase):
         voice_only = conversation_context_block(recent_turns="User: play music")
         self.assertIn("Recent voice turns", voice_only)
         self.assertIn("play music", voice_only)
+        self.assertIn("phonetic", voice_only.lower())
 
     def test_build_system_prompt_hides_computer_use(self) -> None:
         from orchestrator_prompts import build_system_prompt

@@ -35,6 +35,16 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertNotIn("computer", names)
         self.assertNotIn("mark_done", names)
 
+    def test_stt_repair_is_in_ask_user_and_start_task(self) -> None:
+        self.assertIn(
+            "speech-to-text mishear",
+            tr.ASK_USER_TOOL["description"].lower(),
+        )
+        self.assertIn(
+            "Ashtavakra Gita",
+            tr.START_TASK_TOOL["parameters"]["properties"]["task"]["description"],
+        )
+
     def test_orchestrator_hides_start_task_when_computer_use_off(self) -> None:
         with (
             patch.dict("os.environ", {"COMPUTER_USE": "0"}, clear=False),

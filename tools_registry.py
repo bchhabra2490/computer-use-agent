@@ -50,6 +50,9 @@ START_TASK_TOOL = {
                 "type": "string",
                 "description": (
                     "The user's goal in their words (or a short leftover step). "
+                    "If speech-to-text mangled a well-known title or name, put "
+                    "the corrected form here (e.g. Ashtavakra Gita, not the "
+                    "garbled transcript). "
                     "Do not write a UI screenplay: no Chrome/Spotlight/new-tab/"
                     "keypress steps, no 'wait for the page', no fallback apps. "
                     "Recipes and the computer agent decide how."
@@ -73,7 +76,9 @@ ASK_USER_TOOL = {
         "preview is not enough — open the note. Only ask_user if that memory still "
         "cannot answer, or you need live confirmation for destructive work. Never "
         "ask which music/maps app, account, place, or preference to use if memory "
-        "already says. Never put questions in a plain assistant message or in "
+        "already says. Never ask them to confirm a likely speech-to-text mishear "
+        "of a well-known title, name, or place — correct it yourself and continue. "
+        "Never put questions in a plain assistant message or in "
         "give_response_to_user. One short spoken question, not a numbered list."
     ),
     "parameters": {

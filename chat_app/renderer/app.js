@@ -478,48 +478,24 @@ async function pollStatus() {
     $("status-foot").textContent = st.orchestrator_alive
       ? "Orchestrator connected"
       : "Orchestrator not running — start: python orchestrator.py --auto";
-    const rev = Number(st.history_rev || 0);
-    const chatRevs =
-      st.chat_revs && typeof st.chat_revs === "object" ? st.chat_revs : {};
-    const prevChatRevs = state.chatRevs || {};
-    const bridgeId = st.bridge_id ? String(st.bridge_id) : "";
-    const instanceChanged = !!(state.bridgeId && bridgeId && bridgeId !== state.bridgeId);
-    const revWentBackwards = rev < prevRev;
-    const resync = instanceChanged || revWentBackwards;
-    if (bridgeId) {
-      state.bridgeId = bridgeId;
+    const applied = cuaInboxStatus.applyInboxStatus(
+      {
+        historyRev: state.historyRev,
+        chatRevs: state.chatRevs,
+        bridgeId: state.bridgeId,
+        chatId: state.chatId,
+        pendingChatId: state.pendingChatId,
+      },
+      st
+    );
+    if (applied.bridgeId) {
+      state.bridgeId = applied.bridgeId;
     }
-    let changedChatIds = [];
-    let completedChatIds = [];
-    let revBumped = rev > prevRev;
-    if (resync) {
-      state.historyRev = rev;
-      state.chatRevs = chatRevs;
-      changedChatIds = [...new Set(
-        [state.chatId, state.pendingChatId].filter(Boolean).map(String)
-      )];
-      revBumped = true;
-    } else {
-      if (revBumped) {
-        state.historyRev = rev;
-      }
-      if ("changed_chat_ids" in st && Array.isArray(st.changed_chat_ids)) {
-        changedChatIds = st.changed_chat_ids.map(String);
-      } else {
-        changedChatIds = Object.keys(chatRevs)
-          .filter((id) => Number(chatRevs[id] || 0) > Number(prevChatRevs[id] || 0))
-          .map(String);
-      }
-      if ("completed_chat_ids" in st && Array.isArray(st.completed_chat_ids)) {
-        completedChatIds = st.completed_chat_ids.map(String);
-      } else {
-        completedChatIds = (st.appended_chat_ids || []).map(String);
-        if (!completedChatIds.length && Number(st.assistant_appended || 0) > 0) {
-          completedChatIds = changedChatIds;
-        }
-      }
-      state.chatRevs = chatRevs;
-    }
+    const changedChatIds = applied.changedChatIds;
+    const resync = applied.resync;
+    const revBumped = applied.revBumped;
+    state.historyRev = applied.historyRev;
+    state.chatRevs = applied.chatRevs;
     const inbox = revBumped ? st.inbox || [] : [];
     const stream = st.chat_stream;
     const streamChatId = stream && stream.chat_id ? String(stream.chat_id) : null;
@@ -547,7 +523,7 @@ async function pollStatus() {
         });
       }
     }
-    const completedPending = completedChatIds.includes(String(state.pendingChatId || ""));
+    const completedPending = applied.completedPending;
     if (changedChatIds.length || inbox.length || resync) {
       const visibleUpdated = changedChatIds.length
         ? changedChatIds.includes(String(state.chatId || ""))

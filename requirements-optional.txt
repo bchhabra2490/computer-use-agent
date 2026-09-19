@@ -22,3 +22,7 @@ speakeronnx>=0.1.0
 # Local LLM traces UI (optional). JSONL still writes without this.
 # Run: phoenix serve  → http://127.0.0.1:6006  and set PHOENIX=1
 arize-phoenix>=11.0.0
+# TypeSafe Jev (optional fast computer-use policy). App starts without it when
+# JEV_FAST_LOOP is off. Install when enabling Jev:
+#   pip install 'typesafe-sdk>=0.7.0,<1'
+typesafe-sdk>=0.7.0,<1

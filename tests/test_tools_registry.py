@@ -67,10 +67,18 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("schedule_task", names)
         self.assertIn("list_scheduled_tasks", names)
         self.assertIn("cancel_scheduled_task", names)
+        self.assertIn("jev_choose", names)
         self.assertNotIn("start_task", names)
         self.assertNotIn("give_response_to_user", names)
         self.assertNotIn("desktop_actions", names)
 
+    def test_jev_choose_hidden_when_disabled(self) -> None:
+        with (
+            patch("mcp_client.mcp_openai_tools", return_value=[]),
+            patch("jev.config.jev_choose_tool_enabled", return_value=False),
+        ):
+            names = [t.get("name") or t.get("type") for t in tr.agent_tools()]
+        self.assertNotIn("jev_choose", names)
     def test_agent_deepseek_uses_desktop_actions(self) -> None:
         with patch("mcp_client.mcp_openai_tools", return_value=[]):
             names = [
@@ -150,6 +158,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertTrue(tr.has_handler("browser_data"))
         self.assertTrue(tr.has_handler("browser_webmcp"))
         self.assertTrue(tr.has_handler("mcp_call"))
+        self.assertTrue(tr.has_handler("jev_choose"))
         for name in (
             "start_task",
             "ask_user",

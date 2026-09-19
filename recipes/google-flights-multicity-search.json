@@ -1,0 +1,33 @@
+{
+  "name": "google-flights-multicity-search",
+  "match": [
+    "find the cheapest flights for {{date}} from {{origin1}} to {{dest1}} and {{origin2}} to {{dest2}}",
+    "find the cheapest flights",
+    "google flights multi-city",
+    "cheapest flights {{origin1}} to {{dest1}} to {{dest2}} {{date}}"
+  ],
+  "params": [
+    "origin1",
+    "dest1",
+    "date1",
+    "origin2",
+    "dest2",
+    "date2"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/travel/flights#flt={{origin1}}.{{dest1}}.{{date1}}*{{origin2}}.{{dest2}}.{{date2}};c:INR;e:1;sd:1;t:f"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Find the cheapest flights for 19 September from Chandigar to from Delhi to Bangalore.",
+  "match_templates": [
+    "https://www.google.com/travel/flights#flt={{origin1}}.{{dest1}}.{{date1}}*{{origin2}}.{{dest2}}.{{date2}};c:INR;e:1;sd:1;t:f",
+    "find the cheapest flights for {{date}} from {{origin1}} to {{dest1}} and {{origin2}} to {{dest2}}"
+  ],
+  "leftover": "If the URL doesn't fully populate the form: switch to Multi-city, confirm/select exact airports for each leg, set both departure dates, run the search, and compare cheapest itineraries (or run two one-way searches)."
+}

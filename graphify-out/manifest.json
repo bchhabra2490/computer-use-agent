@@ -6,21 +6,21 @@
     "semantic_hash": "6a6c424c42fc0cb677f694cef72567cc"
   },
   "accessibility.py": {
-    "mtime": 1787496828.1640608,
-    "seen": 1788328255.0151732,
-    "ast_hash": "dbe039a709622fcbd869d476effa5c6c",
-    "semantic_hash": "dbe039a709622fcbd869d476effa5c6c"
+    "mtime": 1789804574.211375,
+    "seen": 1789804914.637735,
+    "ast_hash": "436c5b5e467d752f4d98731cdf90a4d6",
+    "semantic_hash": ""
   },
   "actions.py": {
-    "mtime": 1788805769.7069755,
-    "seen": 1788894675.883901,
-    "ast_hash": "91967312c0fa3080227ac9c6f8a9fb3f",
+    "mtime": 1789810024.9074552,
+    "seen": 1789810170.644869,
+    "ast_hash": "4ae72417a649024c0f2d76514face2d8",
     "semantic_hash": ""
   },
   "agent.py": {
-    "mtime": 1789021042.0214746,
-    "seen": 1789021296.65803,
-    "ast_hash": "c32f02a074e89d9f269f22d0f16daccc",
+    "mtime": 1789813583.509803,
+    "seen": 1789813627.981825,
+    "ast_hash": "cba52202aa8c729435f06051e2c73326",
     "semantic_hash": ""
   },
   "app_status.py": {
@@ -702,9 +702,9 @@
     "semantic_hash": "433392e297e019a59a676922f83e0db3"
   },
   "tests/test_tools_registry.py": {
-    "mtime": 1789021252.9259608,
-    "seen": 1789021296.6581252,
-    "ast_hash": "a24c924ec5c4e0ada05c912abf912de2",
+    "mtime": 1789813348.555407,
+    "seen": 1789813362.972577,
+    "ast_hash": "32656901d0bf332464c59b04a41b54e2",
     "semantic_hash": ""
   },
   "tests/test_tts_local.py": {
@@ -744,9 +744,9 @@
     "semantic_hash": "c621f99cc4235c6a283e5bc07c1aaf31"
   },
   "tools_registry.py": {
-    "mtime": 1789021189.573949,
-    "seen": 1789021296.65813,
-    "ast_hash": "ac72ea5ae1a614063aa169d612de6030",
+    "mtime": 1789813580.6174653,
+    "seen": 1789813627.981945,
+    "ast_hash": "2f4e0b282c0aa6d8faf163326fa098eb",
     "semantic_hash": ""
   },
   "tts/__init__.py": {
@@ -828,9 +828,9 @@
     "semantic_hash": "6a47d64fcc136324ca395065a707ef76"
   },
   "README.md": {
-    "mtime": 1788966081.1658614,
-    "seen": 1788966125.443858,
-    "ast_hash": "d7abfe19b4de7fbff8d09d131b5d7a0c",
+    "mtime": 1789813313.3200397,
+    "seen": 1789813362.9725912,
+    "ast_hash": "767caa5eae4e64b7a6652f5322ce8510",
     "semantic_hash": ""
   },
   "memory/README.md": {
@@ -1548,9 +1548,9 @@
     "semantic_hash": ""
   },
   "requirements-optional.txt": {
-    "mtime": 1788941137.9022992,
-    "seen": 1788941431.4049358,
-    "ast_hash": "cd2a46644ac3476afa9c24aab8ac6ccd",
+    "mtime": 1789804108.1126962,
+    "seen": 1789804283.0552661,
+    "ast_hash": "2b6b1b0d3f450087b7f84b095401dd64",
     "semantic_hash": ""
   },
   "judge.py": {
@@ -1599,6 +1599,174 @@
     "mtime": 1789019335.188822,
     "seen": 1789019819.473921,
     "ast_hash": "1d87b135addb14ca1660b6cd09cbe703",
+    "semantic_hash": ""
+  },
+  "jev/__init__.py": {
+    "mtime": 1789813588.792031,
+    "seen": 1789813627.9818509,
+    "ast_hash": "cac1157315f5d20a480642572f9f2040",
+    "semantic_hash": ""
+  },
+  "jev/config.py": {
+    "mtime": 1789813220.382893,
+    "seen": 1789813362.972498,
+    "ast_hash": "2dbc1440d093a3461fdc80b907a825fc",
+    "semantic_hash": ""
+  },
+  "jev/models.py": {
+    "mtime": 1789813496.2875974,
+    "seen": 1789813627.981857,
+    "ast_hash": "260e974062b5715762a6bf266c3c8f81",
+    "semantic_hash": ""
+  },
+  "recipes/amazon-search-add-to-cart.json": {
+    "mtime": 1789021464.079127,
+    "seen": 1789802912.374432,
+    "ast_hash": "af8045f4fecb8427c595210cb40190ee",
+    "semantic_hash": ""
+  },
+  "recipes/chessinsights-start-mode.json": {
+    "mtime": 1789036955.4152586,
+    "seen": 1789802912.374433,
+    "ast_hash": "a61f3ef3d79c4c7ae91f05c415493f09",
+    "semantic_hash": ""
+  },
+  "recipes/google-flights-multicity-search.json": {
+    "mtime": 1789456046.0804095,
+    "seen": 1789802912.374433,
+    "ast_hash": "f277ced31901969567df096c57f4de7d",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_config.py": {
+    "mtime": 1789810057.64687,
+    "seen": 1789810170.6449568,
+    "ast_hash": "4fe1f54425b75f249069a49168dcd893",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_models.py": {
+    "mtime": 1789803522.0688314,
+    "seen": 1789803529.399194,
+    "ast_hash": "cc309e43c893c03aae91acab286f462b",
+    "semantic_hash": ""
+  },
+  "skills/chessinsights-start-blindfold-game/SKILL.md": {
+    "mtime": 1789036953.8384502,
+    "seen": 1789802912.3745122,
+    "ast_hash": "02a1dc92cf8cf4eee7e7814b33507160",
+    "semantic_hash": ""
+  },
+  "skills/google-flights-multicity-cheapest-search/SKILL.md": {
+    "mtime": 1789456044.4487562,
+    "seen": 1789802912.374527,
+    "ast_hash": "2fef5f335f1fc1f7b82531eabc9e8cb9",
+    "semantic_hash": ""
+  },
+  "tests/test_accessibility_snapshot.py": {
+    "mtime": 1789805331.159048,
+    "seen": 1789805337.781039,
+    "ast_hash": "cfd20befc722e9a984e98e1188f56eb7",
+    "semantic_hash": ""
+  },
+  "jev/actions.py": {
+    "mtime": 1789813534.913517,
+    "seen": 1789813627.9818518,
+    "ast_hash": "9121800ade5c2ed51f19c96aa1686d78",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_actions.py": {
+    "mtime": 1789810112.5003626,
+    "seen": 1789810170.6449559,
+    "ast_hash": "5826ead8c541e9e8e11589f1b58728fd",
+    "semantic_hash": ""
+  },
+  "jev/client.py": {
+    "mtime": 1789813524.0114322,
+    "seen": 1789813627.981854,
+    "ast_hash": "f021224633300758eb5f8e4573e70a6d",
+    "semantic_hash": ""
+  },
+  "jev/shadow.py": {
+    "mtime": 1789813538.8430116,
+    "seen": 1789813627.981859,
+    "ast_hash": "64cadce0d216af1ad259d6b737e41445",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_client.py": {
+    "mtime": 1789811139.9945314,
+    "seen": 1789811152.027922,
+    "ast_hash": "ca27b5d4326879660fec2c5e3236c804",
+    "semantic_hash": ""
+  },
+  "jev/loop.py": {
+    "mtime": 1789813538.8430321,
+    "seen": 1789813627.981857,
+    "ast_hash": "3f4a41c1b8819ba1174889c7f8728d09",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_loop.py": {
+    "mtime": 1789804897.476765,
+    "seen": 1789804914.637813,
+    "ast_hash": "c7d7b5a930791c0ad64f8f2a24a13925",
+    "semantic_hash": ""
+  },
+  "jev/diagnostics.py": {
+    "mtime": 1789805014.2772248,
+    "seen": 1789805337.780999,
+    "ast_hash": "df0bb4169d86d006875330097e83cf3e",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_acceptance.py": {
+    "mtime": 1789805298.4573584,
+    "seen": 1789805337.781059,
+    "ast_hash": "dd025be2d63511c0c817b34c96f46868",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_diagnostics.py": {
+    "mtime": 1789805245.0955398,
+    "seen": 1789805337.7810612,
+    "ast_hash": "2f17b75798bd293cd19fa729c2f00ccb",
+    "semantic_hash": ""
+  },
+  "jev/README.md": {
+    "mtime": 1789813584.8134637,
+    "seen": 1789813627.981956,
+    "ast_hash": "29ea451c27b45310334afb6fe88d7e01",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_review_fixes.py": {
+    "mtime": 1789810164.206981,
+    "seen": 1789810170.64496,
+    "ast_hash": "7c8e981f0313a3a61248bcb7182210bd",
+    "semantic_hash": ""
+  },
+  "jev/choose.py": {
+    "mtime": 1789813567.977896,
+    "seen": 1789813627.981853,
+    "ast_hash": "9a5842fc8521aeac72f8f8523c83bdf3",
+    "semantic_hash": ""
+  },
+  "recipes/google-flights-cheapest-oneway.json": {
+    "mtime": 1789813298.6471617,
+    "seen": 1789813362.972513,
+    "ast_hash": "63ed7b6bdd47103fdaba9a3c8dfc340e",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_choose.py": {
+    "mtime": 1789813603.34803,
+    "seen": 1789813627.981914,
+    "ast_hash": "c8d9cfe8f7da5f60ab5c3e49e86f3012",
+    "semantic_hash": ""
+  },
+  "jev/text_candidates.py": {
+    "mtime": 1789813484.7087052,
+    "seen": 1789813627.9818602,
+    "ast_hash": "023f06aa67c681c4e5aab0f8609feff0",
+    "semantic_hash": ""
+  },
+  "tests/test_jev_text_candidates.py": {
+    "mtime": 1789813595.6353743,
+    "seen": 1789813627.981917,
+    "ast_hash": "dafe1d6c0bd5afabca380c63ff16f530",
     "semantic_hash": ""
   }
 }

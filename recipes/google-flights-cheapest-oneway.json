@@ -1,0 +1,33 @@
+{
+  "name": "google-flights-cheapest-oneway",
+  "match": [
+    "book the cheapest one-way flight from {{origin}} to {{destination}}",
+    "book the cheapest trade from {{origin}} to {{destination}}",
+    "cheapest flight {{origin}} to {{destination}} next week",
+    "cheapest flight from {{origin}} to {{destination}}",
+    "find cheapest one-way {{origin}} \u2192 {{destination}} within next 7 days",
+    "open google flights for {{origin}} to {{destination}}"
+  ],
+  "params": [
+    "origin",
+    "destination",
+    "date"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/travel/flights#flt={{origin}}.{{destination}}.{{date}};c:USD;e:1;sd:1;t:f"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Book the cheapest trade from New Jersey to Bangalore for the next week. Any any day in the next week?",
+  "match_templates": [
+    "https://www.google.com/travel/flights#flt={{origin}}.{{destination}}.{{date}}",
+    "find cheapest flights from {{origin}} to {{destination}}",
+    "book cheapest {{origin}} to {{destination}} next week"
+  ],
+  "leftover": "In the opened Google Flights page: set trip to One-way, set passengers/class as needed, change origin to {{origin}} if not prefilled (use airport code, e.g., EWR or DEL), open the price graph/calendar and select the single cheapest departure within the next 7 days. Use jev_choose when deciding among discrete airports/dates/fares. For payment or final booking confirmation use ask_user — do not auto-pay."
+}

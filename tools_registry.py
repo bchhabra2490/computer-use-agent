@@ -529,6 +529,82 @@ READ_UI_TEXT_TOOL = {
     "strict": True,
 }
 
+JEV_CHOOSE_TOOL = {
+    "type": "function",
+    "name": "jev_choose",
+    "description": (
+        "Optional advisory TypeSafe Jev Choice (never executes UI). Use sparingly: "
+        "the pre-agent Jev fast loop already ran when enabled. Prefer source=agent "
+        "only for a distinct symbolic decision (e.g. which airport among named "
+        "codes). source=ax ranks Accessibility controls but is blocked for the "
+        "same UI revision the fast loop already evaluated. Do not use for "
+        "payment/booking confirmation (ask_user). Results are advisory — execute "
+        "yourself via the computer tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "What you are trying to decide right now (user goal / subgoal).",
+            },
+            "source": {
+                "type": "string",
+                "enum": ["agent", "ax"],
+                "description": (
+                    "agent = use options you provide; ax = build options from "
+                    "frontmost Accessibility tree (blocked if fast loop just "
+                    "evaluated the same revision)."
+                ),
+            },
+            "options": {
+                "type": ["array", "null"],
+                "description": (
+                    "Required when source=agent (2–32 items). Each needs id + "
+                    "description. Do not use reserved ids ask_user/use_vision/"
+                    "stuck/done. Pass null when source=ax."
+                ),
+                "minItems": 2,
+                "maxItems": 32,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Opaque id (letters, digits, _ . : -); not reserved.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Short safe human description of the option.",
+                        },
+                    },
+                    "required": ["id", "description"],
+                    "additionalProperties": False,
+                },
+            },
+            "subgoal": {
+                "type": ["string", "null"],
+                "description": "Optional narrower subgoal. Pass null if unused.",
+            },
+            "app": {
+                "type": ["string", "null"],
+                "description": "Optional frontmost app name for context. Null if unknown.",
+            },
+            "window": {
+                "type": ["string", "null"],
+                "description": "Optional window title. Null if unknown.",
+            },
+            "url": {
+                "type": ["string", "null"],
+                "description": "Optional page URL. Null if unknown.",
+            },
+        },
+        "required": ["goal", "source", "options", "subgoal", "app", "window", "url"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 RUN_TERMINAL_TOOL = {
     "type": "function",
     "name": "run_terminal",
@@ -868,6 +944,11 @@ REGISTRY: tuple[RegisteredTool, ...] = (
     _entry(LIST_SKILLS_TOOL, AGENT),
     _entry(READ_SKILL_TOOL, AGENT),
     _entry(READ_UI_TEXT_TOOL, AGENT),
+    _entry(
+        JEV_CHOOSE_TOOL,
+        AGENT,
+        handler=_str_handler(("jev.choose", "run_jev_choose_tool")),
+    ),
     _entry(RUN_TERMINAL_TOOL, AGENT),
     _entry(MARK_DONE_TOOL, AGENT),
 )
@@ -900,6 +981,14 @@ def openai_tools(brain: Brain, *, provider: str = "openai") -> list[dict[str, An
             continue
         if hide_computer and item.name == "start_task":
             continue
+        if item.name == "jev_choose":
+            try:
+                from jev.config import jev_choose_tool_enabled
+
+                if not jev_choose_tool_enabled():
+                    continue
+            except Exception:
+                continue
         tools.append(item.schema)
     tools.extend(mcp_openai_tools(for_agent=(brain == AGENT)))
     return tools
@@ -922,6 +1011,13 @@ def tool_names(brain: Brain, *, provider: str = "openai") -> set[str]:
             names.add("desktop_actions")
         else:
             names.add("computer")
+        try:
+            from jev.config import jev_choose_tool_enabled
+
+            if not jev_choose_tool_enabled():
+                names.discard("jev_choose")
+        except Exception:
+            names.discard("jev_choose")
     return names
 
 

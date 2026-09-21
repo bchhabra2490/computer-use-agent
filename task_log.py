@@ -62,6 +62,7 @@ class TaskLog:
             "status": self.status,
             "steps": self._step_n,
             "log_dir": str(self.dir),
+            "latency_trace_id": self.latency_trace_id,
             **extra,
         }
         self.meta_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -125,6 +126,17 @@ class TaskLog:
                 f.write(f"\n{note}\n")
         print(f"[log] finished ({status}) → {self.dir}")
         try:
+            from llm_trace import snapshot_trace
+
+            if self.latency_trace_id:
+                snapshot_trace(
+                    self.latency_trace_id,
+                    self.dir / "llm_trace.jsonl",
+                    started_at=self.started_at,
+                )
+        except Exception:
+            pass
+        try:
             from app_status import set_and_log
 
             set_and_log(
@@ -133,6 +145,13 @@ class TaskLog:
                 task=self.task,
                 log_dir=str(self.dir),
             )
+        except Exception:
+            pass
+        try:
+            from judge import post_run_enabled, schedule_post_run_judge
+
+            if post_run_enabled():
+                schedule_post_run_judge(self.dir, task=self.task, status=status)
         except Exception:
             pass
 

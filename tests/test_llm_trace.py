@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import llm_trace
 import tools_registry as tr
+from task_log import TaskLog
 
 
 def _reset_trace_state() -> None:
@@ -76,7 +77,7 @@ def test_traced_call_writes_prompt_response_and_tool_calls(tmp_path, monkeypatch
             "model": "gpt-5-mini",
             "instructions": "You are Jarvis. api_key=sk-abcdefghijklmnopqrstuvwxyz",
             "input": "What's on my calendar?",
-            "tools": [{"name": "read_memory"}],
+            "tools": [{"name": "read_memory", "description": "Read a memory file"}],
         },
     ) as rec:
         rec["response"] = response
@@ -88,6 +89,8 @@ def test_traced_call_writes_prompt_response_and_tool_calls(tmp_path, monkeypatch
     assert len(llm_rows) == 1
     row = llm_rows[0]
     assert row["request"]["model"] == "gpt-5-mini"
+    assert row["request"]["tools"][0]["name"] == "read_memory"
+    assert "memory file" in row["request"]["tools"][0]["description"]
     assert "What's on my calendar?" in row["request"]["input"]
     assert "sk-abcdefghijklmnopqrstuvwxyz" not in json.dumps(row)
     assert row["response"]["text"] == "Hi there"
@@ -139,6 +142,92 @@ def test_disabled_writes_nothing(tmp_path, monkeypatch):
     with llm_trace.traced_call(lane="main", request={"model": "x", "input": "hi"}) as rec:
         rec["response"] = SimpleNamespace(id="1", status="ok", output=[], usage=None)
     assert list(tmp_path.glob("*.jsonl")) == []
+
+
+def test_records_for_trace_filters_and_snapshots(tmp_path, monkeypatch):
+    _enable(tmp_path, monkeypatch)
+    llm_trace.start_run(lane="agent", name="agent", trace_id="tid-judge", task="weather")
+    with llm_trace.traced_call(
+        lane="agent",
+        request={
+            "model": "gpt-5-mini",
+            "instructions": "You are the computer agent. Use Open-Meteo for weather.",
+            "input": "What's the weather in Hyderabad?",
+            "tools": [
+                {
+                    "name": "read_skill",
+                    "description": "Read a skill file",
+                },
+                {"name": "open_url"},
+            ],
+        },
+    ) as rec:
+        rec["response"] = SimpleNamespace(
+            id="resp_w",
+            status="completed",
+            usage=None,
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="open-google-maps",
+                    call_id="c-maps",
+                    arguments='{"q":"Hyderabad"}',
+                )
+            ],
+        )
+    with llm_trace.traced_tool(
+        "open-google-maps",
+        args={"q": "Hyderabad"},
+        call_id="c-maps",
+        lane="agent",
+    ) as rec:
+        rec.output = "opened maps"
+
+    rows = llm_trace.records_for_trace("tid-judge")
+    kinds = [r.get("kind") for r in rows]
+    assert "llm" in kinds
+    assert "tool" in kinds
+    dest = tmp_path / "snap.jsonl"
+    assert llm_trace.snapshot_trace("tid-judge", dest) >= 2
+    copied = llm_trace._read_jsonl_dicts(dest)
+    assert any(r.get("kind") == "llm" for r in copied)
+
+
+def test_task_log_finish_snapshots_llm_trace(tmp_path, monkeypatch):
+    _enable(tmp_path, monkeypatch)
+    monkeypatch.setenv("POST_RUN_JUDGE", "0")
+    llm_trace.start_run(lane="agent", name="agent", trace_id="tl-snap", task="Open Notes")
+    with llm_trace.traced_call(
+        lane="agent",
+        request={
+            "model": "gpt-5-mini",
+            "instructions": "Open Notes using the desktop.",
+            "input": "Open Notes",
+            "tools": [{"name": "open_app", "description": "Open an application"}],
+        },
+    ) as rec:
+        rec["response"] = SimpleNamespace(
+            id="resp_n",
+            status="completed",
+            usage=None,
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="open_app",
+                    call_id="c-app",
+                    arguments='{"name":"Notes"}',
+                )
+            ],
+        )
+    log = TaskLog("Open Notes", logs_dir=tmp_path / "runs", latency_trace_id="tl-snap")
+    log.finish("completed")
+    meta = json.loads(log.meta_path.read_text(encoding="utf-8"))
+    assert meta["latency_trace_id"] == "tl-snap"
+    snap = log.dir / "llm_trace.jsonl"
+    assert snap.is_file()
+    rows = llm_trace._read_jsonl_dicts(snap)
+    assert any(r.get("kind") == "llm" for r in rows)
+    assert any("open_app" in json.dumps(r.get("request") or {}) for r in rows)
 
 
 def test_phoenix_disabled_does_not_register(monkeypatch):

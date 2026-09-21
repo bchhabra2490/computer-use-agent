@@ -22,7 +22,7 @@ class ContextBundleTests(unittest.TestCase):
             with (
                 patch.object(ctx, "BUDGET_DISPLAYS", 40),
                 patch("displays.format_monitor_occupancy", return_value=occupancy + " extra"),
-                patch("skills.format_skill_catalog", return_value="skills"),
+                patch("skills.skill_catalog", return_value=("skills", [])),
                 patch("memory.format_memory_catalog", return_value="memories"),
                 patch("mcp_client.format_mcp_catalog", return_value="mcp"),
             ):
@@ -84,13 +84,7 @@ class TurnDesktopContextTests(unittest.TestCase):
         self.assertIsNone(out.screenshot_png)
 
     def test_includes_display_ax_and_screenshot(self) -> None:
-        bundle = ctx.ContextBundle(
-            displays="occupancy",
-            skills="",
-            memories="",
-            mcp="",
-            geometry="geometry",
-        )
+        snap = ctx.DesktopSnapshot(displays="occupancy", geometry="geometry", frontmost="Safari")
         mock_actions = MagicMock()
         mock_actions.list_monitors.return_value = [{"index": 0, "name": "Built-in", "main": True}]
         desktop = MagicMock()
@@ -108,7 +102,8 @@ class TurnDesktopContextTests(unittest.TestCase):
                 },
             ),
             patch.dict(sys.modules, {"actions": mock_actions}),
-            patch.object(ctx, "assemble_context", return_value=bundle),
+            patch.object(ctx, "collect_desktop", return_value=snap),
+            patch.object(ctx, "assemble_catalogs") as catalogs,
             patch("accessibility.read_ui_text", return_value="App: Safari\n- Tab: Example"),
         ):
             out = ctx.capture_turn_desktop_context(utterance="what is on my screen?")
@@ -117,15 +112,10 @@ class TurnDesktopContextTests(unittest.TestCase):
         self.assertIn("geometry", out.text)
         self.assertIn("occupancy", out.text)
         self.assertEqual(out.screenshot_png, b"\x89PNG")
+        catalogs.assert_not_called()
 
     def test_skips_screenshot_when_utterance_is_not_about_the_screen(self) -> None:
-        bundle = ctx.ContextBundle(
-            displays="occupancy",
-            skills="",
-            memories="",
-            mcp="",
-            geometry="geometry",
-        )
+        snap = ctx.DesktopSnapshot(displays="occupancy", geometry="geometry")
         mock_actions = MagicMock()
         mock_actions.list_monitors.return_value = [{"index": 0, "name": "Built-in", "main": True}]
         desktop = MagicMock()
@@ -141,7 +131,8 @@ class TurnDesktopContextTests(unittest.TestCase):
                 },
             ),
             patch.dict(sys.modules, {"actions": mock_actions}),
-            patch.object(ctx, "assemble_context", return_value=bundle),
+            patch.object(ctx, "collect_desktop", return_value=snap) as collect,
+            patch.object(ctx, "assemble_catalogs") as catalogs,
             patch("accessibility.read_ui_text", return_value="App: Safari"),
         ):
             out = ctx.capture_turn_desktop_context(utterance="play old hindi songs")
@@ -149,15 +140,11 @@ class TurnDesktopContextTests(unittest.TestCase):
         self.assertNotIn("Accessibility text", out.text)
         self.assertIsNone(out.screenshot_png)
         desktop.capture_screenshot.assert_not_called()
+        catalogs.assert_not_called()
+        self.assertEqual(collect.call_args.kwargs.get("task"), "play old hindi songs")
 
     def test_read_screen_always_captures(self) -> None:
-        bundle = ctx.ContextBundle(
-            displays="occupancy",
-            skills="",
-            memories="",
-            mcp="",
-            geometry="geometry",
-        )
+        snap = ctx.DesktopSnapshot(displays="occupancy", geometry="geometry")
         mock_actions = MagicMock()
         mock_actions.list_monitors.return_value = [{"index": 0, "name": "Built-in", "main": True}]
         desktop = MagicMock()
@@ -168,19 +155,46 @@ class TurnDesktopContextTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"ORCHESTRATOR_DESKTOP_CONTEXT": "0"}),
             patch.dict(sys.modules, {"actions": mock_actions}),
-            patch.object(ctx, "assemble_context", return_value=bundle),
+            patch.object(ctx, "collect_desktop", return_value=snap) as collect,
             patch("accessibility.read_ui_text", return_value="App: Safari"),
         ):
             out = ctx.read_screen()
         self.assertIn("Screen read", out.text)
         self.assertIn("Accessibility text", out.text)
         self.assertEqual(out.screenshot_png, b"\x89PNG")
+        self.assertTrue(collect.call_args.kwargs.get("include_tabs"))
+        self.assertIsNone(collect.call_args.kwargs.get("task"))
 
     def test_read_screen_vision_input(self) -> None:
         item = ctx.read_screen_vision_input(b"\x89PNG")
         self.assertEqual(item["role"], "user")
         types = [p["type"] for p in item["content"]]
         self.assertIn("input_image", types)
+
+    def test_assemble_context_reuses_snapshot(self) -> None:
+        snap = ctx.DesktopSnapshot(
+            displays="occupancy",
+            geometry="geometry",
+            frontmost="Safari",
+        )
+        with (
+            patch.object(ctx, "collect_desktop") as collect,
+            patch("skills.skill_catalog", return_value=("skills", [])),
+            patch("memory.format_relevant_memories", return_value="memories"),
+            patch("mcp_client.format_mcp_catalog", return_value="mcp"),
+        ):
+            bundle = ctx.assemble_context(
+                snapshot=snap,
+                persist=False,
+                occupancy_detail="omit",
+                memory_query="what tab is this",
+            )
+        collect.assert_not_called()
+        self.assertEqual(bundle.displays, "occupancy")
+        self.assertEqual(bundle.geometry, "geometry")
+        self.assertEqual(bundle.frontmost, "Safari")
+        self.assertEqual(bundle.skills, "skills")
+        self.assertEqual(bundle.memories, "memories")
 
 
 if __name__ == "__main__":

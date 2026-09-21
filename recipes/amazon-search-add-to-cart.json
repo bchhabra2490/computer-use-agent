@@ -1,0 +1,29 @@
+{
+  "name": "amazon-search-add-to-cart",
+  "match": [
+    "Add Ashtavakra Gita to my Amazon cart",
+    "add {{query}} to my Amazon cart",
+    "add {{query}} to cart on amazon",
+    "add {{query}} to my Amazon.in cart"
+  ],
+  "params": [
+    "query"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.amazon.in/s?k={{query}}"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Add Ashtavakra Gita to my Amazon cart.",
+  "match_templates": [
+    "add {{query}} to my Amazon cart",
+    "add {{query}} to cart on amazon",
+    "https://www.amazon.in/s?k={{query}}"
+  ],
+  "leftover": "Click the correct product from the search results, choose edition/format if needed, click 'Add to Cart', then open your Amazon cart and verify edition and quantity."
+}

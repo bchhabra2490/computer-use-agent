@@ -1,0 +1,30 @@
+{
+  "name": "google-flights-cheapest-next-7-days",
+  "match": [
+    "find the cheapest flights from {{origin}} to {{destination}} departing any day within the next {{days}} days",
+    "cheapest {{origin}} to {{destination}} next {{days}} days",
+    "find cheapest flights {{origin}} \u2192 {{destination}} within next week"
+  ],
+  "params": [
+    "origin",
+    "destination",
+    "days",
+    "currency"
+  ],
+  "prelude": [
+    {
+      "type": "open_url",
+      "url": "https://www.google.com/travel/flights?hl=en&curr={{currency}}#flt={{origin}}.{{destination}}"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Find the cheapest flights from New Delhi (DEL) to Mumbai (BOM) departing any day within the next 7 days; show price, airline, departure date and time, number of stops, and a booking link. Assume one passenger in economy unless I say otherwise.",
+  "match_templates": [
+    "https://www.google.com/travel/flights#flt={{origin}}.{{destination}}",
+    "find the cheapest flights from {{origin}} to {{destination}} departing any day within the next {{days}} days"
+  ],
+  "leftover": "Select a departure date within the next {{days}} days, set passengers to 1 adult economy, run the search, expand the cheapest itinerary, and copy: total price ({{currency}}), airline (+flight number if shown), exact departure date/time, number of stops, and the booking link."
+}

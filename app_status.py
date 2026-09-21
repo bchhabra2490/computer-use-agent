@@ -83,6 +83,8 @@ def _default_state() -> dict[str, Any]:
         "turn_chat_screenshot": None,
         "turn_source": None,
         "chat_stream": None,
+        "session_revision": 0,
+        "session_id": "",
     }
 
 
@@ -141,18 +143,50 @@ def read_status() -> dict[str, Any]:
         return _read()
 
 
-def set_state(state: str, detail: str = "", *, task: str | None = None, log_dir: str | None = None) -> None:
+def set_state(
+    state: str,
+    detail: str = "",
+    *,
+    task: str | None = None,
+    log_dir: str | None = None,
+    revision: int | None = None,
+    session_id: str | None = None,
+) -> None:
     """Update high-level status shown in the menu bar."""
     state = (state or "idle").strip() or "idle"
     detail = (detail or "").strip()
     with _lock:
         data = _read()
+        if session_id is not None:
+            owner = str(data.get("session_id") or "")
+            if owner != session_id:
+                return
+        if revision is not None:
+            try:
+                current = int(data.get("session_revision") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            if revision < current:
+                return
+            data["session_revision"] = revision
         data["state"] = state
         data["detail"] = detail
         if task is not None:
             data["task"] = task
         if log_dir is not None:
             data["log_dir"] = log_dir
+        _write(data)
+
+
+def claim_session(session_id: str) -> None:
+    """Register ``session_id`` as the tray owner and reset its revision."""
+    owner = (session_id or "").strip()
+    if not owner:
+        return
+    with _lock:
+        data = _read()
+        data["session_id"] = owner
+        data["session_revision"] = 0
         _write(data)
 
 
@@ -713,6 +747,8 @@ def consume_chat_inbox_items() -> list[dict[str, Any]]:
     with _lock:
         data = _read()
         items = list(data.get("chat_inbox") or [])
+        if not items:
+            return []
         data["chat_inbox"] = []
         _write(data)
     out: list[dict[str, Any]] = []

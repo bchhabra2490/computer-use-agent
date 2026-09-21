@@ -14,7 +14,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -40,14 +40,6 @@ _SECRET_RE = re.compile(
     r"|github_pat_[A-Za-z0-9_]{10,}"
 )
 _IMAGE_RE = re.compile(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+")
-
-_REGISTRY_TOOL_EXTRA = frozenset(
-    {
-        "schedule_task",
-        "list_scheduled_tasks",
-        "cancel_scheduled_task",
-    }
-)
 
 
 def tracing_enabled() -> bool:
@@ -241,21 +233,36 @@ def end_run(*, lane: str = "main", name: str = "turn", **attrs: Any) -> None:
     _PARENT_ID.set(None)
 
 
+def _catalog_tool(item: Any) -> dict[str, str]:
+    """Compact tool schema for traces/judge: name, type, description."""
+    if isinstance(item, dict):
+        name = str(item.get("name") or item.get("type") or "tool")
+        typ = str(item.get("type") or "")
+        desc = str(item.get("description") or "")
+    else:
+        name = str(getattr(item, "name", None) or getattr(item, "type", None) or "tool")
+        typ = str(getattr(item, "type", None) or "")
+        desc = str(getattr(item, "description", None) or "")
+    out: dict[str, str] = {"name": name}
+    if typ and typ != name:
+        out["type"] = typ
+    desc = str(sanitize(desc, limit=400) or "").strip()
+    if desc:
+        out["description"] = desc
+    return out
+
+
 def _request_view(kwargs: dict[str, Any]) -> dict[str, Any]:
     tools = kwargs.get("tools")
-    names: list[str] = []
+    catalog: list[dict[str, str]] = []
     if isinstance(tools, list):
-        for item in tools:
-            if isinstance(item, dict):
-                names.append(str(item.get("name") or item.get("type") or "tool"))
-            else:
-                names.append(str(getattr(item, "name", None) or getattr(item, "type", None) or "tool"))
+        catalog = [_catalog_tool(item) for item in tools]
     return {
         "model": kwargs.get("model"),
         "instructions": sanitize(kwargs.get("instructions")),
         "input": sanitize(kwargs.get("input")),
         "previous_response_id": kwargs.get("previous_response_id"),
-        "tools": names,
+        "tools": catalog,
     }
 
 
@@ -417,10 +424,11 @@ def traced_responses_create(client: Any, *, lane: str, **kwargs: Any) -> Any:
 
 def registry_traces_tool(name: str) -> bool:
     try:
-        from tools_registry import SHARED_TOOL_NAMES
+        from tools_registry import has_handler
+
+        return has_handler(name)
     except Exception:
-        SHARED_TOOL_NAMES = frozenset()
-    return name in SHARED_TOOL_NAMES or name in _REGISTRY_TOOL_EXTRA
+        return False
 
 
 class _ToolRec:
@@ -720,12 +728,17 @@ def _phoenix_complete(
     _phoenix_end(span_id, status=status)
 
 
-def read_jsonl(*, path: Path | None = None, limit: int = 200) -> list[dict[str, Any]]:
-    src = path if path is not None else _jsonl_path()
-    if not src.is_file():
+def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
         return []
     rows: list[dict[str, Any]] = []
-    for line in src.read_text(encoding="utf-8").splitlines()[-max(1, limit) :]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
@@ -733,3 +746,77 @@ def read_jsonl(*, path: Path | None = None, limit: int = 200) -> list[dict[str, 
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _candidate_trace_files(started_at: str | None = None) -> list[Path]:
+    """Daily JSONL files around the run (UTC day ±1)."""
+    when = datetime.now(timezone.utc)
+    if started_at:
+        raw = str(started_at).strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            when = parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for delta in (0, -1, 1):
+        day = (when + timedelta(days=delta)).strftime("%Y-%m-%d")
+        path = TRACE_DIR / f"{day}.jsonl"
+        if path in seen:
+            continue
+        seen.add(path)
+        files.append(path)
+    return files
+
+
+def records_for_trace(
+    trace_id: str | None,
+    *,
+    started_at: str | None = None,
+    limit: int = 800,
+) -> list[dict[str, Any]]:
+    """Load JSONL records for one ``trace_id`` (prompts, tools, tool results)."""
+    tid = str(trace_id or "").strip()
+    if not tid:
+        return []
+    cap = max(1, int(limit))
+    out: list[dict[str, Any]] = []
+    for path in _candidate_trace_files(started_at):
+        for row in _read_jsonl_dicts(path):
+            if str(row.get("trace_id") or "") != tid:
+                continue
+            out.append(row)
+            if len(out) >= cap:
+                return out
+    return out
+
+
+def snapshot_trace(
+    trace_id: str | None,
+    dest: Path,
+    *,
+    started_at: str | None = None,
+) -> int:
+    """Copy matching records into ``dest`` so a TaskLog dir is self-contained."""
+    rows = records_for_trace(trace_id, started_at=started_at)
+    if not rows:
+        return 0
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    return len(rows)
+
+
+def read_jsonl(*, path: Path | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    src = path if path is not None else _jsonl_path()
+    rows = _read_jsonl_dicts(src)
+    if limit <= 0:
+        return rows
+    return rows[-max(1, limit) :]

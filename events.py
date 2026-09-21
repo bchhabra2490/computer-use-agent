@@ -28,6 +28,7 @@ EventType = Literal[
     "listen",
     "fault",
     "handler_error",
+    "session",
 ]
 
 Lane = Literal["main", "agent"]

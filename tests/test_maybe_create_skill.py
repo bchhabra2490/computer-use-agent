@@ -18,6 +18,12 @@ from task_log import TaskLog  # noqa: E402
 
 
 class MaybeCreateSkillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._judge = patch.dict("os.environ", {"POST_RUN_JUDGE": "0"}, clear=False)
+        self._judge.start()
+
+    def tearDown(self) -> None:
+        self._judge.stop()
     def test_background_returns_before_llm(self) -> None:
         started = threading.Event()
         released = threading.Event()

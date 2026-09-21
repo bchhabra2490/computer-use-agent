@@ -1,23 +1,25 @@
 """Durable scheduled task queue.
 
-Stores normalized future task requests under ``.runtime/`` so the orchestrator
-can recover them after restart and promote due work into the normal turn flow.
+Stores normalized future task requests under ``.runtime/`` in SQLite so the
+orchestrator and chat-bridge processes can schedule, cancel, and claim work
+without overwriting each other. A JSON file from older builds is imported once.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 ROOT = Path(__file__).resolve().parent
-RUNTIME_DIR = Path(
-    __import__("os").environ.get("AGENT_RUNTIME_DIR", str(ROOT / ".runtime"))
-)
+RUNTIME_DIR = Path(os.environ.get("AGENT_RUNTIME_DIR", str(ROOT / ".runtime")))
 QUEUE_PATH = RUNTIME_DIR / "scheduled-tasks.json"
 
 MIN_FUTURE_SECONDS = 1.0
@@ -26,7 +28,27 @@ MAX_FUTURE_SECONDS = 30 * 86400.0
 TaskStatus = Literal["queued", "running", "done", "cancelled", "failed"]
 TaskSource = Literal["user", "agent", "system"]
 
-_LOCK = threading.RLock()
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    task TEXT NOT NULL,
+    run_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    parent_task_id TEXT,
+    note TEXT,
+    started_at REAL,
+    finished_at REAL,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sched_status_run
+    ON scheduled_tasks(status, run_at, created_at, id);
+"""
+
+_INIT_THREAD_LOCK = threading.Lock()
+_INIT_ATTEMPTS = 8
+_INIT_RETRY_SEC = 0.05
 
 
 @dataclass(frozen=True)
@@ -50,6 +72,10 @@ class ScheduledTask:
 
 def _ensure_dir() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _db_file() -> Path:
+    return RUNTIME_DIR / "scheduled-tasks.db"
 
 
 def _iso(ts: float | None) -> str | None:
@@ -104,32 +130,179 @@ def _normalize_source(value: Any) -> TaskSource:
     return "system"
 
 
-def _read_all_locked() -> list[ScheduledTask]:
-    if not QUEUE_PATH.is_file():
-        return []
+def _row_to_task(row: sqlite3.Row) -> ScheduledTask:
+    return _from_dict(dict(row))
+
+
+def _json_migrated_path() -> Path:
+    return QUEUE_PATH.with_suffix(".json.migrated")
+
+
+def _json_queue_sources() -> list[tuple[Path, bool]]:
+    """JSON files to import. ``True`` means archive after a successful commit."""
+    sources: list[tuple[Path, bool]] = []
+    if QUEUE_PATH.is_file():
+        sources.append((QUEUE_PATH, True))
+    migrated = _json_migrated_path()
+    if migrated.is_file():
+        sources.append((migrated, False))
+    return sources
+
+
+def _import_json_queue(conn: sqlite3.Connection, path: Path) -> None:
     try:
-        raw = json.loads(QUEUE_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return
     rows = raw if isinstance(raw, list) else raw.get("tasks", [])
-    out: list[ScheduledTask] = []
     if not isinstance(rows, list):
-        return out
-    for row in rows:
-        if not isinstance(row, dict):
+        return
+    for item in rows:
+        if not isinstance(item, dict):
             continue
-        task = _from_dict(row)
-        if task.task:
-            out.append(task)
-    return out
+        task = _from_dict(item)
+        if not task.task:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO scheduled_tasks (
+                id, task, run_at, created_at, source, status,
+                parent_task_id, note, started_at, finished_at, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task.id,
+                task.task,
+                task.run_at,
+                task.created_at,
+                task.source,
+                task.status,
+                task.parent_task_id,
+                task.note,
+                task.started_at,
+                task.finished_at,
+                task.last_error,
+            ),
+        )
 
 
-def _write_all_locked(tasks: list[ScheduledTask]) -> None:
+def _archive_json_queue(path: Path) -> None:
+    dest = _json_migrated_path()
+    try:
+        if path.resolve() == dest.resolve():
+            return
+        if dest.exists():
+            path.unlink()
+        else:
+            path.rename(dest)
+    except OSError:
+        pass
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+@contextmanager
+def _schema_lock() -> Iterator[None]:
+    """Cross-process lock so WAL/schema setup does not race on a new file."""
     _ensure_dir()
-    payload = {"tasks": [asdict(task) for task in tasks]}
-    tmp = RUNTIME_DIR / f"scheduled-tasks.{uuid.uuid4().hex}.tmp"
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(QUEUE_PATH)
+    lock_path = _db_file().with_name(_db_file().name + ".lock")
+    with _INIT_THREAD_LOCK:
+        fh = open(lock_path, "a+")
+        try:
+            try:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass
+            yield
+        finally:
+            try:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            fh.close()
+
+
+def _prepare_connection(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.executescript(_SCHEMA)
+
+
+def _open_connection() -> sqlite3.Connection:
+    delay = _INIT_RETRY_SEC
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(1, _INIT_ATTEMPTS + 1):
+        conn = sqlite3.connect(str(_db_file()), timeout=30.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            with _schema_lock():
+                _prepare_connection(conn)
+            return conn
+        except sqlite3.OperationalError as e:
+            conn.close()
+            last_error = e
+            if not _is_lock_error(e) or attempt >= _INIT_ATTEMPTS:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+    assert last_error is not None
+    raise last_error
+
+
+@contextmanager
+def _connect(*, write: bool = False) -> Iterator[sqlite3.Connection]:
+    _ensure_dir()
+    sources = _json_queue_sources()
+    need_migrate = bool(sources)
+    write = write or need_migrate
+    pending_archive: list[Path] = []
+    conn: sqlite3.Connection | None = None
+    delay = _INIT_RETRY_SEC
+    try:
+        for attempt in range(1, _INIT_ATTEMPTS + 1):
+            conn = _open_connection()
+            try:
+                if write:
+                    conn.execute("BEGIN IMMEDIATE")
+                break
+            except sqlite3.OperationalError as e:
+                conn.close()
+                conn = None
+                if not _is_lock_error(e) or attempt >= _INIT_ATTEMPTS:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
+        assert conn is not None
+        if need_migrate:
+            for path, archive in sources:
+                _import_json_queue(conn, path)
+                if archive:
+                    pending_archive.append(path)
+        yield conn
+        if write:
+            conn.commit()
+            for path in pending_archive:
+                _archive_json_queue(path)
+    except Exception:
+        if write and conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _sorted(tasks: list[ScheduledTask]) -> list[ScheduledTask]:
@@ -137,11 +310,14 @@ def _sorted(tasks: list[ScheduledTask]) -> list[ScheduledTask]:
 
 
 def list_scheduled_tasks(*, include_finished: bool = False) -> list[ScheduledTask]:
-    with _LOCK:
-        rows = _read_all_locked()
-    if not include_finished:
-        rows = [row for row in rows if row.status not in {"done", "cancelled"}]
-    return _sorted(rows)
+    with _connect() as conn:
+        if include_finished:
+            rows = conn.execute("SELECT * FROM scheduled_tasks").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE status NOT IN ('done', 'cancelled')"
+            ).fetchall()
+    return _sorted([_row_to_task(row) for row in rows])
 
 
 def schedule_task(
@@ -172,10 +348,28 @@ def schedule_task(
         parent_task_id=_clean_optional(parent_task_id),
         note=_clean_optional(note),
     )
-    with _LOCK:
-        rows = _read_all_locked()
-        rows.append(row)
-        _write_all_locked(_sorted(rows))
+    with _connect(write=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO scheduled_tasks (
+                id, task, run_at, created_at, source, status,
+                parent_task_id, note, started_at, finished_at, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.id,
+                row.task,
+                row.run_at,
+                row.created_at,
+                row.source,
+                row.status,
+                row.parent_task_id,
+                row.note,
+                row.started_at,
+                row.finished_at,
+                row.last_error,
+            ),
+        )
     return row
 
 
@@ -189,27 +383,40 @@ def cancel_scheduled_task(
     if not target_id and not target_task:
         return {"ok": False, "error": "id or task required"}
     cancelled: list[str] = []
-    with _LOCK:
-        rows = _read_all_locked()
-        updated: list[ScheduledTask] = []
-        now = time.time()
-        for row in rows:
-            matches = False
-            if target_id and row.id == target_id:
-                matches = True
-            elif target_task and row.task.lower() == target_task:
-                matches = True
-            if matches and row.status == "queued":
-                cancelled.append(row.id)
-                row = ScheduledTask(
-                    **{
-                        **asdict(row),
-                        "status": "cancelled",
-                        "finished_at": now,
-                    }
+    now = time.time()
+    with _connect(write=True) as conn:
+        if target_id:
+            cur = conn.execute(
+                """
+                UPDATE scheduled_tasks
+                SET status = 'cancelled', finished_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (now, target_id),
+            )
+            if cur.rowcount:
+                cancelled.append(target_id)
+        if target_task:
+            rows = conn.execute(
+                """
+                SELECT id FROM scheduled_tasks
+                WHERE status = 'queued' AND lower(task) = ?
+                """,
+                (target_task,),
+            ).fetchall()
+            for item in rows:
+                tid = str(item["id"])
+                if tid in cancelled:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE scheduled_tasks
+                    SET status = 'cancelled', finished_at = ?
+                    WHERE id = ? AND status = 'queued'
+                    """,
+                    (now, tid),
                 )
-            updated.append(row)
-        _write_all_locked(_sorted(updated))
+                cancelled.append(tid)
     if not cancelled:
         return {"ok": False, "error": "no matching queued task"}
     return {"ok": True, "cancelled": cancelled}
@@ -217,76 +424,63 @@ def cancel_scheduled_task(
 
 def recover_pending_tasks() -> int:
     """Requeue interrupted work after a restart."""
-    repaired = 0
-    with _LOCK:
-        rows = _read_all_locked()
-        if not rows:
-            return 0
-        fixed: list[ScheduledTask] = []
-        for row in rows:
-            if row.status == "running":
-                repaired += 1
-                row = ScheduledTask(
-                    **{
-                        **asdict(row),
-                        "status": "queued",
-                        "started_at": None,
-                        "last_error": "Recovered after restart before completion.",
-                    }
-                )
-            fixed.append(row)
-        if repaired:
-            _write_all_locked(_sorted(fixed))
-    return repaired
+    with _connect(write=True) as conn:
+        cur = conn.execute(
+            """
+            UPDATE scheduled_tasks
+            SET status = 'queued',
+                started_at = NULL,
+                last_error = 'Recovered after restart before completion.'
+            WHERE status = 'running'
+            """
+        )
+        return int(cur.rowcount or 0)
 
 
 def claim_due_task(*, now: float | None = None) -> ScheduledTask | None:
     ts = time.time() if now is None else float(now)
-    with _LOCK:
-        rows = _read_all_locked()
-        for idx, row in enumerate(_sorted(rows)):
-            if row.status != "queued" or row.run_at > ts:
-                continue
-            claimed = ScheduledTask(
-                **{
-                    **asdict(row),
-                    "status": "running",
-                    "started_at": ts,
-                    "last_error": None,
-                }
-            )
-            # Replace matching id in original list order before persisting.
-            for j, original in enumerate(rows):
-                if original.id == row.id:
-                    rows[j] = claimed
-                    break
-            _write_all_locked(_sorted(rows))
-            return claimed
-    return None
+    with _connect(write=True) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM scheduled_tasks
+            WHERE status = 'queued' AND run_at <= ?
+            ORDER BY run_at, created_at, id
+            LIMIT 1
+            """,
+            (ts,),
+        ).fetchone()
+        if row is None:
+            return None
+        cur = conn.execute(
+            """
+            UPDATE scheduled_tasks
+            SET status = 'running', started_at = ?, last_error = NULL
+            WHERE id = ? AND status = 'queued'
+            """,
+            (ts, row["id"]),
+        )
+        if int(cur.rowcount or 0) != 1:
+            return None
+        claimed = conn.execute(
+            "SELECT * FROM scheduled_tasks WHERE id = ?",
+            (row["id"],),
+        ).fetchone()
+    return None if claimed is None else _row_to_task(claimed)
 
 
 def mark_task_finished(task_id: str, *, status: TaskStatus, error: str | None = None) -> bool:
     if status not in {"done", "failed", "cancelled"}:
         raise ValueError("status must be done, failed, or cancelled")
-    done = False
-    with _LOCK:
-        rows = _read_all_locked()
-        for idx, row in enumerate(rows):
-            if row.id != task_id:
-                continue
-            rows[idx] = ScheduledTask(
-                **{
-                    **asdict(row),
-                    "status": status,
-                    "finished_at": time.time(),
-                    "last_error": _clean_optional(error),
-                }
-            )
-            done = True
-            break
-        if done:
-            _write_all_locked(_sorted(rows))
-    return done
+    with _connect(write=True) as conn:
+        cur = conn.execute(
+            """
+            UPDATE scheduled_tasks
+            SET status = ?, finished_at = ?, last_error = ?
+            WHERE id = ?
+            """,
+            (status, time.time(), _clean_optional(error), task_id),
+        )
+        return int(cur.rowcount or 0) == 1
 
 
 def format_scheduled_tasks(*, include_finished: bool = False) -> str:

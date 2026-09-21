@@ -1,0 +1,27 @@
+{
+  "name": "chessinsights-start-mode",
+  "match": [
+    "start a blindfold chess game (ChessInsights blindfold mode)",
+    "start chessinsights in blindfold mode",
+    "open ChessInsights and start a {{mode}} game"
+  ],
+  "params": [
+    "mode"
+  ],
+  "prelude": [
+    {
+      "type": "open_app",
+      "app": "Google Chrome"
+    }
+  ],
+  "handoff": true,
+  "verify": {
+    "ax_app": "Google Chrome"
+  },
+  "source_task": "Start a blindfold chess game (ChessInsights blindfold mode) and wait for the user's first move.",
+  "match_templates": [
+    "start a {{mode}} chess game on ChessInsights",
+    "open ChessInsights and start {{mode}} mode"
+  ],
+  "leftover": "Navigate to ChessInsights (or open the ChessInsights URL), start a new {{mode}} game, and announce that the game is ready and waiting for the user's first move."
+}

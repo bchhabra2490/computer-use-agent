@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 
 ExecutionPath = Literal["fast", "slow"]
 SpecialistLane = Literal["integration", "terminal", "browser", "desktop", "research", "visual"]
+Difficulty = Literal["easy", "medium", "hard"]
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class ExecutionRoute:
     reason: str
     confidence: float
     recipe: str | None = None
+    difficulty: Difficulty = "medium"
 
     def prompt_block(self) -> str:
         lane_rules = {
@@ -64,6 +66,7 @@ class ExecutionRoute:
             "Execution route (runtime-selected; advisory, fallback is allowed):\n"
             f"- path: {self.path}\n"
             f"- specialist lane: {self.lane}\n"
+            f"- difficulty: {self.difficulty}\n"
             f"- reason: {self.reason}\n"
             "- supporting specialists: safety verifier before sensitive effects; "
             "completion verifier before mark_done\n"
@@ -92,6 +95,11 @@ _DENSE_VISUAL = re.compile(
     r"multiple apps?|across apps?|compare visually)\b",
     re.I,
 )
+_HARD_VISUAL = re.compile(
+    r"\b(easyeda|kicad|cad|schematic|pcb|fusion 360|photoshop|figma|canvas|"
+    r"drag|draw|diagram|pinout|freehand|routing)\b",
+    re.I,
+)
 _SIMPLE_DESKTOP = re.compile(
     r"\b(open|launch|activate|focus|close|quit|switch to|press|shortcut|volume|"
     r"mute|unmute|pause|resume)\b",
@@ -114,6 +122,54 @@ def _matching_recipe_name(text: str) -> str | None:
     return found[0].name if found else None
 
 
+def _difficulty_for(path: ExecutionPath, lane: SpecialistLane, text: str) -> Difficulty:
+    """Map a known path/lane onto easy/medium/hard without an LLM call."""
+    if path == "fast":
+        return "easy"
+    if lane == "visual" and _HARD_VISUAL.search(text or ""):
+        return "hard"
+    return "medium"
+
+
+def infer_difficulty(
+    task: str,
+    *,
+    path: str | None = None,
+    lane: str | None = None,
+) -> Difficulty:
+    """Difficulty for a task, using path/lane hints when they are already known."""
+    p = (path or "").strip().lower()
+    ln = (lane or "").strip().lower()
+    if p in {"fast", "slow"} and ln in {
+        "integration",
+        "terminal",
+        "browser",
+        "desktop",
+        "research",
+        "visual",
+    }:
+        return _difficulty_for(cast(ExecutionPath, p), cast(SpecialistLane, ln), task or "")
+    return resolve_execution_route(task).difficulty
+
+
+def _route(
+    path: ExecutionPath,
+    lane: SpecialistLane,
+    reason: str,
+    confidence: float,
+    text: str,
+    recipe: str | None = None,
+) -> ExecutionRoute:
+    return ExecutionRoute(
+        path,
+        lane,
+        reason,
+        confidence,
+        recipe,
+        _difficulty_for(path, lane, text),
+    )
+
+
 def resolve_execution_route(task: str) -> ExecutionRoute:
     """Choose a cheap first approach and the specialist prompt lane."""
     text = (task or "").strip()
@@ -126,18 +182,24 @@ def resolve_execution_route(task: str) -> ExecutionRoute:
             if _BROWSER.search(text)
             else "desktop"
         )
-        return ExecutionRoute("fast", lane, "A saved deterministic recipe matches.", 0.98, recipe)
+        return _route("fast", lane, "A saved deterministic recipe matches.", 0.98, text, recipe)
     if _INTEGRATION.search(text):
-        return ExecutionRoute("fast", "integration", "A native or connected tool can likely handle it.", 0.9)
+        return _route("fast", "integration", "A native or connected tool can likely handle it.", 0.9, text)
     if _DENSE_VISUAL.search(text):
-        return ExecutionRoute("slow", "visual", "The task needs dense visual grounding or careful multi-step UI work.", 0.92)
+        return _route(
+            "slow",
+            "visual",
+            "The task needs dense visual grounding or careful multi-step UI work.",
+            0.92,
+            text,
+        )
     if _TERMINAL.search(text):
-        return ExecutionRoute("fast", "terminal", "CLI execution is likely faster and easier to verify.", 0.86)
+        return _route("fast", "terminal", "CLI execution is likely faster and easier to verify.", 0.86, text)
     if _RESEARCH.search(text):
-        return ExecutionRoute("fast", "research", "This is primarily information retrieval and synthesis.", 0.84)
+        return _route("fast", "research", "This is primarily information retrieval and synthesis.", 0.84, text)
     if _BROWSER.search(text):
         path: ExecutionPath = "slow" if re.search(r"\b(fill|submit|post|send|buy|checkout|login)\b", text, re.I) else "fast"
-        return ExecutionRoute(path, "browser", "The work is primarily browser navigation.", 0.82)
+        return _route(path, "browser", "The work is primarily browser navigation.", 0.82, text)
     if _SIMPLE_DESKTOP.search(text):
-        return ExecutionRoute("fast", "desktop", "This appears to be a short app or keyboard operation.", 0.78)
-    return ExecutionRoute("slow", "visual", "No verified deterministic path was found.", 0.55)
+        return _route("fast", "desktop", "This appears to be a short app or keyboard operation.", 0.78, text)
+    return _route("slow", "visual", "No verified deterministic path was found.", 0.55, text)

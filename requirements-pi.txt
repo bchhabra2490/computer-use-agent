@@ -1,0 +1,4 @@
+# No desktop, browser, local ML, numpy, Electron, PortAudio, or compiled cloud SDK.
+# Install these from Raspberry Pi OS with apt when possible.
+gpiozero>=2.0,<3
+lgpio>=0.2.2.0; sys_platform == "linux"

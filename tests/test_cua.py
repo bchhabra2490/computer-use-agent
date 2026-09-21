@@ -137,6 +137,23 @@ class StartStopTests(unittest.TestCase):
             self.assertIn("--auto", launched)
             self.assertTrue(str(launched[1]).endswith("orchestrator.py"))
 
+    def test_start_passes_pi_flag(self) -> None:
+        proc = MagicMock()
+        proc.pid = 777
+        proc.poll.return_value = None
+        with (
+            patch.object(cua, "running_pid", return_value=None),
+            patch.object(cua, "install_shim", return_value=[]),
+            patch.object(cua, "cua_on_path", return_value=True),
+            patch.object(cua, "_write_pid_file"),
+            patch("cua.subprocess.Popen", return_value=proc) as popen,
+            patch("cua.time.sleep"),
+            patch("builtins.open", create=True),
+        ):
+            self.assertEqual(cua.cmd_start(pi=True), 0)
+            launched = popen.call_args[0][0]
+            self.assertIn("--pi", launched)
+
 
 class MainTests(unittest.TestCase):
     def test_help_command(self) -> None:

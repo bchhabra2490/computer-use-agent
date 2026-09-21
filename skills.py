@@ -23,6 +23,7 @@ from llm_client import response_output_text as _response_output_text
 SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
+_SNAPSHOT: dict[str, tuple[tuple[tuple[str, int, int], ...], tuple[Skill, ...]]] = {}
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,58 @@ class Skill:
     @property
     def full_text(self) -> str:
         return f"# Skill: {self.name}\n\n{self.description}\n\n{self.body}".strip()
+
+
+def _skills_root(skills_dir: Path | None) -> Path:
+    return skills_dir or SKILLS_DIR
+
+
+def _cache_key(root: Path) -> str:
+    try:
+        return str(root.resolve())
+    except OSError:
+        return str(root)
+
+
+def _dir_stamp(root: Path) -> tuple[tuple[str, int, int], ...]:
+    if not root.is_dir():
+        return ()
+    entries: list[tuple[str, int, int]] = []
+    for skill_md in sorted(root.glob("*/SKILL.md")):
+        try:
+            st = skill_md.stat()
+        except OSError:
+            continue
+        entries.append((str(skill_md), int(st.st_mtime_ns), int(st.st_size)))
+    return tuple(entries)
+
+
+def discover_skills(skills_dir: Path | None = None) -> list[Skill]:
+    """Scan `skills/*/SKILL.md` and return parsed skills, sorted by name."""
+    root = _skills_root(skills_dir)
+    key = _cache_key(root)
+    stamp = _dir_stamp(root)
+    cached = _SNAPSHOT.get(key)
+    if cached is not None and cached[0] == stamp:
+        return list(cached[1])
+
+    skills: list[Skill] = []
+    if root.is_dir():
+        for skill_md in sorted(root.glob("*/SKILL.md")):
+            raw = skill_md.read_text(encoding="utf-8")
+            meta, body = _parse_frontmatter(raw)
+            name = meta.get("name") or skill_md.parent.name
+            description = meta.get("description") or "(no description)"
+            skills.append(
+                Skill(
+                    name=name,
+                    description=description,
+                    body=body,
+                    path=skill_md,
+                )
+            )
+    _SNAPSHOT[key] = (stamp, tuple(skills))
+    return list(skills)
 
 
 def _parse_frontmatter(raw: str) -> tuple[dict[str, str], str]:
@@ -68,29 +121,6 @@ def _parse_frontmatter(raw: str) -> tuple[dict[str, str], str]:
         i += 1
 
     return meta, match.group(2).strip()
-
-
-def discover_skills(skills_dir: Path | None = None) -> list[Skill]:
-    """Scan `skills/*/SKILL.md` and return parsed skills, sorted by name."""
-    root = skills_dir or SKILLS_DIR
-    if not root.is_dir():
-        return []
-
-    skills: list[Skill] = []
-    for skill_md in sorted(root.glob("*/SKILL.md")):
-        raw = skill_md.read_text(encoding="utf-8")
-        meta, body = _parse_frontmatter(raw)
-        name = meta.get("name") or skill_md.parent.name
-        description = meta.get("description") or "(no description)"
-        skills.append(
-            Skill(
-                name=name,
-                description=description,
-                body=body,
-                path=skill_md,
-            )
-        )
-    return skills
 
 
 def get_skill(name: str, skills_dir: Path | None = None) -> Skill | None:
@@ -136,21 +166,32 @@ def format_skill_catalog(
     names_only: bool = False,
 ) -> str:
     """Compact catalog for the agent’s starting prompt."""
-    skills = discover_skills() if skills is None else skills
-    if not skills:
-        return "No skills installed yet. Add skills under skills/<name>/SKILL.md."
+    text, _parsed = skill_catalog(skills, names_only=names_only)
+    return text
+
+
+def skill_catalog(
+    skills: list[Skill] | None = None,
+    *,
+    names_only: bool = False,
+) -> tuple[str, list[Skill]]:
+    """Catalog text plus the parsed skills used to build it."""
+    parsed = discover_skills() if skills is None else list(skills)
+    if not parsed:
+        return "No skills installed yet. Add skills under skills/<name>/SKILL.md.", []
 
     if names_only:
-        names = ", ".join(skill.name for skill in skills)
+        names = ", ".join(skill.name for skill in parsed)
         return (
             "Desktop skills the computer agent can load (names only; it reads "
-            f"the matching SKILL.md): {names}"
+            f"the matching SKILL.md): {names}",
+            parsed,
         )
 
     lines = ["Available skills (call read_skill to load full instructions):"]
-    for skill in skills:
+    for skill in parsed:
         lines.append(f"  - {skill.name}: {skill.description}")
-    return "\n".join(lines)
+    return "\n".join(lines), parsed
 
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -192,6 +233,7 @@ def write_skill(
     # Escape description for single-line YAML if it contains special chars — use folded block.
     content = f"---\n" f"name: {name}\n" f"description: >-\n" f"  {description}\n" f"---\n\n" f"{body}\n"
     skill_md.write_text(content, encoding="utf-8")
+    _SNAPSHOT.pop(_cache_key(skills_dir or SKILLS_DIR), None)
     return skill_md
 
 

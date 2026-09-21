@@ -24,6 +24,7 @@ Usage:
     export OPENAI_API_KEY=sk-...
     python orchestrator.py
     python orchestrator.py --auto
+    python orchestrator.py --auto --pi
     python orchestrator.py --max-steps 25
 """
 
@@ -59,7 +60,6 @@ from llm_client import (
     supports_previous_response_id,
 )
 
-import agent as computer_agent
 from app_status import log as status_log
 from app_status import (
     active_agents,
@@ -75,7 +75,6 @@ from app_status import (
     phone_photo_pending,
     quit_requested,
     register_orchestrator,
-    remove_agent,
     request_mark_done,
     reply_sink,
     reply_to_chat,
@@ -89,19 +88,19 @@ from app_status import (
     speak_pending,
     consume_speak,
     take_turn_chat_screenshot,
+    turn_chat_id,
     unregister_orchestrator,
-    upsert_agent,
     utterance_pending,
 )
 from bus import (
-    AgentMessageInbox,
     AgentMessagePublisher,
     AskUserBridge,
     strip_wake_prefix,
 )
+from agent_jobs import AgentJob, start_agent_thread as _start_agent_thread
 from audio import AudioSession, bind_audio, get_audio
 from checkpoint import run_orchestrator_checkpoint
-from context import assemble_context, read_screen_vision_input
+from context import assemble_catalogs, read_screen_vision_input
 from events import emit
 from input_queues import (
     classify_utterance_for_agent,
@@ -118,7 +117,11 @@ from mcp_client import (
     start_mcp,
     stop_mcp,
 )
-from orchestrator_prompts import build_system_prompt, local_datetime_line
+from orchestrator_prompts import (
+    build_system_prompt,
+    conversation_context_block,
+    local_datetime_line,
+)
 from session import Session, bind_session, get_session
 from session_compact import (
     SessionCompactState,
@@ -132,7 +135,7 @@ from dictation import ensure_dictation_running, stop_dictation
 from stt import POST_TTS_COOLDOWN, NoSpeechError, ask_user, listen_once
 from task_spec import resolve_agent_task
 from task_feedback import collect_post_task_feedback, format_feedback_for_model
-from tools_registry import orchestrator_tools, run_tool
+from tools_registry import computer_use_enabled, has_handler, orchestrator_tools, run_tool
 from barge_router import classify_barge_utterance
 from wake import (
     format_wake_phrases,
@@ -241,35 +244,6 @@ class VoiceTurnCancelled(Exception):
     """The user discarded the current voice turn with the global shortcut."""
 
 
-class AgentJob:
-    """Background computer-agent run + ZeroMQ inbox handle."""
-
-    def __init__(
-        self,
-        task: str,
-        call_id: str,
-        *,
-        match_text: str | None = None,
-        speaker_context: str = "",
-    ):
-        self.task = task
-        self.match_text = (match_text or task).strip() or task
-        self.speaker_context = (speaker_context or "").strip()
-        self.call_id = call_id
-        self.done = threading.Event()
-        self.result: str | None = None
-        self.error: BaseException | None = None
-        self.thread: threading.Thread | None = None
-        self.redirected_from_barge = False
-        self.log_dir: str | None = None
-        self.reply_sink: str = "mac"
-        self.feedback_payload: dict[str, Any] | None = None
-
-    @property
-    def alive(self) -> bool:
-        return self.thread is not None and self.thread.is_alive()
-
-
 def _format_task_history(
     history: list[dict[str, str]],
     *,
@@ -329,6 +303,7 @@ def _history_note(
     photo: bool = False,
     desktop_context: str = "",
     execution_route: str = "",
+    conversation_context: str = "",
 ) -> str:
     prefix = local_datetime_line() + "\n\n"
     if photo:
@@ -344,9 +319,17 @@ def _history_note(
     route_block = (execution_route or "").strip()
     if route_block:
         prefix += route_block + "\n\n"
+    convo = (conversation_context or "").strip()
+    if convo:
+        prefix += convo + "\n\n"
+    said = (
+        f"User said: {utterance}"
+        if reply_to_chat()
+        else f"User said (speech transcript, may be inaccurate): {utterance}"
+    )
     return (
         prefix
-        + f"User said: {utterance}\n\n"
+        + f"{said}\n\n"
         + f"Computer task history so far:\n"
         + _format_task_history(task_history, task_summary=task_summary)
     )
@@ -369,6 +352,7 @@ def _user_turn_input(
     desktop_context: str = "",
     desktop_screenshot_png: bytes | None = None,
     execution_route: str = "",
+    conversation_context: str = "",
 ) -> Any:
     """Build Responses API ``input`` for one user turn (optional phone + desktop images)."""
     note = _history_note(
@@ -378,6 +362,7 @@ def _user_turn_input(
         photo=bool(photo_jpeg),
         desktop_context=desktop_context,
         execution_route=execution_route,
+        conversation_context=conversation_context,
     )
     extras = list(pending_fn_outputs or [])
     images: list[tuple[str, bytes, str]] = []
@@ -839,65 +824,6 @@ def _execute_create_response(
     return session.finish(client, kwargs)
 
 
-
-def _start_agent_thread(
-    job: AgentJob,
-    *,
-    auto: bool,
-    max_steps: int,
-    ask_bridge: AskUserBridge,
-) -> None:
-    upsert_agent(
-        job.call_id,
-        task=job.task,
-        kind="computer-agent",
-        status="running",
-    )
-
-    def _target() -> None:
-        inbox = AgentMessageInbox()
-
-        def _on_log_dir(path: str) -> None:
-            job.log_dir = path
-
-        try:
-            job.result = computer_agent.run(
-                job.task,
-                auto=auto,
-                max_steps=max_steps,
-                voice=False,
-                message_inbox=inbox,
-                ask_user_bridge=ask_bridge,
-                status_agent_id=job.call_id,
-                user_said=job.match_text,
-                speaker_context=job.speaker_context,
-                on_log_dir=_on_log_dir,
-                latency_trace_id=getattr(job, "latency_trace_id", None),
-                execution_route=getattr(job, "execution_route", None),
-            )
-        except BaseException as e:  # noqa: BLE001 — capture for main thread
-            job.error = e
-            job.result = f"failed\nError: {e}"
-        finally:
-            from latency_report import finish_trace
-
-            finish_trace(
-                getattr(job, "latency_trace_id", None),
-                status="failed" if job.error is not None else "completed",
-                task=job.task,
-                metadata={"result": (job.result or "")[:160]},
-            )
-            remove_agent(job.call_id)
-            job.done.set()
-
-    job.thread = threading.Thread(
-        target=_target,
-        name="computer-agent",
-        daemon=True,
-    )
-    job.thread.start()
-
-
 def _task_context_snippet(task_history: list[dict[str, str]]) -> str:
     if not task_history:
         return "(none)"
@@ -942,6 +868,11 @@ def _start_task_block_reason(
     *,
     sleeping: bool,
 ) -> str | None:
+    if not computer_use_enabled():
+        return (
+            "Computer-use is disabled in this mode. You cannot control a desktop. "
+            "Answer with speech, memory, timers, MCP, or chat instead."
+        )
     if sleeping:
         return "Sleep mode is on, so no new computer task was started."
     duplicate = _completed_task_match(task, task_history)
@@ -1013,7 +944,8 @@ def _launch_agent_job(
     job.execution_route = resolve_execution_route(spec.match_text or spec.goal)
     print(
         f"[orchestrator] route={job.execution_route.path}/"
-        f"{job.execution_route.lane} ({job.execution_route.reason})",
+        f"{job.execution_route.lane}/{job.execution_route.difficulty} "
+        f"({job.execution_route.reason})",
         flush=True,
     )
     from latency_report import current_trace_id, mark
@@ -1956,22 +1888,7 @@ def _handle_tool(
             )
             return None, False, job, None
 
-    elif call.name in {
-        "list_memories",
-        "read_memory",
-        "save_memory",
-        "save_screen_memory",
-        "who_am_i",
-        "mcp_call",
-        "list_open_apps",
-        "read_screen",
-        "set_timer",
-        "list_timers",
-        "cancel_timer",
-        "schedule_task",
-        "list_scheduled_tasks",
-        "cancel_scheduled_task",
-    }:
+    elif has_handler(call.name):
         outcome = run_tool(
             call.name,
             args,
@@ -2273,18 +2190,36 @@ def _shutdown_side_processes() -> None:
             pass
 
 
+def _recent_chat_history_block(utterance: str = "") -> str:
+    """Typed desktop-chat messages for STT repair (empty if none / store unavailable)."""
+    try:
+        from chat_store import format_recent_chat_block, get_store
+
+        store = get_store()
+        chat_id = (turn_chat_id() or "").strip() or store.active_chat_id()
+        if not chat_id:
+            return ""
+        return format_recent_chat_block(
+            store,
+            chat_id=chat_id,
+            current_utterance=utterance,
+        )
+    except Exception:
+        return ""
+
+
 def _orchestrator_system_prompt(
     mcp_rule: str,
     *,
     session_summary: str = "",
     memory_query: str | None = None,
     recent_turns: str = "",
+    chat_history: str = "",
     frontmost: str | None = None,
 ) -> str:
-    bundle = assemble_context(
+    bundle = assemble_catalogs(
         memory_query=memory_query,
         skill_detail="names",
-        occupancy_detail="omit",
         frontmost=frontmost,
     )
     return build_system_prompt(
@@ -2296,6 +2231,8 @@ def _orchestrator_system_prompt(
         mcp_rule=mcp_rule,
         session_summary=session_summary,
         recent_turns=recent_turns,
+        chat_history=chat_history,
+        computer_use=computer_use_enabled(),
     )
 
 
@@ -2312,33 +2249,40 @@ def _collect_next_utterance(pending, client, sess):
 
     action is quit, continue, or ready.
     """
-    if pending is not None:
-        return "ready", pending, None, None
-    scheduled_utterance, scheduled_task_id = _claim_due_scheduled_utterance()
-    if scheduled_utterance:
-        print(f'\n[user] "{scheduled_utterance}" (scheduled)')
-        status_log(f'[user] "{scheduled_utterance}" (scheduled)')
-        return "ready", scheduled_utterance, scheduled_task_id, None
-    next_batch = get_next_run_queue().drain()
-    if next_batch:
-        utterance = " ".join(m.text for m in next_batch if m.text).strip()
-        print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
-        return "ready", utterance, None, None
-    if speak_pending():
-        return "continue", None, None, _service_timer_speech(client)
-    utterance = _listen_command(
-        client,
-        should_stop=quit_requested,
-        wake_prompt=f"Waiting for {format_wake_phrases()}…",
-        listen_prompt="Listening…",
-    )
-    if quit_requested():
+    from app_status import speak_pending
+    from input_queues import get_next_run_queue
+    from input_router import collect_next_input
+    from status_control import quit_requested
+
+    def _on_quit() -> None:
         print("[orchestrator] quit requested from menu bar.")
         sess.enter_and_log("done", "Quit from menu bar")
-        return "quit", None, None, None
-    if utterance is None:
-        return "continue", None, None, None
-    return "ready", utterance, None, None
+
+    def _log_scheduled(utterance: str) -> None:
+        print(f'\n[user] "{utterance}" (scheduled)')
+        status_log(f'[user] "{utterance}" (scheduled)')
+
+    def _log_next_run(utterance: str) -> None:
+        print(f"[orchestrator] next_run → turn: {utterance!r}", flush=True)
+
+    result = collect_next_input(
+        pending,
+        claim_scheduled=_claim_due_scheduled_utterance,
+        drain_next_run=lambda: get_next_run_queue().drain(),
+        speak_pending=speak_pending,
+        service_timer_speech=lambda: _service_timer_speech(client),
+        listen=lambda: _listen_command(
+            client,
+            should_stop=quit_requested,
+            wake_prompt=f"Waiting for {format_wake_phrases()}…",
+            listen_prompt="Listening…",
+        ),
+        quit_requested=quit_requested,
+        on_quit=_on_quit,
+        log_scheduled=_log_scheduled,
+        log_next_run=_log_next_run,
+    )
+    return result.action, result.utterance, result.scheduled_id, result.pending
 
 
 def _handle_voice_shortcut(utterance: str, *, client, llm, sess, scheduled_id):
@@ -2454,12 +2398,13 @@ def _run_one_voice_turn(
         metadata={
             "execution_path": execution_route.path,
             "specialist_lane": execution_route.lane,
+            "difficulty": execution_route.difficulty,
             "route_reason": execution_route.reason,
         },
     )
     print(
         f"[orchestrator] execution route → {execution_route.path}/"
-        f"{execution_route.lane} ({execution_route.reason})",
+        f"{execution_route.lane}/{execution_route.difficulty} ({execution_route.reason})",
         flush=True,
     )
     jpeg = None
@@ -2520,6 +2465,12 @@ def _run_one_voice_turn(
         desktop = cp.desktop
         desktop_context = desktop.text
         desktop_png = desktop.screenshot_png
+    chat_history = _recent_chat_history_block(utterance)
+    recent_turns = compact_state.recent_turns_block()
+    conversation_context = conversation_context_block(
+        chat_history=chat_history,
+        recent_turns=recent_turns,
+    )
     turn_input = _user_turn_input(
         utterance,
         task_history,
@@ -2529,6 +2480,7 @@ def _run_one_voice_turn(
         desktop_context=desktop_context,
         desktop_screenshot_png=desktop_png,
         execution_route=execution_route.prompt_block(),
+        conversation_context=conversation_context,
     )
     pending_fn_outputs = []
     turn = TurnTrace(utterance)
@@ -2536,7 +2488,8 @@ def _run_one_voice_turn(
         mcp_rule,
         session_summary=compact_state.session_summary,
         memory_query=utterance,
-        recent_turns=compact_state.recent_turns_block(),
+        recent_turns=recent_turns,
+        chat_history=chat_history,
         frontmost=getattr(cp.desktop, "frontmost", "") or None,
     )
 
@@ -2586,6 +2539,7 @@ def _run_one_voice_turn(
                     session_summary=compact_state.session_summary,
                     memory_query=utterance,
                     recent_turns=compact_state.recent_turns_block(),
+                    chat_history=chat_history,
                     frontmost=getattr(cp.desktop, "frontmost", "") or None,
                 )
                 if chat_shot:
@@ -2604,6 +2558,10 @@ def _run_one_voice_turn(
                     desktop_context=overflow_context,
                     desktop_screenshot_png=overflow_png,
                     execution_route=execution_route.prompt_block(),
+                    conversation_context=conversation_context_block(
+                        chat_history=chat_history,
+                        recent_turns=compact_state.recent_turns_block(),
+                    ),
                 )
                 return "continue", previous_id, task_history, pending_fn_outputs
             _announce_llm_failure(client, e)
@@ -2910,6 +2868,21 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         f"[orchestrator] reasoning={orchestrator_provider()} model={MODEL}",
         flush=True,
     )
+    if not computer_use_enabled():
+        print("[orchestrator] computer-use (start_task) hidden", flush=True)
+    try:
+        from chat_overlay import (
+            chat_browser_enabled,
+            chat_overlay_env_enabled,
+            ensure_chat_bridge_and_app,
+        )
+        from app_status import set_chat_overlay_enabled
+
+        if chat_overlay_env_enabled() or chat_browser_enabled():
+            set_chat_overlay_enabled(True)
+            ensure_chat_bridge_and_app()
+    except Exception as e:
+        print(f"[orchestrator] chat start error: {e}", flush=True)
     audio = AudioSession(client, session=sess)
     bind_audio(audio)
     llm_tts = None
@@ -2927,11 +2900,17 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
         print(f"[orchestrator] MCP start error: {e}", flush=True)
     mcp_rule = ""
     if mcp_openai_tools(for_agent=False):
-        mcp_rule = (
-            "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
-            "Linear, docs, APIs). Prefer this over start_task when it can complete "
-            "the request.\n"
-        )
+        if computer_use_enabled():
+            mcp_rule = (
+                "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
+                "Linear, docs, APIs). Prefer this over start_task when it can complete "
+                "the request.\n"
+            )
+        else:
+            mcp_rule = (
+                "- mcp_call — call a tool on a connected MCP server (search, GitHub, "
+                "Linear, docs, APIs).\n"
+            )
 
     publisher = AgentMessagePublisher()
     ask_bridge = AskUserBridge()
@@ -2949,6 +2928,14 @@ def run_orchestrator(*, auto: bool, max_steps: int) -> None:
     )
 
 
+def apply_pi_mode() -> None:
+    """Same orchestrator, no computer-use; serve the existing chat app in a browser."""
+    os.environ["COMPUTER_USE"] = "0"
+    os.environ["CHAT_BROWSER"] = "1"
+    os.environ["CHAT_OVERLAY"] = "1"
+    os.environ.setdefault("CHAT_BRIDGE_HOST", "0.0.0.0")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Voice desktop orchestrator")
     parser.add_argument(
@@ -2956,8 +2943,22 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Pass --auto to the computer-use agent (skip per-step confirms)",
     )
+    parser.add_argument(
+        "--pi",
+        action="store_true",
+        help="Hide computer-use and serve the chat app in a browser",
+    )
+    parser.add_argument(
+        "--env",
+        default=None,
+        help="Optional extra env file (loaded with override, e.g. .env.pi)",
+    )
     parser.add_argument("--max-steps", type=int, default=25)
     args = parser.parse_args(argv)
+    if args.env:
+        load_dotenv(args.env, override=True)
+    if args.pi:
+        apply_pi_mode()
 
     try:
         run_orchestrator(auto=args.auto, max_steps=args.max_steps)

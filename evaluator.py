@@ -1,8 +1,8 @@
 """
 Cost-aware routing and periodic coaching for the computer-use agent.
 
-- Router: cheap text model picks easy/medium/hard → Luna / Terra / Sol
-  and a matching max-steps budget (25 / 100 / 200).
+- Router: the deterministic execution route picks easy/medium/hard → Luna / Terra / Sol
+  and a matching max-steps budget (25 / 100 / 200). No extra LLM round trip.
 - Evaluator: every N computer turns, cheap vision model coaches the agent
   (and may nudge wrap-up when likely done / stuck).
 """
@@ -26,11 +26,10 @@ def _client_for_model(client: OpenAI, model: str) -> OpenAI:
         return client
     return make_llm_client(model=model)
 
-ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "gpt-5-mini")
 EVAL_MODEL = os.environ.get("EVAL_MODEL", "gpt-5-mini")
 # 0 disables the N-step coach.
 EVAL_EVERY = int(os.environ.get("EVAL_EVERY", "5"))
-# Set AGENT_ROUTE=0 to skip difficulty routing.
+# Set AGENT_ROUTE=0 to skip difficulty routing and always use AGENT_MODEL_HARD.
 AGENT_ROUTE = os.environ.get("AGENT_ROUTE", "1").strip().lower() not in {
     "0",
     "false",
@@ -153,6 +152,25 @@ def model_for_recipe_handoff(log: TaskLog | None = None) -> AgentRoute:
     return route
 
 
+def _difficulty_for_task(
+    task: str,
+    *,
+    execution_path: str | None = None,
+    specialist_lane: str | None = None,
+    difficulty: str | None = None,
+) -> str:
+    """Use an explicit hint, else the deterministic execution route (medium if unsure)."""
+    chosen = (difficulty or "").strip().lower()
+    if chosen in DIFFICULTY_MODELS:
+        return chosen
+    from execution_router import infer_difficulty
+
+    inferred = infer_difficulty(task, path=execution_path, lane=specialist_lane)
+    if inferred in DIFFICULTY_MODELS:
+        return inferred
+    return "medium"
+
+
 def resolve_agent_model(
     client: OpenAI,
     task: str,
@@ -161,48 +179,30 @@ def resolve_agent_model(
     fallback_max_steps: int | None = None,
     execution_path: str | None = None,
     specialist_lane: str | None = None,
+    difficulty: str | None = None,
 ) -> AgentRoute:
     """
     Choose the computer-agent model and step budget.
 
     If AGENT_MODEL is set, use it (manual override) and keep fallback_max_steps
     when provided, else the hard budget.
-    Else if AGENT_ROUTE is on, classify difficulty with ROUTER_MODEL.
+    Else if AGENT_ROUTE is on, map the deterministic execution route to
+    easy/medium/hard (no extra LLM call). Ambiguous tasks fall back to medium.
     Else fall back to AGENT_MODEL_HARD with the hard step budget.
     """
+    _ = client  # kept for call-site compatibility; routing is deterministic
     override = (os.environ.get("AGENT_MODEL") or "").strip()
     if override:
-        difficulty = "hard"
-        steps = fallback_max_steps if fallback_max_steps is not None else max_steps_for_difficulty(difficulty)
+        chosen = "hard"
+        steps = fallback_max_steps if fallback_max_steps is not None else max_steps_for_difficulty(chosen)
         print(f"[router] AGENT_MODEL override → {override} (max_steps={steps})")
         if log is not None:
             log.record(
                 "router",
                 f"override {override}",
-                {"model": override, "difficulty": difficulty, "max_steps": steps},
+                {"model": override, "difficulty": chosen, "max_steps": steps},
             )
-        return AgentRoute(model=override, difficulty=difficulty, max_steps=steps)
-
-    if (execution_path or "").strip().lower() == "fast":
-        route = _route(MODEL_EASY, "easy")
-        lane = (specialist_lane or "general").strip().lower()
-        print(
-            f"[router] fast/{lane} → {route.model} (max_steps={route.max_steps})",
-            flush=True,
-        )
-        if log is not None:
-            log.record(
-                "router",
-                f"fast/{lane} → {route.model}",
-                {
-                    "execution_path": "fast",
-                    "specialist_lane": lane,
-                    "difficulty": "easy",
-                    "model": route.model,
-                    "max_steps": route.max_steps,
-                },
-            )
-        return route
+        return AgentRoute(model=override, difficulty=chosen, max_steps=steps)
 
     if not AGENT_ROUTE:
         route = _route(MODEL_HARD, "hard")
@@ -215,59 +215,32 @@ def resolve_agent_model(
             )
         return route
 
-    prompt = f"""Classify this desktop computer-use task difficulty.
-
-easy — few clicks, open one app, type short text, simple one-screen UI
-medium — multi-step UI in one or two apps, forms, browsing, light CAD/schematic edits
-hard — dense professional UIs (EasyEDA/KiCad/etc.), long multi-phase design, careful placement/routing
-
-Task:
-{task}
-
-Reply JSON only:
-{{"difficulty":"easy"|"medium"|"hard","reason":"one short sentence"}}
-"""
-    try:
-        response = _client_for_model(client, ROUTER_MODEL).responses.create(
-            model=ROUTER_MODEL,
-            input=prompt,
+    chosen = _difficulty_for_task(
+        task,
+        execution_path=execution_path,
+        specialist_lane=specialist_lane,
+        difficulty=difficulty,
+    )
+    route = _route(DIFFICULTY_MODELS[chosen], chosen)
+    lane = (specialist_lane or "").strip().lower() or "unspecified"
+    path = (execution_path or "").strip().lower() or "inferred"
+    print(
+        f"[router] {path}/{lane} {chosen} → {route.model} (max_steps={route.max_steps})",
+        flush=True,
+    )
+    if log is not None:
+        log.record(
+            "router",
+            f"{chosen} → {route.model}",
+            {
+                "execution_path": path,
+                "specialist_lane": lane,
+                "difficulty": chosen,
+                "model": route.model,
+                "max_steps": route.max_steps,
+            },
         )
-        raw = _response_text(response)
-        data = _extract_json(raw) or {}
-        difficulty = str(data.get("difficulty") or "medium").strip().lower()
-        if difficulty not in DIFFICULTY_MODELS:
-            difficulty = "medium"
-        route = _route(DIFFICULTY_MODELS[difficulty], difficulty)
-        reason = str(data.get("reason") or "").strip()
-        print(
-            f"[router] {difficulty} → {route.model} "
-            f"(max_steps={route.max_steps})" + (f" ({reason})" if reason else "")
-        )
-        if log is not None:
-            log.record(
-                "router",
-                f"{difficulty} → {route.model}",
-                {
-                    "difficulty": difficulty,
-                    "model": route.model,
-                    "max_steps": route.max_steps,
-                    "reason": reason,
-                },
-            )
-        return route
-    except Exception as e:
-        route = _route(MODEL_HARD, "hard")
-        print(
-            f"[router] failed ({e}) — using {MODEL_HARD} " f"(max_steps={route.max_steps})",
-            flush=True,
-        )
-        if log is not None:
-            log.record(
-                "router",
-                f"error → {MODEL_HARD}",
-                {"error": str(e), "max_steps": route.max_steps},
-            )
-        return route
+    return route
 
 
 def resolve_agent_model_name(

@@ -1,0 +1,17 @@
+# Core runtime: orchestrator, chat, computer-use, wake, OpenAI STT/TTS, MCP.
+# 3.x adds beta WebSocket Responses types (BetaResponseWsError) that break
+# stream=True / realtime if the install is mixed. Stay on the v1/v2 SDK this
+# repo was written against (Responses API + client.realtime.connect).
+openai[realtime]>=1.66.0,<3
+pyautogui>=0.9.54
+pillow>=10.0.0
+sounddevice>=0.5.0
+numpy>=1.26.0
+pyzmq>=26.0.0
+openwakeword>=0.6.0
+onnxruntime>=1.17.0
+# 1.x and 2.x both work (mcp_compat.py). Phoenix/pydantic-ai may pull 2.x.
+mcp>=1.28
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10.0; sys_platform == "darwin"

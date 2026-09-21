@@ -21,7 +21,12 @@ from chat_overlay import (  # noqa: E402
     show_chat_app,
     sync_chat_app,
 )
-from chat_store import ChatStore, PREF_SELECTED_MODEL, title_from_text  # noqa: E402
+from chat_store import (  # noqa: E402
+    ChatStore,
+    PREF_SELECTED_MODEL,
+    format_recent_chat_block,
+    title_from_text,
+)
 
 
 class OrchestratorCommandTests(unittest.TestCase):
@@ -81,6 +86,49 @@ class ChatStoreTests(unittest.TestCase):
             self.assertFalse(orphan.exists())
             self.assertEqual(store.get_chat(keep.id).title, "keep")
             self.assertEqual(len(store.list_messages(keep.id)), 1)
+
+    def test_format_recent_chat_block_skips_current_and_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(Path(tmp) / "t.sqlite3")
+            chat = store.create_chat(title="weather")
+            store.add_message(chat.id, "user", "what's the weather in Kathmandu")
+            store.add_message(chat.id, "assistant", "I'll check.")
+            store.add_message(chat.id, "user", "cat man do weather")
+            block = format_recent_chat_block(
+                store,
+                chat_id=chat.id,
+                current_utterance="cat man do weather",
+            )
+            self.assertIn("Kathmandu", block)
+            self.assertIn("I'll check.", block)
+            self.assertNotIn("cat man do weather", block)
+            old_id = store.add_message(chat.id, "user", "ancient note").id
+            store._conn().execute(
+                "UPDATE messages SET created_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", old_id),
+            )
+            store._conn().commit()
+            aged = format_recent_chat_block(
+                store,
+                chat_id=chat.id,
+                current_utterance="cat man do weather",
+                max_age_hours=12,
+            )
+            self.assertNotIn("ancient note", aged)
+            self.assertIn("Kathmandu", aged)
+
+    def test_format_recent_chat_block_uses_bounded_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(Path(tmp) / "t.sqlite3")
+            chat = store.create_chat(title="long")
+            for i in range(40):
+                store.add_message(chat.id, "user", f"turn {i}")
+            with patch.object(store, "list_messages") as full:
+                block = format_recent_chat_block(store, chat_id=chat.id, limit=8)
+            full.assert_not_called()
+            self.assertIn("turn 39", block)
+            self.assertNotIn("turn 0", block)
+            self.assertNotIn("turn 30", block)
 
 
 class RelativeTimeTests(unittest.TestCase):

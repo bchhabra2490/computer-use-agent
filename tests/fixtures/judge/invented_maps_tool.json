@@ -1,0 +1,21 @@
+{
+  "task": "What's the current weather in Hyderabad",
+  "status": "completed",
+  "note": "",
+  "steps": [
+    {
+      "n": 1,
+      "kind": "start",
+      "summary": "What's the current weather in Hyderabad"
+    },
+    {
+      "n": 2,
+      "kind": "message",
+      "summary": "start_task",
+      "data": {
+        "name": "open-google-maps",
+        "task": "Open Google Chrome and search current weather in Hyderabad"
+      }
+    }
+  ]
+}

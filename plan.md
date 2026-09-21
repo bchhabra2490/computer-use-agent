@@ -166,3 +166,67 @@ exposure, and revoke a previously paired phone without recreating the installati
 Chromium handles complex browser features with verified navigation metadata;
 isolated backends enforce one network policy; and authenticated automation is
 explicit, scoped, revocable, and separate from the user's normal browser.
+
+## 11. VoiceOS-inspired voice product
+
+Copy the parts of [VoiceOS](https://www.voiceos.com/) that make voice feel like
+an OS, without becoming a connector App Store. Keep computer use as the thesis.
+Dictation stays a mode, not the headline. Confirm consequential sends, not every
+Accessibility click.
+
+### Modes
+
+Most utterances should not start a computer-use job. Split the existing wake,
+Fn, and chat paths into explicit modes:
+
+1. **Dictation.** Hold Fn (already implemented) writes into the focused field.
+   Upgrade the paste path so speech is cleaned before it lands: strip filler,
+   apply self-corrections (“actually I mean tomorrow”), fix grammar and
+   punctuation, and adapt tone to the frontmost app (mail vs chat vs code).
+2. **Edit.** With a text selection, spoken commands rewrite in place: shorten,
+   expand, change tone, fix grammar, translate. This does not require
+   `start_task` or screenshots.
+3. **Ask / point.** Treat the pointer, focused AX element, and frontmost app as
+   implicit context for “this,” “here,” and “that button” without describing the
+   window. Reuse `focused_edit_info` and screenshot crops around the cursor.
+   Teaching overlays remain section 6; this item is context for questions and
+   drafts, not a pointing cursor.
+4. **Agent.** Only route to `start_task` when the user wants the machine to act.
+   Fast-path MCP, mail/chat drafts, and “reply to this” must not open the slow
+   visual computer-use lane.
+
+**Done when.** Hold-Fn dictation produces polished text in Mail and Slack;
+selecting a paragraph and saying “make this shorter” rewrites it in place;
+“what is this?” answers from cursor/focus context; and “reply to this email”
+does not launch `DesktopController`.
+
+### Confirm before send
+
+Per-step GUI confirms and `--auto` already exist. What is missing is a VoiceOS-
+style preview for actions that leave the machine.
+
+1. Before sending mail, chat, calendar invites, payments, or other irreversible
+   external side effects, show a compact preview (to, body, destination) and
+   wait for spoken or click confirmation.
+2. Keep `--auto` for on-screen clicks, typing, and local files. Do not treat
+   `--auto` as permission to send or pay.
+3. Allow a single spoken “send it” / “yes” to approve the preview; barge-in
+   cancels.
+
+**Done when.** A request to email or Slack someone always surfaces a preview,
+even under `--auto`, and nothing is sent until the user confirms.
+
+### Perceived latency and privacy posture
+
+1. Treat sub-second dictation and mode-switch feedback as product work: overlay
+   state, chimes, and not starting the visual agent for writing or Q&A (extends
+   section 5 without replacing it).
+2. Make observer recording, screenshot memory, and raw audio retention
+   obviously opt-in, matching VoiceOS’s “audio is not stored unless you say so”
+   default. Learning from accepted skills and editable `memory/` stays on.
+
+**Done when.** Writing and ask-about-this turns feel immediate and never capture
+the screen unless computer use or an explicit observe/memory action is running.
+
+Out of scope here: a first-party Gmail/Slack App Store, Windows packaging, and
+confirm-on-every-click. Connectors remain MCP plus GUI fallback.

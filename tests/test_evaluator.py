@@ -27,36 +27,43 @@ def test_resolve_agent_model_uses_classified_steps(monkeypatch):
     monkeypatch.delenv("AGENT_MODEL", raising=False)
 
     client = MagicMock()
-    response = MagicMock()
-    response.output = []
-    response.output_text = '{"difficulty":"medium","reason":"multi-step form"}'
-    client.responses.create.return_value = response
-
-    with patch.object(ev, "_response_text", return_value=response.output_text):
-        route = ev.resolve_agent_model(client, "apply to this job")
+    route = ev.resolve_agent_model(client, "apply to this job")
 
     assert route.difficulty == "medium"
     assert route.max_steps == 100
     assert route.model == ev.MODEL_MEDIUM
+    client.responses.create.assert_not_called()
 
 
 def test_resolve_agent_model_hard(monkeypatch):
     monkeypatch.setattr(ev, "AGENT_ROUTE", True)
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     client = MagicMock()
-    with patch.object(
-        ev,
-        "_response_text",
-        return_value='{"difficulty":"hard","reason":"EasyEDA layout"}',
-    ):
-        client.responses.create.return_value = MagicMock()
-        route = ev.resolve_agent_model(client, "route this PCB")
+    route = ev.resolve_agent_model(client, "route this PCB")
     assert route.difficulty == "hard"
     assert route.max_steps == 200
     assert route.model == ev.MODEL_HARD
+    client.responses.create.assert_not_called()
+
+
+def test_explicit_difficulty_wins_over_fast_path(monkeypatch):
+    monkeypatch.setattr(ev, "AGENT_ROUTE", True)
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    client = MagicMock()
+    route = ev.resolve_agent_model(
+        client,
+        "open Notes",
+        execution_path="fast",
+        specialist_lane="desktop",
+        difficulty="hard",
+    )
+    assert route.difficulty == "hard"
+    assert route.model == ev.MODEL_HARD
+    client.responses.create.assert_not_called()
 
 
 def test_fast_path_skips_llm_router(monkeypatch):
+    monkeypatch.setattr(ev, "AGENT_ROUTE", True)
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     client = MagicMock()
     route = ev.resolve_agent_model(
@@ -68,6 +75,16 @@ def test_fast_path_skips_llm_router(monkeypatch):
     assert route.difficulty == "easy"
     assert route.model == ev.MODEL_EASY
     assert route.max_steps == ev.DIFFICULTY_MAX_STEPS["easy"]
+    client.responses.create.assert_not_called()
+
+
+def test_routing_disabled_uses_hard(monkeypatch):
+    monkeypatch.setattr(ev, "AGENT_ROUTE", False)
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    client = MagicMock()
+    route = ev.resolve_agent_model(client, "open Notes", execution_path="fast")
+    assert route.difficulty == "hard"
+    assert route.model == ev.MODEL_HARD
     client.responses.create.assert_not_called()
 
 

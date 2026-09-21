@@ -331,8 +331,8 @@ def reset_over_and_out_chime() -> None:
 
 
 def play_wake_chime(*, force: bool = False, blocking: bool = True) -> None:
-    """Tink. Off on wake-detect unless WAKE_CHIME=1; over-and-out uses force=True."""
-    if not force and os.environ.get("WAKE_CHIME", "0").strip().lower() in {
+    """Tink when the wake word fires. On by default; over-and-out uses force=True."""
+    if not force and os.environ.get("WAKE_CHIME", "1").strip().lower() in {
         "0",
         "false",
         "no",
@@ -363,6 +363,11 @@ def play_wake_chime(*, force: bool = False, blocking: bool = True) -> None:
             sd.play(audio, sr, blocking=False)
     except Exception as e:
         print(f"[wake] chime failed: {e}", file=sys.stderr)
+
+
+def notify_wake_detected() -> None:
+    """Immediate Tink when the wake word fires — before the STT socket opens."""
+    play_wake_chime(blocking=False)
 
 
 def play_over_and_out_chime() -> None:
@@ -907,6 +912,7 @@ def _wait_for_wake_model(
             f"[wake] detected {label} via {hit_key} (score={hit_score:.2f})",
             flush=True,
         )
+        notify_wake_detected()
         return True
     return False
 
@@ -969,6 +975,7 @@ def _wait_for_wake_phrase(
                 + (f" — remainder: {remainder!r}" if remainder else ""),
                 flush=True,
             )
+            notify_wake_detected()
             return True
         print(f"[wake] ignored (does not start with {format_wake_phrases()})", flush=True)
 
@@ -988,7 +995,8 @@ def wait_for_wake(
     When a persistent barge-in monitor is already running, waits on that
     instead of opening a second mic (except from the monitor thread itself).
     While Sleep mode is on, wake hits are ignored until Sleep is toggled off.
-    The listen-start chime plays when STT opens the mic, not here.
+    A Tink plays as soon as the wake word fires; Ping plays later when STT
+    actually opens the mic.
     """
     _set_wake_remainder(None)
     thresh = DEFAULT_THRESHOLD if threshold is None else float(threshold)
@@ -997,12 +1005,6 @@ def wait_for_wake(
 
     sleeping_announced = False
     while True:
-        if should_stop is not None:
-            try:
-                if should_stop():
-                    return False
-            except Exception:
-                return False
         if _sleep_mode_on():
             if not sleeping_announced:
                 print(
@@ -1021,8 +1023,19 @@ def wait_for_wake(
                 time.sleep(0.15)
             sleeping_announced = False
             continue
-
         mon = get_persistent_wake()
+        if (
+            mon is not None
+            and not mon._paused.is_set()
+            and mon.woken.is_set()
+        ):
+            return True
+        if should_stop is not None:
+            try:
+                if should_stop():
+                    return False
+            except Exception:
+                return False
         if (
             mon is not None
             and not mon._paused.is_set()
@@ -1189,8 +1202,13 @@ class WakeMonitor:
             time.sleep(0.02)
 
     def resume(self) -> None:
-        """Resume wake listening after STT (clears a stale woken flag)."""
-        self.woken.clear()
+        """Resume wake listening after STT.
+
+        Only drop a pending hit when we were actually paused. Closing a live
+        socket while wake is already listening must not clear barge-in.
+        """
+        if self._paused.is_set():
+            self.woken.clear()
         self._paused.clear()
 
     def clear(self) -> None:
@@ -1218,9 +1236,9 @@ class WakeMonitor:
             if should_stop is not None:
                 try:
                     if should_stop():
-                        return False
+                        return self.woken.is_set()
                 except Exception:
-                    return False
+                    return self.woken.is_set()
             if timeout is not None and (time.monotonic() - started) >= timeout:
                 return False
             time.sleep(0.05)
@@ -1263,6 +1281,18 @@ def get_persistent_wake() -> WakeMonitor | None:
         if _persistent_wake is not None and _persistent_wake.is_alive:
             return _persistent_wake
         return None
+
+
+def wake_owns_mic() -> bool:
+    """True when the persistent wake monitor is listening (live no longer owns the mic)."""
+    mon = get_persistent_wake()
+    return mon is not None and not mon._paused.is_set()
+
+
+def wake_hit_pending() -> bool:
+    """True when barge-in already fired and has not been consumed."""
+    mon = get_persistent_wake()
+    return mon is not None and mon.woken.is_set() and not mon._paused.is_set()
 
 
 def pause_persistent_wake() -> None:

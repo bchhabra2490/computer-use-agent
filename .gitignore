@@ -5,6 +5,7 @@ recordings/
 __pycache__/
 *.pyc
 .env
+.env.pi
 .DS_Store
 tts_latency.log
 stt_latency.log
@@ -12,6 +13,7 @@ stt_race.log
 tts_race.log
 memory/personal/*.md
 memory/apps/*.md
+memory/**/*.lock
 memory/screens/*
 !memory/screens/.gitkeep
 *.sqlite3

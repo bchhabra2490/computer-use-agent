@@ -1,4 +1,4 @@
-/* Electron renderer — talks to chat_bridge via preload. */
+/* Chat renderer — talks to chat_bridge via Electron preload or browser.js. */
 
 const state = {
   chats: [],
@@ -36,6 +36,9 @@ const state = {
     assistantId: null,
     userId: null,
   },
+  historyRev: 0,
+  chatRevs: {},
+  bridgeId: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -453,7 +456,8 @@ async function loadAvatars() {
 
 async function pollStatus() {
   try {
-    const st = await window.cuaChat.get("/v1/status");
+    const prevRev = Number(state.historyRev || 0);
+    const st = await window.cuaChat.get(`/v1/status?since=${prevRev}`);
     state.screenshotOn = !!st.screenshot_on;
     if ("screenshot_displays" in st) {
       state.screenshotDisplays = st.screenshot_displays == null ? null : st.screenshot_displays;
@@ -474,8 +478,25 @@ async function pollStatus() {
     $("status-foot").textContent = st.orchestrator_alive
       ? "Orchestrator connected"
       : "Orchestrator not running — start: python orchestrator.py --auto";
-    const appended = Number(st.assistant_appended || 0);
-    const inbox = st.inbox || [];
+    const applied = cuaInboxStatus.applyInboxStatus(
+      {
+        historyRev: state.historyRev,
+        chatRevs: state.chatRevs,
+        bridgeId: state.bridgeId,
+        chatId: state.chatId,
+        pendingChatId: state.pendingChatId,
+      },
+      st
+    );
+    if (applied.bridgeId) {
+      state.bridgeId = applied.bridgeId;
+    }
+    const changedChatIds = applied.changedChatIds;
+    const resync = applied.resync;
+    const revBumped = applied.revBumped;
+    state.historyRev = applied.historyRev;
+    state.chatRevs = applied.chatRevs;
+    const inbox = revBumped ? st.inbox || [] : [];
     const stream = st.chat_stream;
     const streamChatId = stream && stream.chat_id ? String(stream.chat_id) : null;
     const streamText = stream && stream.text ? String(stream.text) : "";
@@ -502,35 +523,47 @@ async function pollStatus() {
         });
       }
     }
-    const appendedChatIds = (st.appended_chat_ids || []).map(String);
-    const completedPending = appendedChatIds.length
-      ? appendedChatIds.includes(String(state.pendingChatId || ""))
-      : appended > 0;
-    if (appended > 0 || inbox.length) {
-      const visibleUpdated = appendedChatIds.length
-        ? appendedChatIds.includes(String(state.chatId || ""))
+    const completedPending = applied.completedPending;
+    if (changedChatIds.length || inbox.length || resync) {
+      const visibleUpdated = changedChatIds.length
+        ? changedChatIds.includes(String(state.chatId || ""))
         : true;
       if (visibleUpdated && state.chatId) {
-        state.thinking = false;
-        state.streamText = null;
-        state.streamDone = false;
         const data = await window.cuaChat.get(`/v1/chats/${state.chatId}/messages`);
         state.messages = data.messages || [];
         renderTranscript();
         needRender = false;
       }
       await refreshChats();
-      if (completedPending) {
-        state.busy = false;
-        state.pendingChatId = null;
-        $("btn-send").disabled = false;
-      }
+    }
+    if (completedPending) {
+      state.thinking = false;
+      state.streamText = null;
+      state.streamDone = false;
+      state.busy = false;
+      state.pendingChatId = null;
+      $("btn-send").disabled = false;
     } else if (needRender) {
       renderTranscript();
     }
   } catch (err) {
     $("status-foot").textContent = "Bridge offline — start chat from tray";
   }
+  const active = state.thinking || state.busy || !!state.streamText;
+  schedulePoll(active ? POLL_FAST_MS : POLL_IDLE_MS);
+}
+
+const POLL_FAST_MS = 250;
+const POLL_IDLE_MS = 1000;
+let pollTimer = null;
+
+function schedulePoll(ms) {
+  if (pollTimer != null) {
+    clearTimeout(pollTimer);
+  }
+  pollTimer = setTimeout(() => {
+    pollStatus();
+  }, ms);
 }
 
 function autosize() {
@@ -1712,7 +1745,6 @@ async function boot() {
   }
   await loadAvatars();
   await pollStatus();
-  setInterval(pollStatus, 250);
 }
 
 boot();

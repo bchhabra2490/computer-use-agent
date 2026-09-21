@@ -53,6 +53,23 @@ class AudioSessionTests(unittest.TestCase):
         sink.assert_called_with("mac")
         self.assertEqual(self.sess.phase, "listening")
 
+    def test_listen_command_starts_stt_when_wake_already_pending(self) -> None:
+        with (
+            patch("audio.wait_for_wake", return_value=False),
+            patch("wake.wake_hit_pending", return_value=True),
+            patch("audio.get_last_wake", return_value=MagicMock(label="Jarvis Veerey")),
+            patch("audio.get_wake_remainder", return_value=None),
+            patch("audio.listen_for_utterance", return_value="set a timer"),
+            patch("audio.consume_utterance", return_value=None),
+            patch("audio.consume_listen", return_value=False),
+            patch("audio.utterance_pending", return_value=False),
+            patch("audio.speak_pending", return_value=False),
+            patch("audio.set_reply_sink") as sink,
+        ):
+            cmd = self.audio.listen_command()
+        self.assertEqual(cmd, "set a timer")
+        sink.assert_called_with("mac")
+
     def test_listen_command_returns_phone_queue_without_wake(self) -> None:
         with (
             patch("audio.consume_utterance", return_value="play lag ja gale"),

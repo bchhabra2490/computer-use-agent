@@ -429,6 +429,60 @@ class GroundingTests(unittest.TestCase):
         )
 
 
+class RecipeOvermatchTests(unittest.TestCase):
+    def test_chrome_weather_is_not_open_google_maps(self) -> None:
+        task = (
+            "Open Google Chrome and search current weather for Mulki, Karnataka, "
+            "India. Report current temperature and include the source URL."
+        )
+        self.assertIsNone(rc.find_matching_recipe(task))
+        self.assertIsNone(rc.pick_matching_recipe(task))
+        self.assertFalse(
+            rc.recipe_covers_request(
+                next(r for r in rc.load_recipes() if r.name == "open-google-maps"),
+                task,
+            )
+        )
+
+    def test_spoken_weather_is_not_a_maps_recipe(self) -> None:
+        self.assertIsNone(rc.find_matching_recipe("What's the weather in Mulki, Karnataka?"))
+
+    def test_open_google_maps_still_matches(self) -> None:
+        hit = rc.find_matching_recipe("Open Google Maps")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit[0].name, "open-google-maps")
+        self.assertEqual(hit[2].strip(), "")
+
+    def test_weather_run_is_not_skipped_as_maps(self) -> None:
+        task = "Open Google Chrome and search current weather for Mulki, Karnataka, India."
+        log = _log(
+            task,
+            [
+                "open -a 'Google Chrome' "
+                "'https://www.google.com/search?q=current+weather+Mulki+Karnataka+India'"
+            ],
+        )
+        self.addCleanup(log._tmp.cleanup)
+        recipes_dir = _seed_dir(self)
+        (recipes_dir / "open-google-maps.json").write_text(
+            json.dumps(
+                {
+                    "name": "open-google-maps",
+                    "match": ["open", "google", "maps"],
+                    "params": [],
+                    "prelude": [
+                        {"type": "open_url", "url": "https://www.google.com/maps"}
+                    ],
+                    "handoff": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        path = rc._maybe_save_recipe_impl(None, log, task, recipes_dir=recipes_dir)
+        self.assertIsNotNone(path)
+
+
 class ProposeTests(unittest.TestCase):
     def tearDown(self) -> None:
         for name in list(self.__dict__):

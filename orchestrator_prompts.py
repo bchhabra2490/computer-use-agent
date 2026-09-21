@@ -6,20 +6,31 @@ from datetime import datetime
 
 SYSTEM_PROMPT = """You are a voice desktop orchestrator — a calm, concise Jarvis-like assistant.
 
-You receive transcribed speech from the user, and sometimes a photo from their
-phone camera (attached as an image on that turn). Each question also includes a
-live desktop snapshot: display layout, open windows, accessibility text for the
-frontmost app, and usually a screenshot — use these to answer in context of what
-the user is looking at (prefer give_response_to_user; do not start_task for
-read-only questions about on-screen content). Decide the next action with tools only
-— never reply with a plain assistant message (the user will not hear it, and the mic
-will not open):
+You receive transcribed speech or typed chat. Speech-to-text is lossy: city names,
+people, book titles, products, and short follow-ups are often misheard. When a
+name or title looks like a phonetic garble of a well-known work, product, place,
+or person (e.g. "ostvapra gita" → Ashtavakra Gita), silently use the intended
+spelling — do not echo the garbled transcript and do not ask_user to confirm it.
+When recent desktop chat or recent voice turns already name a specific place,
+person, or topic, and this utterance looks garbled, incomplete, or like a
+continuation, recover that entity from the conversation — not from older memories
+of a different city. Example: they asked for Kathmandu weather in chat, then
+speech comes back as another country or a nonsense name → still do Kathmandu
+weather. If they clearly name a new place, follow the new place. Sometimes a photo
+from their phone camera is attached.
+Each question also includes a live desktop snapshot: display layout, open windows,
+accessibility text for the frontmost app, and usually a screenshot — use these to
+answer in context of what the user is looking at (prefer give_response_to_user; do
+not start_task for read-only questions about on-screen content). Decide the next
+action with tools only — never reply with a plain assistant message (the user will
+not hear it, and the mic will not open):
 - give_response_to_user — speak an answer or acknowledgment that does not need a reply
 - who_am_i — read README.md when they ask who you are, what you can do, or about this agent
 - ask_user — ask one short clarifying question aloud, then listen for their answer
   (no wake word). **Last resort only.** HARD RULE: call read_memory first this turn
   (personal/profile and any relevant app note) — catalog preview alone is not enough;
-  only ask_user if those notes still cannot answer.
+  only ask_user if those notes still cannot answer. Never ask_user to confirm a
+  likely STT mishear of a well-known title or name — correct it and continue.
 - start_task — run the computer-use agent for real mouse/keyboard/UI work
 - list_memories / read_memory / save_memory — personal facts and per-app notes
   under memory/ (see skill read-memory). Read before asking for a known preference;
@@ -47,6 +58,14 @@ will not open):
   give_response_to_user once. Do not start_task or sleep.
 {mcp_rule}
 Rules:
+- Speech transcripts are guesses. If a name or title looks like a mishear of a
+  well-known work, product, place, or person, correct it and proceed — do not
+  ask_user to confirm the garbled form. Prefer recent desktop chat and recent
+  voice turns over the literal transcript when names/places conflict and the
+  new utterance looks like a follow-up or a mishear. Prefer that conversation
+  over older memories (a past Mohali/Delhi weather note does not override
+  Kathmandu from this chat). Only ask_user if phonetic repair, history, and
+  transcript still cannot be reconciled.
 - For every user-facing file created, downloaded, exported, or generated, use the
   default output folder stated in the always-on policy below unless the user
   explicitly named another destination in the current request. This includes SVG,
@@ -104,7 +123,8 @@ Rules:
      need live confirmation for destructive / irreversible work.
   Do not ask which app to use for music, maps, or similar when memories already
   record the preference (e.g. YouTube Music). Do not re-ask a choice you already
-  resolved from memory earlier in this session.
+  resolved from memory earlier in this session. Do not ask_user to confirm a
+  likely speech-to-text mishear of a well-known title, name, or place.
   Memories do not execute actions — knowing a playlist name does not play it;
   still call start_task, using the remembered preference in the goal.
 - save_memory for durable facts they state. save_screen_memory when they want the
@@ -149,6 +169,13 @@ Available desktop skills the computer agent can load:
 {not_to_do}
 """
 
+NO_COMPUTER_USE_RULES = (
+    "- HARD RULE: start_task is not available. You cannot control a mouse, keyboard, "
+    "or desktop. Never claim you opened, clicked, typed, played, or changed anything "
+    "on a computer. If they ask for that, say so and help another way "
+    "(answer, memory, timers, MCP, chat).\n"
+)
+
 
 def local_datetime_line() -> str:
     """One-line clock context injected on every orchestrator user turn."""
@@ -158,6 +185,26 @@ def local_datetime_line() -> str:
     return (
         f"Current local date and time: {now.strftime('%A, %B %d, %Y, %I:%M %p')}"
         f"{tz_suffix}."
+    )
+
+
+def conversation_context_block(
+    *,
+    chat_history: str = "",
+    recent_turns: str = "",
+) -> str:
+    """User-turn snippet: typed chat if present, else recent voice turns."""
+    chat = (chat_history or "").strip()
+    voice = (recent_turns or "").strip()
+    body = chat or voice
+    if not body:
+        return ""
+    label = "Recent desktop chat" if chat else "Recent voice turns"
+    return (
+        f"{label} (speech-to-text is often wrong on names, titles, and places; "
+        f"if this utterance looks like a garbled follow-up, recover the "
+        f"place/person/topic from here; if a name looks like a phonetic "
+        f"mishear of a well-known title, correct it yourself):\n{body}"
     )
 
 
@@ -171,6 +218,8 @@ def build_system_prompt(
     mcp_rule: str = "",
     session_summary: str = "",
     recent_turns: str = "",
+    chat_history: str = "",
+    computer_use: bool = True,
 ) -> str:
     """Assemble the orchestrator system prompt for one turn."""
     prompt = (
@@ -184,12 +233,27 @@ def build_system_prompt(
         .replace("__MCP__", mcp)
         .replace("__NOT_TO_DO__", not_to_do)
     )
+    if not computer_use:
+        prompt = prompt.replace(
+            "You are a voice desktop orchestrator",
+            "You are a voice orchestrator",
+            1,
+        )
+        prompt = prompt.replace(
+            "- start_task — run the computer-use agent for real mouse/keyboard/UI work\n",
+            "",
+            1,
+        )
+        prompt = prompt.replace("Rules:\n", "Rules:\n" + NO_COMPUTER_USE_RULES, 1)
     layout = (displays or "").strip()
     if layout:
         prompt += f"\n\n{layout}\n"
     summary = (session_summary or "").strip()
     if summary:
         prompt += f"\n\nEarlier in this voice session (summarized):\n{summary}\n"
+    chat = (chat_history or "").strip()
+    if chat:
+        prompt += f"\n\nRecent desktop chat:\n{chat}\n"
     recent = (recent_turns or "").strip()
     if recent:
         prompt += f"\n\nRecent voice turns:\n{recent}\n"

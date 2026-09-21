@@ -1,7 +1,7 @@
-"""Electron chat desktop app launcher + shared helpers.
+"""Chat app launcher + shared helpers.
 
-The AppKit ``NSPanel`` chat UI was removed. Chat is now an Electron window
-(``chat_app/``) talking to ``chat_bridge.py`` on localhost.
+Chat is the ``chat_app/`` renderer: an Electron window on desktop, or the same
+files served by ``chat_bridge`` when ``CHAT_BROWSER=1`` (``orchestrator.py --pi``).
 
 Tray / ``cua chat`` set ``chat_overlay_enabled`` and call ``ensure_chat_app``.
 """
@@ -32,6 +32,12 @@ CHAT_CONTROL_PORT = int(os.environ.get("CHAT_CONTROL_PORT", "8744"))
 
 def chat_overlay_env_enabled() -> bool:
     return os.environ.get("CHAT_OVERLAY", "0").strip().lower() not in _OFF
+
+
+def chat_browser_enabled() -> bool:
+    from chat_bridge import chat_browser_enabled as _bridge_browser
+
+    return _bridge_browser()
 
 
 def chat_overlay_enabled(data: dict[str, Any] | None = None) -> bool:
@@ -106,10 +112,13 @@ def _electron_bin() -> str | None:
 
 
 def ensure_chat_bridge_and_app(*, focus: bool = False) -> None:
-    """Start chat_bridge + Electron when chat is enabled."""
-    from chat_bridge import ensure_chat_bridge
+    """Start chat_bridge, then Electron unless the chat app is in the browser."""
+    from chat_bridge import ensure_chat_bridge, print_chat_urls
 
     ensure_chat_bridge()
+    if chat_browser_enabled():
+        print_chat_urls()
+        return
     data = read_status()
     pid = data.get("chat_app_pid")
     if pid_alive(pid):
@@ -228,7 +237,7 @@ def cmd_chat(mode: str | None) -> int:
         except Exception:
             pass
         ensure_chat_bridge_and_app(focus=True)
-        print("chat window on (Electron)")
+        print("chat window on (browser)" if chat_browser_enabled() else "chat window on (Electron)")
         return 0
     if key in {"off", "hide", "0", "false"}:
         set_chat_overlay_enabled(False)
@@ -248,10 +257,11 @@ def cmd_chat(mode: str | None) -> int:
             ensure_chat_bridge_and_app(focus=True)
         else:
             hide_chat_app()
-        print("chat window " + ("off" if now else "on (Electron)"))
+        print("chat window " + ("off" if now else "on (browser)" if chat_browser_enabled() else "on (Electron)"))
         return 0
     if key == "status":
-        print("chat window " + ("on" if chat_overlay_enabled() else "off") + " (Electron · ⌘⌃C)")
+        label = "browser" if chat_browser_enabled() else "Electron"
+        print("chat window " + ("on" if chat_overlay_enabled() else "off") + f" ({label} · ⌘⌃C)")
         return 0
     print("usage: cua chat [on|off|toggle|status]  (hotkey ⌘⌃C)")
     return 2

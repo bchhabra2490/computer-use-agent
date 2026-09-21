@@ -82,7 +82,7 @@ from status_tray import ensure_tray_running, stop_tray
 from stt import ask_user, voice_confirm
 from task_log import TaskLog
 from terminal import run_command
-from tools_registry import SHARED_TOOL_NAMES, agent_tools, run_tool
+from tools_registry import agent_tools, has_handler, run_tool
 from recipes import RecipeHit, handoff_prompt, maybe_save_recipe, try_recipe
 from tts import speak, speak_later
 
@@ -447,14 +447,13 @@ def _handle_function_call(
     audio_client: OpenAI | None = None,
 ) -> dict:
     from llm_trace import traced_tool
-    from tools_registry import SHARED_TOOL_NAMES
 
     name = getattr(call, "name", "") or "tool"
     try:
         args = json.loads(call.arguments or "{}")
     except json.JSONDecodeError:
         args = {}
-    if name in SHARED_TOOL_NAMES:
+    if has_handler(name):
         return _handle_function_call_impl(
             client,
             call,
@@ -509,7 +508,7 @@ def _handle_function_call_impl(
         return _handle_read_ui_text(call, log)
     if call.name == "run_terminal":
         return _handle_run_terminal(call, log, auto=auto, client=speak_client, voice=voice)
-    if call.name in SHARED_TOOL_NAMES:
+    if has_handler(call.name):
         args = json.loads(call.arguments or "{}")
         outcome = run_tool(
             call.name,
@@ -966,7 +965,17 @@ def _agent_prompt_body(
         "media duration or use macOS say for spoken updates.\n"
         "5b. If the task is opening a known site, map, or search page, "
         "prefer `open 'https://...'` (put the place/query in the URL) "
-        "instead of Spotlight and typing in the address bar.\n"
+        "instead of Spotlight and typing in the address bar. For flights/"
+        "maps and similar, prefer a matching skill/recipe so the page opens "
+        "before you hunt pixels.\n"
+        "5c. jev_choose is optional and narrow — the pre-agent Jev fast loop "
+        "already handled high-confidence AX actions when enabled. Use "
+        "jev_choose source=agent only for a distinct symbolic pick among "
+        "named options you already have (not to re-decide the same screen). "
+        "source=ax is blocked for the same UI revision the fast loop just "
+        "evaluated. Treat results as advisory; you still click/type via "
+        f"{gui_tool}. Never use jev_choose for payment or final booking "
+        "(ask_user).\n"
         f"6. Use {gui_tool} for UI actions on this real desktop. "
         "The screenshot shows every monitor, labeled screen N. Click the "
         "display that holds the target app (see occupancy). Do not assume "
@@ -984,6 +993,9 @@ def _agent_prompt_body(
         "not enough. Only ask when memory cannot answer (or for destructive "
         "confirmation). Do not ask which music/maps app, account, or place "
         "to use if memory already says. "
+        "If the task text looks like a speech-to-text garble of a well-known "
+        "title or name, use the intended spelling — do not ask_user to confirm "
+        "the garbled form. "
         "save_memory when they state a durable fact. "
         "If they want the current display remembered, call save_screen_memory "
         f"(screenshot + description) — do not use {gui_tool} for that.\n"
@@ -1521,79 +1533,168 @@ def _run_agent_session(
     if kind == "handoff":
         recipe_handoff = True
         recipe_result, model_task, handoff_shot_b64 = payload
-        route = model_for_recipe_handoff(log)
-    else:
-        route = resolve_agent_model(
-            client,
-            task,
-            log,
-            fallback_max_steps=max_steps,
-            execution_path=getattr(execution_route, "path", None),
-            specialist_lane=getattr(execution_route, "lane", None),
-        )
-    model = route.model
-    max_steps = route.max_steps
-    provider = agent_provider(model)
-    client = make_llm_client(
-        model=model,
-        provider=os.environ.get("AGENT_BACKEND"),
-    )
-    tools = agent_tools(provider=provider)
-    gui_tool = "desktop_actions" if provider == "deepseek" else "the computer tool"
-    print(
-        f"[agent] provider={provider} model={model} difficulty={route.difficulty} "
-        f"max_steps={max_steps} eval_every={EVAL_EVERY}"
-    )
-    if message_inbox is not None:
-        print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
-    speaker_block, audio_block, specialist_block = _prompt_side_blocks(
-        speaker_context, execution_route
-    )
-    prompt_body = _agent_prompt_body(
-        speaker_block=speaker_block,
-        audio_block=audio_block,
-        specialist_block=specialist_block,
-        model_task=model_task,
-        display_ctx=display_ctx,
-        skill_catalog=skill_catalog,
-        memory_catalog=memory_catalog,
-        mcp_catalog=mcp_catalog,
-        not_to_do=not_to_do,
-        gui_tool=gui_tool,
-        recipe_handoff=recipe_handoff,
-        recipe_name=None if recipe_result is None else recipe_result.recipe.name,
-    )
-    from llm_trace import traced_responses_create
 
-    response = traced_responses_create(
-        client,
-        lane="agent",
-        model=model_for_request(
-            model,
-            has_image=input_has_image(_initial_api_input(prompt_body, handoff_shot_b64)),
+    # Narrow Jev integration: after recipes, before model routing / vision loop.
+    # Disabled (JEV_FAST_LOOP=0) → no call, existing path unchanged.
+    # Shadow → log only, then vision. Active → execute supported actions or hand off.
+    from jev.session import (
+        JevSessionContext,
+        reset_jev_session,
+        set_jev_session,
+        update_jev_session,
+    )
+
+    jev_session = JevSessionContext()
+    jev_session_token = set_jev_session(jev_session)
+    try:
+        try:
+            from jev.config import load_jev_config
+            from jev.loop import jev_fast_loop_enabled, run_jev_fast_loop
+            from jev.models import JevLoopStatus
+
+            jev_cfg = load_jev_config()
+            if jev_fast_loop_enabled(jev_cfg):
+                from jev.client import typesafe_sdk_available
+
+                print(
+                    f"[jev] fast_loop=1 shadow={int(jev_cfg.shadow_mode)} "
+                    f"model={jev_cfg.model}",
+                    flush=True,
+                )
+                if not typesafe_sdk_available():
+                    print(
+                        "[jev] typesafe-sdk missing — "
+                        "pip install 'typesafe-sdk>=0.7.0,<1' "
+                        "(then restart). Falling through to vision.",
+                        flush=True,
+                    )
+                jev_out = run_jev_fast_loop(
+                    task=model_task,
+                    original_task=task,
+                    desktop=desktop,
+                    log=log,
+                    agent_id=agent_id,
+                    auto=auto,
+                    voice=voice,
+                    llm_client=client,
+                    confirm_fn=confirm,
+                    config=jev_cfg,
+                    latency_trace_id=getattr(log, "latency_trace_id", None),
+                )
+                update_jev_session(
+                    jev_session.after_fast_loop(
+                        snapshot_revision=jev_out.snapshot_revision,
+                        outcome=jev_out.status.value,
+                        fallback_reason=jev_out.reason or "",
+                    )
+                )
+                if jev_out.status is JevLoopStatus.ABORTED:
+                    raise TaskMarkedDone(
+                        jev_out.reason or "User marked the task done."
+                    )
+                if jev_out.fallback_prompt:
+                    model_task = jev_out.fallback_prompt
+                    print(
+                        f"[jev] handoff status={jev_out.status.value} "
+                        f"steps={jev_out.steps} reason={jev_out.reason[:120]}",
+                        flush=True,
+                    )
+                elif jev_out.status is JevLoopStatus.SHADOW_COMPLETE:
+                    print(
+                        f"[jev] shadow complete reason={jev_out.reason[:120]}",
+                        flush=True,
+                    )
+        except TaskMarkedDone:
+            raise
+        except Exception as exc:
+            print(f"[jev] loop skipped: {type(exc).__name__}: {exc}", flush=True)
+            update_jev_session(
+                jev_session.after_fast_loop(
+                    snapshot_revision=None,
+                    outcome="skipped",
+                    fallback_reason=type(exc).__name__,
+                )
+            )
+
+        if kind == "handoff":
+            route = model_for_recipe_handoff(log)
+        else:
+            route = resolve_agent_model(
+                client,
+                task,
+                log,
+                fallback_max_steps=max_steps,
+                execution_path=getattr(execution_route, "path", None),
+                specialist_lane=getattr(execution_route, "lane", None),
+                difficulty=getattr(execution_route, "difficulty", None),
+            )
+        model = route.model
+        max_steps = route.max_steps
+        provider = agent_provider(model)
+        client = make_llm_client(
+            model=model,
+            provider=os.environ.get("AGENT_BACKEND"),
+        )
+        tools = agent_tools(provider=provider)
+        gui_tool = "desktop_actions" if provider == "deepseek" else "the computer tool"
+        print(
+            f"[agent] provider={provider} model={model} difficulty={route.difficulty} "
+            f"max_steps={max_steps} eval_every={EVAL_EVERY}"
+        )
+        if message_inbox is not None:
+            print(f"[agent] ZeroMQ inbox connected ({message_inbox.endpoint})")
+        speaker_block, audio_block, specialist_block = _prompt_side_blocks(
+            speaker_context, execution_route
+        )
+        prompt_body = _agent_prompt_body(
+            speaker_block=speaker_block,
+            audio_block=audio_block,
+            specialist_block=specialist_block,
+            model_task=model_task,
+            display_ctx=display_ctx,
+            skill_catalog=skill_catalog,
+            memory_catalog=memory_catalog,
+            mcp_catalog=mcp_catalog,
+            not_to_do=not_to_do,
+            gui_tool=gui_tool,
+            recipe_handoff=recipe_handoff,
+            recipe_name=None if recipe_result is None else recipe_result.recipe.name,
+        )
+        from llm_trace import traced_responses_create
+
+        response = traced_responses_create(
+            client,
+            lane="agent",
+            model=model_for_request(
+                model,
+                has_image=input_has_image(
+                    _initial_api_input(prompt_body, handoff_shot_b64)
+                ),
+                provider=provider,
+            ),
+            tools=tools,
+            input=_initial_api_input(prompt_body, handoff_shot_b64),
+        )
+        return _run_agent_loop(
+            response=response,
+            max_steps=max_steps,
+            agent_id=agent_id,
+            log=log,
             provider=provider,
-        ),
-        tools=tools,
-        input=_initial_api_input(prompt_body, handoff_shot_b64),
-    )
-    return _run_agent_loop(
-        response=response,
-        max_steps=max_steps,
-        agent_id=agent_id,
-        log=log,
-        provider=provider,
-        client=client,
-        audio_client=audio_client,
-        desktop=desktop,
-        auto=auto,
-        voice=voice,
-        ask_user_bridge=ask_user_bridge,
-        message_inbox=message_inbox,
-        held_follow_ups=held_follow_ups,
-        model=model,
-        tools=tools,
-        task=task,
-    )
+            client=client,
+            audio_client=audio_client,
+            desktop=desktop,
+            auto=auto,
+            voice=voice,
+            ask_user_bridge=ask_user_bridge,
+            message_inbox=message_inbox,
+            held_follow_ups=held_follow_ups,
+            model=model,
+            tools=tools,
+            task=task,
+        )
+    finally:
+        reset_jev_session(jev_session_token)
 
 
 def _bootstrap_agent_run(
@@ -1673,9 +1774,9 @@ def _bootstrap_agent_run(
         memory_query=task,
         skill_detail="full",
         occupancy_detail="full",
+        task=task,
     )
     display_ctx = bundle.desktop_block()
-    skills = discover_skills()
     skill_catalog = bundle.skills
     memory_catalog = bundle.memories
     mcp_catalog = bundle.mcp
@@ -1694,12 +1795,13 @@ def _bootstrap_agent_run(
         task,
         {
             "display": display_ctx,
-            "skills": [s.name for s in skills],
+            "skills": list(bundle.skill_names),
             "voice": voice,
             "execution_route": (
                 {
                     "path": execution_route.path,
                     "lane": execution_route.lane,
+                    "difficulty": execution_route.difficulty,
                     "reason": execution_route.reason,
                 }
                 if execution_route is not None

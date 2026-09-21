@@ -117,7 +117,7 @@ class AudioSession:
         listen_prompt: str | None = None,
         quit_check: Callable[[], bool] | None = None,
     ) -> str | None:
-        """Wake word → one cloud STT utterance. Returns None if stopped or empty."""
+        """Wake word → one STT utterance (silence / over-and-out). Returns None if stopped or empty."""
 
         def _stop() -> bool:
             if listen_pending():
@@ -154,9 +154,16 @@ class AudioSession:
             return self._listen_shortcut(listen_prompt)
 
         if not self.wait_for_wake(should_stop=_stop, prompt=wake_prompt):
-            if consume_listen():
-                return self._listen_shortcut(listen_prompt)
-            return consume_utterance()
+            try:
+                from wake import wake_hit_pending
+
+                pending_wake = wake_hit_pending()
+            except Exception:
+                pending_wake = False
+            if not pending_wake:
+                if consume_listen():
+                    return self._listen_shortcut(listen_prompt)
+                return consume_utterance()
         if quit_check is not None and quit_check():
             return None
         hit = get_last_wake()
@@ -173,15 +180,7 @@ class AudioSession:
                 clear_last_speaker()
             except Exception:
                 pass
-            set_reply_sink("mac")
-            set_reply_tts(True)
-            set_turn_source("voice")
-            command = strip_wake_prefix(remainder).strip() or remainder
-            from latency_report import mark
-
-            mark(self.latency_trace_id, "speech_finished")
-            mark(self.latency_trace_id, "transcript_ready", metadata={"transcript_chars": len(command)})
-            return command
+            return self._arm_voice_turn(strip_wake_prefix(remainder).strip() or remainder)
         try:
             utterance = self.listen(listen_prompt or "Listening…")
         except Exception as e:
@@ -214,6 +213,12 @@ class AudioSession:
                 abandon_trace(self.latency_trace_id, reason="stt_failed")
                 self.latency_trace_id = None
                 return None
+        return self._arm_voice_turn(command)
+
+    def _arm_voice_turn(self, command: str) -> str | None:
+        command = (command or "").strip()
+        if not command:
+            return None
         set_reply_sink("mac")
         set_reply_tts(True)
         set_turn_source("voice")
@@ -221,7 +226,7 @@ class AudioSession:
 
         mark(self.latency_trace_id, "speech_finished")
         mark(self.latency_trace_id, "transcript_ready", metadata={"transcript_chars": len(command)})
-        return command or None
+        return command
 
     def _listen_shortcut(self, listen_prompt: str | None = None) -> str | None:
         """Capture a normal Jarvis command without requiring a wake word."""

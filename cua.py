@@ -234,7 +234,7 @@ def cmd_install() -> int:
     return 0
 
 
-def cmd_start(*, no_auto: bool = False, max_steps: int = 25) -> int:
+def cmd_start(*, no_auto: bool = False, max_steps: int = 25, pi: bool = False) -> int:
     pid = running_pid()
     if pid is not None:
         print(f"cua is already running (pid {pid})")
@@ -254,6 +254,8 @@ def cmd_start(*, no_auto: bool = False, max_steps: int = 25) -> int:
     cmd = [_python(), str(orch)]
     if not no_auto:
         cmd.append("--auto")
+    if pi:
+        cmd.append("--pi")
     if max_steps != 25:
         cmd.extend(["--max-steps", str(max_steps)])
 
@@ -529,9 +531,10 @@ def format_help() -> str:
 cua — personal computer-use agent (voice orchestrator + tools)
 
 DAEMON
-  cua start [--no-auto] [--max-steps N]
+  cua start [--no-auto] [--max-steps N] [--pi]
       Start the voice orchestrator in the background (logs: logs/cua.log).
       Installs a PATH shim on first run (~/.local/bin/cua).
+      ``--pi`` hides computer-use and serves the chat app in a browser.
   cua stop [--all]      Stop the orchestrator and leftover agent processes
                         (tray, phone gateway, chat). ``--all`` also stops
                         dictation.
@@ -540,7 +543,7 @@ DAEMON
   cua install           Install the cua shim onto PATH.
 
 VOICE (foreground — same orchestrator, attached terminal)
-  python orchestrator.py [--auto]
+  python orchestrator.py [--auto] [--pi]
   python agent.py --voice [--auto]
 
   Configure in .env (see README “Voice configuration”):
@@ -645,6 +648,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Do not pass --auto (computer agent will confirm each step)",
     )
     start_p.add_argument("--max-steps", type=int, default=25)
+    start_p.add_argument(
+        "--pi",
+        action="store_true",
+        help="Hide computer-use and serve the chat app in a browser",
+    )
 
     restart_p = sub.add_parser("restart", help="Stop, then start")
     restart_p.add_argument(
@@ -653,6 +661,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Do not pass --auto (computer agent will confirm each step)",
     )
     restart_p.add_argument("--max-steps", type=int, default=25)
+    restart_p.add_argument(
+        "--pi",
+        action="store_true",
+        help="Hide computer-use and serve the chat app in a browser",
+    )
 
     stop_p = sub.add_parser(
         "stop",
@@ -1039,7 +1052,7 @@ def _dispatch_speaker(args) -> int:
 
 def _cmd_restart(args) -> int:
     cmd_stop(all_procs=False)
-    return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps)
+    return cmd_start(no_auto=args.no_auto, max_steps=args.max_steps, pi=args.pi)
 
 
 def _cmd_face(args) -> int:
@@ -1064,7 +1077,7 @@ def _dispatch(args, parser: argparse.ArgumentParser) -> int:
     if args.command is None or args.command == "help":
         return cmd_help()
     actions = {
-        "start": lambda: cmd_start(no_auto=args.no_auto, max_steps=args.max_steps),
+        "start": lambda: cmd_start(no_auto=args.no_auto, max_steps=args.max_steps, pi=getattr(args, "pi", False)),
         "stop": lambda: cmd_stop(all_procs=bool(getattr(args, "all", False))),
         "status": cmd_status,
         "restart": lambda: _cmd_restart(args),

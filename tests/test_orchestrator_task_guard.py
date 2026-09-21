@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from orchestrator import (
     _completed_tasks_in_turn,
     _completed_task_match,
@@ -32,15 +34,24 @@ def test_distinct_leftover_is_not_blocked() -> None:
     assert _completed_task_match("Email the chart to Bharat", history) is None
 
 
+def test_computer_use_off_blocks_start_task() -> None:
+    with patch.dict("os.environ", {"COMPUTER_USE": "0"}, clear=False):
+        reason = _start_task_block_reason("Open Notes", [], sleeping=False)
+    assert reason is not None
+    assert "Computer-use is disabled" in reason
+
+
 def test_sleep_blocks_new_task() -> None:
-    reason = _start_task_block_reason("Open Notes", [], sleeping=True)
+    with patch.dict("os.environ", {"COMPUTER_USE": "1"}, clear=False):
+        reason = _start_task_block_reason("Open Notes", [], sleeping=True)
     assert reason is not None
     assert "Sleep mode" in reason
 
 
 def test_awake_duplicate_is_still_blocked() -> None:
     history = [{"task": "Open Notes", "result": "completed\nResult:\nOpened Notes."}]
-    reason = _start_task_block_reason("Please open Notes", history, sleeping=False)
+    with patch.dict("os.environ", {"COMPUTER_USE": "1"}, clear=False):
+        reason = _start_task_block_reason("Please open Notes", history, sleeping=False)
     assert reason is not None
     assert "already completed" in reason
 

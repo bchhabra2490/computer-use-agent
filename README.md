@@ -24,8 +24,9 @@ adapted for Windows and Linux.
 - Route requests through fast/slow paths and specialist execution lanes.
 - Learn reusable skills and recipes from completed or observed workflows.
 - Store personal, application, and screen memories.
-- Stream STT/TTS, support barge-in, and identify enrolled speakers.
+- Stream STT/TTS after a wake word, support barge-in, and identify enrolled speakers.
 - Save user-facing files under `~/Documents/Computer Use Agent/` by default.
+- Answer identity questions via the `who_am_i` tool (README-backed self-description).
 
 ## Architecture
 
@@ -84,6 +85,19 @@ the user's signed-in browser.
 
 ## Quick start
 
+### Raspberry Pi / headless (same orchestrator)
+
+Pi mode is `orchestrator.py` with computer-use hidden. The existing chat app is
+served in a browser (not a separate Pi page).
+
+```bash
+python orchestrator.py --auto --pi
+```
+
+Or `python pi_agent.py --env .env.pi` (same command). See [Raspberry Pi setup](RASPBERRY_PI.md).
+
+### Desktop
+
 ```bash
 git clone https://github.com/bchhabra2490/computer-use-agent.git
 cd computer-use-agent
@@ -91,6 +105,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+```
+
+`requirements.txt` pulls core plus optional providers. For a smaller install:
+
+```bash
+pip install -r requirements-core.txt
+# then, as needed:
+pip install -r requirements-optional.txt
 ```
 
 Add at least `OPENAI_API_KEY` to `.env`, then start the background orchestrator:
@@ -124,10 +146,11 @@ cua status
 cua stop
 cua sleep on                      # temporarily ignore wake words
 cua sleep off
-cua chat on                       # open the Electron chat app
+cua chat on                       # open the chat app (Electron, or browser with --pi)
 cua face jarvis                   # select a face overlay
 
 python orchestrator.py --auto     # foreground voice mode
+python orchestrator.py --auto --pi  # same, no computer-use; chat in the browser
 python agent.py "Open Notes"      # typed task with confirmations
 python agent.py --auto "Open Notes and write today's date"
 ```
@@ -300,12 +323,55 @@ their project-managed locations.
 - Review observer drafts before accepting generated executable skills. Memories
   and validated graph claims are saved automatically.
 
+## Jev fast computer-use loop
+
+Optional TypeSafe **Jev** policy for a few high-confidence desktop actions.
+It is **not** a planner replacement: the existing generative agent still handles
+planning, free-form text, ambiguity, recovery, and completion verification.
+
+Jev only chooses among **locally generated grounded actions**. This loop does
+**not** send screenshots to Jev; it sends structured Accessibility state (with
+secure-field values redacted). Local gates enforce confidence, probability
+margin, stale-element freshness, and the existing safety confirmations.
+
+- **Shadow** (`JEV_FAST_LOOP=1`, `JEV_SHADOW_MODE=1`): evaluate and log only;
+  the vision agent still executes.
+- **Active** (`JEV_FAST_LOOP=1`, `JEV_SHADOW_MODE=0`): execute supported
+  high-confidence actions (AX press/click, focus, keys, bounded scroll, wait,
+  conservative typing); fall back on low confidence, narrow margin, stuck UI,
+  no progress, timeouts, or unsupported ops.
+- **Agent tool** (`JEV_CHOOSE_TOOL=1`, default): mid-task `jev_choose` — the
+  agent supplies options; Jev returns an advisory pick (no auto-click).
+- **Off** (`JEV_FAST_LOOP=0`): no pre-agent loop; `jev_choose` may still be on.
+
+Set `TYPESAFE_API_KEY` locally — never paste it into chat or commit it.
+Install the optional SDK with `pip install 'typesafe-sdk>=0.7.0,<1'`.
+
+```bash
+# Shadow (recommended first)
+export TYPESAFE_API_KEY="..."
+export JEV_FAST_LOOP=1
+export JEV_SHADOW_MODE=1
+
+# Active
+export TYPESAFE_API_KEY="..."
+export JEV_FAST_LOOP=1
+export JEV_SHADOW_MODE=0
+
+# Disable immediately
+export JEV_FAST_LOOP=0
+```
+
+Architecture, metrics, and fallback details: [`jev/README.md`](jev/README.md).
+Config knobs are listed in `.env.example` (`JEV_*`, `TYPESAFE_API_KEY`).
+
 ## Project map
 
 | Area | Main files |
 |---|---|
 | Voice orchestration | `orchestrator.py`, `stt/`, `tts/`, `wake.py` |
 | Computer execution | `agent.py`, `actions.py`, `accessibility.py` |
+| Jev fast policy (optional) | `jev/`, `jev/README.md` |
 | Routing and evaluation | `execution_router.py`, `evaluator.py` |
 | Browser | `browser_data.py`, `webmcp.py`, `webmcp_chromium.mjs` |
 | Integrations | `mcp_client.py`, `mcp_auth.py`, `mcp.json` |

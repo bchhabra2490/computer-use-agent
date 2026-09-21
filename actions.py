@@ -513,6 +513,20 @@ class DesktopController:
         scale_y = self.screen_h / mh
         return round(x * scale_x), round(y * scale_y)
 
+    def _action_xy(self, action: dict) -> tuple[int, int]:
+        """Resolve click/scroll coordinates.
+
+        When ``absolute`` is true, ``x``/``y`` are already Cocoa / logical
+        desktop points (e.g. from Accessibility frames) and only need
+        multi-monitor remapping into pyautogui space.
+        """
+        x, y = action["x"], action["y"]
+        if action.get("absolute"):
+            if self._monitors:
+                return to_pyautogui_coords(float(x), float(y), self._monitors)
+            return round(float(x)), round(float(y))
+        return self._to_screen_coords(x, y)
+
     def capture_screenshot(self) -> bytes:
         """Capture attached displays, downscale, return PNG bytes.
 
@@ -600,7 +614,7 @@ class DesktopController:
         atype = action["type"]
 
         if atype == "click":
-            x, y = self._to_screen_coords(action["x"], action["y"])
+            x, y = self._action_xy(action)
             button = action.get("button", "left")
             keys = [normalize_key(k) for k in action.get("keys") or []]
             try:
@@ -612,15 +626,15 @@ class DesktopController:
                     pyautogui.keyUp(k)
 
         elif atype == "double_click":
-            x, y = self._to_screen_coords(action["x"], action["y"])
+            x, y = self._action_xy(action)
             pyautogui.doubleClick(x, y)
 
         elif atype == "move":
-            x, y = self._to_screen_coords(action["x"], action["y"])
+            x, y = self._action_xy(action)
             pyautogui.moveTo(x, y)
 
         elif atype == "scroll":
-            x, y = self._to_screen_coords(action["x"], action["y"])
+            x, y = self._action_xy(action)
             pyautogui.moveTo(x, y)
             # Model scroll_* are in screenshot pixels. Positive scroll_y means
             # scroll the page down (wheel down) — invert for Quartz/pyautogui
